@@ -518,3 +518,71 @@ test('cofnięcie ruchu za zgodą rywala; strona statystyk z kluczem', async ({ b
   await expect(S.page.locator('table').first()).toContainText('Klub cofania');
   await A.ctx.close(); await B.ctx.close(); await S.ctx.close();
 });
+
+test('panel trenera (podgląd na żywo, PGN), rewanż, strona dla klubów', async ({ browser }) => {
+  // trener zakłada pokój ze strony dla klubów
+  const T = await phone(browser);
+  await T.page.goto(FRONT + '/kluby.html');
+  await expect(T.page.getByRole('heading', { level: 1 })).toContainText('prawdziwej szachownicy');
+  await T.page.getByRole('link', { name: 'Załóż pokój klubu' }).first().click();
+  await expect(T.page.getByRole('heading', { name: 'Nowy pokój' })).toBeVisible();
+  await T.page.locator('#room-name').fill('Szkółka Gambit');
+  await T.page.locator('#room-nick').fill('Trener');
+  await T.page.getByRole('button', { name: 'Utwórz pokój' }).click();
+  const invite = await T.page.locator('#invite-link').inputValue();
+  await T.page.getByRole('button', { name: 'Gotowe' }).click();
+  await expect(T.page.getByRole('button', { name: 'Otwórz panel trenera' })).toBeVisible();
+
+  const A = await phone(browser);
+  const B = await phone(browser);
+  for (const [P, nick] of [[A, 'Ala'], [B, 'Bob']]) {
+    await P.page.goto(invite);
+    await P.page.locator('#room-nick').fill(nick);
+    await P.page.getByRole('button', { name: 'Dołącz' }).click();
+    await expect(P.page.getByRole('button', { name: 'Otwórz panel trenera' })).toHaveCount(0); // tylko założyciel
+  }
+  await A.page.locator('button.tab[data-action="mode"][data-id="member"]').click();
+  await A.page.locator('button.chip[data-action="opponent"]', { hasText: 'Bob' }).click();
+  await A.page.locator('button.chip[data-action="color"][data-id="white"]').click();
+  await A.page.getByRole('button', { name: 'Wyślij wyzwanie' }).click();
+  await B.page.getByRole('button', { name: 'Przyjmij' }).click();
+  await play(A.page, 'e4');
+  await expect(B.page.locator('.lm-san')).toHaveText('e4');
+
+  // trener: trwająca partia → podgląd na żywo
+  await T.page.getByRole('button', { name: 'Otwórz panel trenera' }).click();
+  await expect(T.page.locator('.row', { hasText: 'Ala – Bob' })).toBeVisible();
+  await T.page.locator('.row', { hasText: 'Ala – Bob' }).click();
+  await expect(T.page.locator('.status')).toContainText('Podgląd trenera');
+  await expect(T.page.locator('.mini-board')).toBeVisible();
+  await expect(T.page.locator('#entry button.key')).toHaveCount(0);
+  await play(B.page, 'e5');
+  await expect(T.page.locator('.lm-san')).toHaveText('e5');
+
+  // koniec partii → rewanż (kolory zamienione)
+  await B.page.getByRole('button', { name: 'Poddaj' }).click();
+  await B.page.locator('.dialog').getByRole('button', { name: 'Poddaj' }).click();
+  await expect(A.page.locator('.result-title')).toHaveText('Wygrana');
+  await A.page.getByRole('button', { name: 'Rewanż' }).click();
+  await expect(A.page.getByText('Czekam, aż Bob przyjmie rewanż')).toBeVisible();
+  await B.page.getByRole('button', { name: 'Wróć do listy partii' }).click();
+  await B.page.getByRole('button', { name: 'Przyjmij' }).click();
+  await expect(B.page.locator('.status')).toHaveText('Twój ruch'); // Bob ma teraz białe
+  await expect(A.page.locator('.player.me')).toContainText('czarne');
+
+  // trener: wyniki graczy i pobranie PGN
+  await T.page.getByRole('button', { name: 'Wróć do panelu trenera' }).click().catch(async () => {
+    await T.page.getByRole('button', { name: '← Partie' }).click();
+  });
+  await T.page.locator('button[data-action="coach-refresh"]').click();
+  const row = T.page.locator('.coach-table tr', { hasText: 'Ala' });
+  await expect(row).toContainText('1');
+  const [dl] = await Promise.all([
+    T.page.waitForEvent('download'),
+    T.page.getByRole('button', { name: 'Pobierz wszystkie partie (PGN)' }).click(),
+  ]);
+  const pgn = await (await import('node:fs/promises')).readFile(await dl.path(), 'utf8');
+  expect(pgn).toContain('[White "Ala"]');
+  expect(pgn).toContain('1. e4 e5');
+  for (const P of [T, A, B]) await P.ctx.close();
+});

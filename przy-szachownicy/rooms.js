@@ -333,6 +333,10 @@ export class RoomsProvider {
 
   async ongoing() { return (await this.req('ongoing')).games; }
   async history() { return (await this.req('history')).games; }
+  // panel trenera (założyciel prywatnego pokoju) i zapis partii
+  async coachPanel() { return this.req('coachPanel'); }
+  async gamePgn(id) { return this.req('gamePgn', { gameId: id }); }
+  async roomPgn() { return (await this.req('roomPgn')).pgn; }
 
   startEvents(onEvent) {
     this.onEvent = onEvent;

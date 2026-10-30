@@ -211,6 +211,12 @@ async function bootRoom() {
   const transfer = (hash.get('przenies') || params.get('przenies') || '').trim().toLowerCase();
   const reset = (hash.get('reset') || params.get('reset') || '').trim();
   const clean = () => history.replaceState(null, '', location.pathname);
+  if (location.hash === '#nowy-pokoj') { // ze strony dla klubów: od razu zakładanie pokoju
+    clean();
+    S.view = 'room-new';
+    render();
+    return true;
+  }
   if (reset) {
     clean();
     S.accountForm = { ...S.accountForm, mode: 'reset', token: reset, next: 'public' };
@@ -568,7 +574,7 @@ function applyUci(chess, uci) {
 }
 
 function gameOver(G) { return !!G.state && G.state.status !== 'started' && G.state.status !== 'created'; }
-function myTurn(G) { return !!G.chess && !gameOver(G) && G.chess.turn() === G.myColor[0]; }
+function myTurn(G) { return !G.spectator && !!G.chess && !gameOver(G) && G.chess.turn() === G.myColor[0]; }
 
 function openGame(id, colorHint) {
   closeGame();
@@ -619,7 +625,8 @@ function onGameMsg(G, msg) {
   switch (msg.type) {
     case 'full':
       G.full = msg;
-      G.myColor = resolveMyColor(G, msg);
+      G.spectator = !!msg.spectator; // trener ogląda cudzą partię
+      G.myColor = G.spectator ? 'white' : resolveMyColor(G, msg);
       G.state = msg.state;
       G.clockAt = performance.now();
       rebuild(G);
@@ -636,7 +643,7 @@ function onGameMsg(G, msg) {
       rebuild(G);
       if (G.history.length > prevPly) {
         const last = G.history[G.history.length - 1];
-        if (last.color !== G.myColor[0]) {
+        if (!G.spectator && last.color !== G.myColor[0]) {
           speak(speechForMove(last));
           vibrate([80, 60, 80]);
           beep();
@@ -847,6 +854,7 @@ function render() {
   else if (S.view === 'account') html = viewAccount();
   else if (S.view === 'lobby') html = viewLobby();
   else if (S.view === 'game') html = viewGame();
+  else if (S.view === 'coach') html = viewCoach();
   html += viewWaiting() + viewModal();
   app.innerHTML = html;
 
@@ -921,7 +929,7 @@ function viewStart() {
       <p class="muted small">Partie i ranking na Twoim koncie Lichess. Losowi rywale: rapid i dłużej.</p>
       <div class="stack">${viewLichessLogin(false)}</div>
     </section>
-    <p class="center-text small"><button class="link" data-action="demo">Wypróbuj z komputerem (demo)</button></p>
+    <p class="center-text small"><button class="link" data-action="demo">Wypróbuj z komputerem (demo)</button> · <a href="kluby.html">Dla klubów i trenerów</a></p>
   </main>`;
 }
 
@@ -1106,6 +1114,9 @@ function viewLobby() {
 
     ${viewNewGame()}
 
+    ${rooms && isCoach() ? `<section class="card"><h2>Panel trenera</h2>
+      <p class="muted small">Jako założyciel pokoju widzisz partie wszystkich członków: podgląd na żywo, wyniki graczy, zapis partii do analizy.</p>
+      <button class="btn small primary" data-action="coach-open">Otwórz panel trenera</button></section>` : ''}
     ${rooms ? viewRoomRanking() + viewRoomHistory() : viewBanner()}
   </main>`;
 }
@@ -1156,7 +1167,8 @@ function viewRoomHistory() {
       return `<li>
         <span class="hist-players">${esc(g.white)}${diff(g.diffW)} – ${esc(g.black)}${diff(g.diffB)}</span>
         <span class="hist-res">${res}</span>
-        <span class="muted small">${esc(SPEED_PL[g.speed] || g.speed)} ${esc(g.label)} · ${esc(statusPl(g.status))}${g.rated ? '' : ' · towarzyska'} · ${new Date(g.endedAt).toLocaleDateString('pl-PL')}</span>
+        <span class="muted small">${esc(SPEED_PL[g.speed] || g.speed)} ${esc(g.label)} · ${esc(statusPl(g.status))}${g.rated ? '' : ' · towarzyska'} · ${new Date(g.endedAt).toLocaleDateString('pl-PL')}${(isCoach() || g.whiteId === S.user?.id || g.blackId === S.user?.id) && g.plies
+    ? ` · <button class="link small" data-action="game-analysis" data-id="${esc(g.id)}">analiza</button> · <button class="link small" data-action="game-pgn" data-id="${esc(g.id)}">PGN</button>` : ''}</span>
       </li>`;
     }).join('')}</ul>`;
   }
@@ -1321,11 +1333,12 @@ function viewGame() {
   const meta = `${SPEED_PL[G.full.speed] || G.full.speed} ${tc}${G.full.rated ? ' · rankingowa' : ''}`;
   const over = gameOver(G);
 
-  // ostatni ruch rywala
+  // ostatni ruch rywala (trener: ostatni ruch w ogóle)
+  const spec = !!G.spectator;
   let lastOpp = null;
-  for (let i = G.history.length - 1; i >= 0; i--) { if (G.history[i].color !== G.myColor[0]) { lastOpp = { m: G.history[i], idx: i }; break; } }
+  for (let i = G.history.length - 1; i >= 0; i--) { if (spec || G.history[i].color !== G.myColor[0]) { lastOpp = { m: G.history[i], idx: i }; break; } }
   const lastBlock = lastOpp
-    ? `<div class="lm-label">Ruch rywala · ${Math.floor(lastOpp.idx / 2) + 1}.${lastOpp.m.color === 'b' ? '..' : ''}</div>
+    ? `<div class="lm-label">${spec ? 'Ostatni ruch' : 'Ruch rywala'} · ${Math.floor(lastOpp.idx / 2) + 1}.${lastOpp.m.color === 'b' ? '..' : ''}</div>
        <div class="lm-san">${esc(fmtSan(lastOpp.m.san))}</div>
        <div class="lm-desc">${esc(describeMove(lastOpp.m))}</div>
        <button class="link small" data-action="repeat">Powtórz na głos</button>`
@@ -1335,21 +1348,22 @@ function viewGame() {
 
   let status;
   if (over) status = '';
+  else if (spec) status = `<div class="status">Podgląd trenera · ruch ${G.chess?.turn() === 'w' ? 'białych' : 'czarnych'}</div>`;
   else if (myTurn(G)) status = `<div class="status on">Twój ruch</div>`;
   else status = `<div class="status">Ruch rywala — czekaj</div>`;
 
-  const oppDraw = G.state && !over && (G.myColor === 'white' ? G.state.bdraw : G.state.wdraw);
-  const myDraw = G.state && !over && (G.myColor === 'white' ? G.state.wdraw : G.state.bdraw);
+  const oppDraw = !spec && G.state && !over && (G.myColor === 'white' ? G.state.bdraw : G.state.wdraw);
+  const myDraw = !spec && G.state && !over && (G.myColor === 'white' ? G.state.wdraw : G.state.bdraw);
   const notices = [];
   if (!G.conn) notices.push(`<div class="notice">Brak połączenia — łączę ponownie…</div>`);
   if (oppDraw) notices.push(`<div class="notice">Rywal proponuje remis. <span class="row-actions"><button class="btn small primary" data-action="draw-yes">Przyjmij</button><button class="btn small" data-action="draw-no">Odrzuć</button></span></div>`);
   if (myDraw) notices.push(`<div class="notice muted">Zaproponowałeś remis.</div>`);
-  const canTakeback = !!S.provider?.takeback;
+  const canTakeback = !spec && !!S.provider?.takeback;
   const oppTb = canTakeback && G.state && !over && (G.myColor === 'white' ? G.state.btakeback : G.state.wtakeback);
   const myTb = canTakeback && G.state && !over && (G.myColor === 'white' ? G.state.wtakeback : G.state.btakeback);
   if (oppTb) notices.push(`<div class="notice">Rywal prosi o cofnięcie swojego ostatniego ruchu. <span class="row-actions"><button class="btn small primary" data-action="takeback-yes">Zgódź się</button><button class="btn small" data-action="takeback-no">Odmów</button></span></div>`);
   if (myTb) notices.push(`<div class="notice muted">Poprosiłeś o cofnięcie ruchu — czekam na zgodę rywala. <button class="btn small" data-action="takeback-cancel">Wycofaj prośbę</button></div>`);
-  if (G.opponentGone && !over) {
+  if (G.opponentGone && !over && !spec) {
     const s = G.opponentGone.claimWinInSeconds;
     notices.push(s === 0
       ? `<div class="notice">Rywal opuścił partię. <span class="row-actions"><button class="btn small primary" data-action="claim-win">Odbierz zwycięstwo</button><button class="btn small" data-action="claim-draw">Ogłoś remis</button></span></div>`
@@ -1357,7 +1371,7 @@ function viewGame() {
   }
 
   const myMoves = G.history.filter((m) => m.color === G.myColor[0]).length;
-  const actions = over ? '' : `
+  const actions = over || spec ? '' : `
     <div class="g-actions">
       ${canTakeback && myMoves > 0 && !myTb ? `<button class="btn small" data-action="takeback-ask">Cofnij mój ruch</button>` : ''}
       ${myDraw ? '' : `<button class="btn small" data-action="offer-draw" ${G.history.length < 2 ? 'disabled' : ''}>Zaproponuj remis</button>`}
@@ -1382,12 +1396,12 @@ function viewGame() {
     ${notices.join('')}
 
     <div class="player me">
-      <span class="pname">Ty <span class="muted">· ${G.myColor === 'white' ? 'białe' : 'czarne'}</span></span>
+      <span class="pname">${spec ? esc(playerLabel(me)) : 'Ty'} <span class="muted">· ${G.myColor === 'white' ? 'białe' : 'czarne'}</span></span>
       <span class="clock" id="clock-me"></span>
     </div>
     ${status}
 
-    <section id="entry">${over ? viewResult(G) : viewEntry()}</section>
+    <section id="entry">${over ? viewResult(G) : spec ? `<div class="spectate">${boardHtml()}</div>` : viewEntry()}</section>
 
     ${actions}
 
@@ -1488,10 +1502,129 @@ function viewResult(G) {
       <div class="result-title">${esc(r.title)}</div>
       ${r.sub ? `<div class="muted">${esc(r.sub)}</div>` : ''}
       <div class="stack">
-        <button class="btn primary" data-action="back">Wróć do listy partii</button>
+        ${G.spectator ? '' : `<button class="btn primary" data-action="rematch">Rewanż</button>`}
+        <button class="btn ${G.spectator ? 'primary' : ''}" data-action="back">${G.spectator ? 'Wróć do panelu trenera' : 'Wróć do listy partii'}</button>
         ${url ? `<a class="btn" href="${esc(url)}" target="_blank" rel="noopener">Analiza partii na Lichess</a>` : ''}
+        ${!url && S.provider.gamePgn ? `<button class="btn" data-action="game-analysis" data-id="${esc(G.id)}">Analiza partii na Lichess</button>
+          <button class="link small" data-action="game-pgn" data-id="${esc(G.id)}">Pobierz zapis partii (PGN)</button>` : ''}
       </div>
     </div>`;
+}
+
+// --- rewanż, zapis partii, analiza ----------------------------------------------
+// Rewanż: to samo tempo i rodzaj partii, kolory zamienione.
+async function rematch() {
+  unlockMedia();
+  const G = S.game;
+  if (!G?.full) return;
+  const f = G.full;
+  const opp = G.myColor === 'white' ? f.black : f.white;
+  const color = G.myColor === 'white' ? 'black' : 'white';
+  const opts = f.clock ? { time: f.clock.initial / 60000, increment: f.clock.increment / 1000 } : { days: f.daysPerTurn };
+  opts.rated = !!f.rated;
+  opts.color = color;
+  closeGame();
+  S.view = 'lobby';
+  S.waiting = { text: 'Wysyłanie propozycji rewanżu…', kind: 'pending' };
+  render();
+  try {
+    if (opp.ai) {
+      const { gameId } = await S.provider.challengeAI({ ...opts, level: opp.ai });
+      S.waiting = null;
+      openGame(gameId, color);
+      return;
+    }
+    const h = await S.provider.challenge(opp.id || opp.name, opts);
+    if (h.correspondence) {
+      S.waiting = null; toast(`Rewanż wysłany do ${opp.name}. Partia pojawi się na liście po przyjęciu.`, 6000); render(); return;
+    }
+    waitFor(h, `Czekam, aż ${opp.name} przyjmie rewanż`);
+  } catch (e) {
+    S.waiting = null; toast(e.message || 'Nie udało się wysłać rewanżu.'); render();
+  }
+}
+
+function downloadText(filename, text) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], { type: 'application/x-chess-pgn' }));
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+}
+
+async function downloadGamePgn(id) {
+  try {
+    const p = await S.provider.gamePgn(id);
+    downloadText(`partia-${id}.pgn`, p.pgn);
+  } catch (e) { toast(e.message); }
+}
+
+// Analiza w Lichess: ruchy w adresie (lichess.org/analysis/pgn/e4_e5_Nf3), bez logowania.
+async function openAnalysis(id) {
+  const w = window.open('about:blank', '_blank'); // otwarte od razu po kliknięciu — nie zablokuje się
+  try {
+    const p = await S.provider.gamePgn(id);
+    const url = 'https://lichess.org/analysis/pgn/' + p.san.map(encodeURIComponent).join('_');
+    if (w) { w.opener = null; w.location.href = url; } else location.href = url;
+  } catch (e) { if (w) w.close(); toast(e.message); }
+}
+
+// --- panel trenera (założyciel prywatnego pokoju) -----------------------------------------
+function isCoach() { return !!S.provider?.features?.rooms && !S.provider.isPublic && S.provider.me?.role === 'owner'; }
+
+async function loadCoach() {
+  S.coach = { ...(S.coach || {}), loading: true };
+  render();
+  try {
+    const d = await S.provider.coachPanel();
+    S.coach = { data: d, loading: false };
+    if (!S.roomHistory) S.roomHistory = await S.provider.history();
+  } catch (e) { S.coach = { loading: false, error: e.message }; }
+  if (S.view === 'coach') render();
+}
+
+function viewCoach() {
+  const c = S.coach || {};
+  const d = c.data;
+  const ago = (t) => (t ? new Date(t).toLocaleDateString('pl-PL') : '—');
+  const ongoing = d?.ongoing?.length
+    ? d.ongoing.map((g) => `
+      <button class="row" data-action="coach-watch" data-id="${esc(g.id)}">
+        <span class="row-main">${esc(g.white)} – ${esc(g.black)}</span>
+        <span class="row-sub">${esc(SPEED_PL[g.speed] || g.speed)} ${esc(g.label)} · ${g.plies} półruchów${g.rated ? '' : ' · towarzyska'}</span>
+        <span class="pill">Podgląd</span>
+      </button>`).join('')
+    : `<p class="muted small">Nikt teraz nie gra.</p>`;
+  const players = d ? `
+    <div class="scroll"><table class="coach-table">
+      <tr><th>Gracz</th><th>Partie</th><th>W</th><th>R</th><th>P</th><th>Ostatnia</th></tr>
+      ${d.members.map((m) => `<tr><td><span class="dot ${m.online ? 'on' : 'off'}"></span>${esc(m.nick)}${m.role === 'owner' ? ' <span class="muted small">(trener)</span>' : ''}</td>
+        <td>${m.games}</td><td>${m.wins}</td><td>${m.draws}</td><td>${m.losses}</td><td>${ago(m.last)}</td></tr>`).join('')}
+    </table></div>
+    <p class="muted small">W — wygrane, R — remisy, P — przegrane. Liczą się zakończone partie (rankingowe i towarzyskie).</p>` : '';
+  const hist = (S.roomHistory || []).filter((g) => g.status !== 'aborted' && g.status !== 'noStart');
+  const games = hist.length ? `<ul class="hist-list">${hist.map((g) => `
+      <li>
+        <span class="hist-players">${esc(g.white)} – ${esc(g.black)}</span>
+        <span class="hist-res">${RESULT_PL[g.winner] || '½–½'}</span>
+        <span class="muted small">${esc(g.label)} · ${g.plies} półruchów · ${new Date(g.endedAt).toLocaleDateString('pl-PL')}
+          · <button class="link small" data-action="game-analysis" data-id="${esc(g.id)}">analiza</button>
+          · <button class="link small" data-action="game-pgn" data-id="${esc(g.id)}">PGN</button></span>
+      </li>`).join('')}</ul>` : `<p class="muted small">Jeszcze nie rozegrano żadnej partii.</p>`;
+  return `
+  <main class="lobby">
+    <header class="g-top"><button class="btn small" data-action="coach-close">← Pokój</button>
+      <div class="g-meta">Panel trenera · ${esc(S.provider.roomName)}</div>
+      <button class="icon-btn" data-action="coach-refresh" aria-label="Odśwież">↻</button></header>
+    ${c.error ? `<p class="error">${esc(c.error)}</p>` : ''}
+    ${c.loading && !d ? '<p class="muted">Wczytywanie…</p>' : ''}
+    <section class="card"><h2>Trwające partie</h2>${ongoing}
+      <p class="muted small">Podgląd na żywo: ruchy, zegary i pozycja. Gracze nie widzą, że oglądasz.</p></section>
+    <section class="card"><h2>Gracze</h2>${players}</section>
+    <section class="card"><h2>Rozegrane partie</h2>${games}
+      ${hist.length ? `<button class="btn small" data-action="room-pgn">Pobierz wszystkie partie (PGN)</button>` : ''}</section>
+  </main>`;
 }
 
 function viewHistory(G) {
@@ -1818,7 +1951,23 @@ app.addEventListener('click', async (e) => {
     case 'accept': await acceptChallenge(id); break;
     case 'decline': await declineChallenge(id); break;
     case 'open-game': openGame(id); break;
-    case 'back': closeGame(); S.view = 'lobby'; render(); refreshOngoing(); break;
+    case 'back': {
+      const wasSpectator = !!S.game?.spectator;
+      closeGame();
+      if (wasSpectator) { S.view = 'coach'; loadCoach(); break; }
+      S.view = 'lobby'; render(); refreshOngoing();
+      break;
+    }
+    case 'rematch': await rematch(); break;
+    case 'game-analysis': await openAnalysis(id); break;
+    case 'game-pgn': await downloadGamePgn(id); break;
+    case 'room-pgn':
+      try { downloadText(`partie-${S.provider.roomCode}.pgn`, await S.provider.roomPgn()); } catch (err) { toast(err.message); }
+      break;
+    case 'coach-open': S.view = 'coach'; await loadCoach(); break;
+    case 'coach-refresh': S.roomHistory = null; await loadCoach(); break;
+    case 'coach-close': S.view = 'lobby'; render(); break;
+    case 'coach-watch': openGame(id); break;
     case 'key': pressKey(el.dataset.k); break;
     case 'backspace': backspace(); break;
     case 'send': await sendMove(); break;

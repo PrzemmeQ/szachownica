@@ -569,3 +569,56 @@ test('statystyki: klucz wymagany, liczniki partii i graczy', async () => {
   assert.equal(typeof s.successThreshold, 'boolean');
   ctx.A.close(); ctx.B.close();
 });
+
+// --- panel trenera i PGN ---------------------------------------------------------------
+test('panel trenera: założyciel widzi statystyki, ogląda cudze partie, pobiera PGN; zwykły członek nie', async () => {
+  const c = await api(srv.base, 'POST', '/api/rooms', { name: 'Szkółka PGN', nick: 'Trener' });
+  const T = new Client(srv.base, c.data.room, c.data.token);
+  await T.connect();
+  const ja = await api(srv.base, 'POST', `/api/rooms/${c.data.room}/join`, { nick: 'Jaś' });
+  const ma = await api(srv.base, 'POST', `/api/rooms/${c.data.room}/join`, { nick: 'Małgosia' });
+  const J = new Client(srv.base, c.data.room, ja.data.token); await J.connect();
+  const M = new Client(srv.base, c.data.room, ma.data.token); await M.connect();
+  const ch = await J.req('challenge', { to: ma.data.memberId, time: 10, increment: 0, rated: true, color: 'white' });
+  const acc = await M.req('accept', { id: ch.id });
+  const gameId = acc.gameId;
+  await J.req('watch', { gameId }); await M.req('watch', { gameId });
+
+  // trener ogląda na żywo
+  let r = await T.req('watch', { gameId });
+  assert.ok(r.ok, r.error);
+  const full = await T.gameMsg(gameId, 'full');
+  assert.equal(full.spectator, true);
+  let mark = T.mark();
+  await J.req('move', { gameId, uci: 'e2e4', ply: 0 });
+  const st = await T.gameMsg(gameId, 'state', mark);
+  assert.deepEqual(st.state.moves, ['e2e4']);
+  r = await T.req('coachPanel');
+  assert.equal(r.ongoing.length, 1);
+  assert.equal(r.ongoing[0].white, 'Jaś');
+
+  // zwykły członek nie ma panelu ani cudzych partii
+  const ob = await api(srv.base, 'POST', `/api/rooms/${c.data.room}/join`, { nick: 'Obcy' });
+  const O = new Client(srv.base, c.data.room, ob.data.token); await O.connect();
+  assert.equal((await O.req('coachPanel')).ok, false);
+  assert.equal((await O.req('watch', { gameId })).ok, false);
+  assert.equal((await O.req('gamePgn', { gameId })).ok, false);
+
+  await M.req('move', { gameId, uci: 'e7e5', ply: 1 });
+  await J.req('move', { gameId, uci: 'g1f3', ply: 2 });
+  mark = J.mark();
+  await M.req('resign', { gameId });
+  await J.gameMsg(gameId, 'state', mark);
+
+  const p = await J.req('gamePgn', { gameId });
+  assert.deepEqual(p.san, ['e4', 'e5', 'Nf3']);
+  assert.match(p.pgn, /\[White "Jaś"\]/);
+  assert.match(p.pgn, /\[Result "1-0"\]/);
+  assert.match(p.pgn, /1\. e4 e5 2\. Nf3 1-0$/);
+  const panel = await T.req('coachPanel');
+  const jas = panel.members.find((m) => m.nick === 'Jaś');
+  assert.equal(jas.games, 1); assert.equal(jas.wins, 1);
+  const all = await T.req('roomPgn');
+  assert.match(all.pgn, /Małgosia/);
+  for (const x of [T, J, M, O]) x.close();
+});

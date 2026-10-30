@@ -343,7 +343,7 @@ export class Room extends DurableObject {
     for (const ws of this.openSockets()) {
       const a = this.att(ws);
       if (!a.memberId || !(a.watch || []).includes(g.id)) continue;
-      if (a.memberId !== g.white_id && a.memberId !== g.black_id) continue;
+      if (a.memberId !== g.white_id && a.memberId !== g.black_id && !this.isCoach(a.memberId)) continue;
       if (onlyMember && a.memberId !== onlyMember) continue;
       this.send(ws, { t: 'game', id: g.id, msg });
     }
@@ -550,6 +550,19 @@ export class Room extends DurableObject {
       case 'ongoing':
         return { games: this.runningGames().filter((g) => this.colorOf(g, me)).map((g) => this.gameInfo(g, me)) };
       case 'history': return { games: this.history(this.isPublic() ? me : null) };
+      case 'gamePgn': {
+        const { g } = this.viewableGame(me, msg.gameId);
+        return this.pgnOf(g);
+      }
+      case 'coachPanel':
+        if (!this.isCoach(me)) fail('Panel trenera ma tylko założyciel pokoju.');
+        return this.coachPanel();
+      case 'roomPgn':
+        if (!this.isCoach(me)) fail('Zapis wszystkich partii pobiera tylko założyciel pokoju.');
+        return {
+          pgn: this.sql.exec("SELECT * FROM games WHERE status NOT IN ('started', 'aborted', 'noStart') ORDER BY ended_at DESC LIMIT 300")
+            .toArray().map((g) => { g.moves = g.moves ? g.moves.split(' ') : []; return this.pgnOf(g).pgn; }).join('\n\n'),
+        };
       case 'setPassword':
         if (!this.isPublic()) fail('Konto ustawiasz w poczekalni ogólnej.');
         return this.acctSetPassword(me, msg, a.th);
@@ -598,6 +611,50 @@ export class Room extends DurableObject {
       default: fail('Nieznane polecenie.');
     }
     return {};
+  }
+
+  // Zapis partii w PGN (do analizy w Lichess, ChessBase itp.) i ruchy w notacji SAN.
+  pgnOf(g) {
+    const chess = new Chess();
+    const san = [];
+    for (const m of g.moves) {
+      try { san.push(chess.move({ from: m.slice(0, 2), to: m.slice(2, 4), promotion: m[4] }).san); } catch { break; }
+    }
+    const result = g.status === 'started' ? '*' : g.winner === 'white' ? '1-0' : g.winner === 'black' ? '0-1'
+      : ENDED_UNRATED.has(g.status) ? '*' : '1/2-1/2';
+    const date = new Date(g.created_at).toISOString().slice(0, 10).replace(/-/g, '.');
+    const tag = (k, v) => `[${k} "${String(v ?? '').replace(/["\\]/g, '')}"]`;
+    const head = [
+      tag('Event', this.kv('name') || 'Przy Szachownicy'), tag('Site', 'Przy Szachownicy'), tag('Date', date),
+      tag('White', this.member(g.white_id)?.nick || '?'), tag('Black', this.member(g.black_id)?.nick || '?'),
+      tag('Result', result), tag('WhiteElo', g.rating_w ?? ''), tag('BlackElo', g.rating_b ?? ''),
+      tag('TimeControl', `${Math.round(g.time_ms / 1000)}+${Math.round(g.inc_ms / 1000)}`), tag('Termination', g.status),
+    ];
+    const body = san.map((s, i) => (i % 2 === 0 ? `${i / 2 + 1}. ${s}` : s)).join(' ');
+    return { pgn: `${head.join('\n')}\n\n${body}${body ? ' ' : ''}${result}`, san };
+  }
+
+  // Panel trenera: kto ile gra i z jakim skutkiem, trwające partie.
+  coachPanel() {
+    const online = this.onlineIds();
+    const stats = new Map();
+    for (const m of this.allMembers()) stats.set(m.id, { id: m.id, nick: m.nick, role: m.role, online: online.has(m.id), lastSeen: m.last_seen, games: 0, wins: 0, draws: 0, losses: 0, last: null });
+    for (const g of this.sql.exec("SELECT * FROM games WHERE status NOT IN ('started', 'aborted', 'noStart')").toArray()) {
+      for (const [id, color] of [[g.white_id, 'white'], [g.black_id, 'black']]) {
+        const s = stats.get(id);
+        if (!s) continue;
+        s.games++;
+        if (!g.winner) s.draws++; else if (g.winner === color) s.wins++; else s.losses++;
+        if (!s.last || g.ended_at > s.last) s.last = g.ended_at;
+      }
+    }
+    return {
+      members: [...stats.values()].sort((a, b) => b.games - a.games || a.nick.localeCompare(b.nick, 'pl')),
+      ongoing: this.runningGames().map((g) => ({
+        id: g.id, white: this.member(g.white_id)?.nick || '?', black: this.member(g.black_id)?.nick || '?',
+        plies: g.moves.length, speed: g.speed, label: `${g.time_ms / 60000}+${g.inc_ms / 1000}`, rated: !!g.rated,
+      })),
+    };
   }
 
   // memberId: tylko partie tego gracza (poczekalnia ogólna), null: wszystkie partie pokoju
@@ -743,14 +800,25 @@ export class Room extends DurableObject {
     return { g, color };
   }
 
+  // Trener = założyciel prywatnego pokoju: widzi partie wszystkich członków (podgląd na żywo, zapis PGN).
+  isCoach(memberId) { return !this.isPublic() && this.member(memberId)?.role === 'owner'; }
+  // Partia, którą wolno oglądać: własna albo (dla trenera) każda w pokoju.
+  viewableGame(me, id) {
+    const g = this.getGame(String(id ?? ''));
+    if (!g) fail('Nie znaleziono partii.');
+    const color = this.colorOf(g, me);
+    if (!color && !this.isCoach(me)) fail('To nie Twoja partia.');
+    return { g, color };
+  }
+
   cmdWatch(ws, a, gameId) {
-    const { g, color } = this.myGame(a.memberId, gameId);
+    const { g, color } = this.viewableGame(a.memberId, gameId);
     const watch = [...new Set([...(a.watch || []), g.id])].slice(-5);
     ws.serializeAttachment({ ...a, watch });
     const now = Date.now();
     if (g.status === 'started') this.checkClock(g, now);
-    this.send(ws, { t: 'game', id: g.id, msg: { ...this.fullOf(g), myColor: color } });
-    if (g.status === 'started') {
+    this.send(ws, { t: 'game', id: g.id, msg: { ...this.fullOf(g), myColor: color, spectator: !color } });
+    if (g.status === 'started' && color) {
       const gone = this.goneInfo(g, color === 'white' ? g.black_id : g.white_id, now);
       if (gone) this.send(ws, { t: 'game', id: g.id, msg: gone });
     }
