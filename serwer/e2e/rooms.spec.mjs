@@ -93,6 +93,18 @@ async function createClub(page, name, nick) {
   await page.getByRole('button', { name: 'Gotowe' }).click();
   return { code, link };
 }
+// Konto i powrót do menu (do klubu dołącza się kontem).
+async function registerToMenu(page, nick) {
+  await register(page, nick);
+  await page.getByRole('button', { name: 'Menu' }).click();
+}
+// Założyciel wyłącza zatwierdzanie (nowi wchodzą od razu po kodzie) — w testach, które nie sprawdzają próśb.
+async function approvalOff(page) {
+  await page.getByRole('button', { name: 'Otwórz panel trenera' }).click();
+  await page.locator('input[data-action="approval"]').uncheck();
+  await expect(page.locator('#toast')).toContainText('wchodzą od razu');
+  await page.getByRole('button', { name: '← Klub' }).click();
+}
 // Dołącza z linku ?klub=KOD (kod sprawdzany od razu).
 async function joinByLink(page, link, nick, password) {
   await page.goto(link);
@@ -119,7 +131,7 @@ async function resign(page) {
   await page.locator('.dialog').getByRole('button', { name: 'Poddaj' }).click();
 }
 
-test('klub z kodem: błędny kod, dołączenie kontem, partia rankingowa 10+5, wyjście rywala z odliczaniem, wspólny ranking, Moje kluby', async ({ browser }) => {
+test('klub z kodem: błędny kod, prośba i zatwierdzenie, partia rankingowa 10+5, wyjście rywala z odliczaniem, wspólny ranking, Moje kluby', async ({ browser }) => {
   const A = await phone(browser);
   const B = await phone(browser);
   const nickA = uniq('Ania'); const nickB = uniq('Bart');
@@ -142,6 +154,20 @@ test('klub z kodem: błędny kod, dołączenie kontem, partia rankingowa 10+5, w
   await expect(B.page.getByText('Klub Klub Hetman')).toBeVisible();
   await expect(B.page.locator('#room-nick')).toHaveValue(nickB);
   await B.page.getByRole('button', { name: 'Dołącz' }).click();
+
+  // nowy klub zatwierdza członków: prośba → „oczekuje” → założyciel przyjmuje
+  await expect(B.page.getByRole('heading', { name: 'Prośba wysłana' })).toBeVisible();
+  await B.page.getByRole('button', { name: 'Wróć do menu' }).click();
+  const pend = B.page.locator('button[data-action="open-club"]', { hasText: 'Klub Hetman' });
+  await expect(pend).toContainText('czeka na zatwierdzenie');
+  await pend.click();
+  await expect(B.page.locator('#toast')).toContainText('Czekasz na zatwierdzenie');
+  await expect(A.page.locator('.req-note')).toContainText('1');
+  await A.page.locator('.req-note').getByRole('button', { name: 'Zobacz' }).click();
+  await A.page.locator('#membership .friend-row', { hasText: nickB }).getByRole('button', { name: 'Przyjmij' }).click();
+  await expect(A.page.locator('#membership')).toContainText('Brak oczekujących próśb');
+  await A.page.getByRole('button', { name: '← Klub' }).click();
+  await pend.click();
   await expect(B.page.locator('.who')).toContainText('Klub Hetman');
   await expect(B.page.locator('.rank-list')).toContainText(nickA);
 
@@ -449,11 +475,13 @@ test('konto: formularz z zapisem hasła, klub na koncie, logowanie na nowym tele
 test('wpisywanie notacją: bez podpowiedzi domyślnie, tryb nauki w towarzyskiej, Nbd2, polskie litery, „skąd → dokąd”', async ({ browser }) => {
   const A = await phone(browser);
   const B = await phone(browser);
-  await A.page.goto(FRONT + '/');
-  const { link } = await createClub(A.page, 'Notacja', 'Biały');
-  await joinByLink(B.page, link, 'Czarny');
-  await expect(A.page.locator('input[data-action="rated"]')).toBeDisabled(); // bez kont tylko towarzyskie
-  await challengeWhite(A.page, B.page, 'Czarny');
+  const nickB = uniq('Czarny');
+  await registerToMenu(A.page, uniq('Bialy'));
+  const { link } = await createClub(A.page, 'Notacja');
+  await approvalOff(A.page);
+  await registerToMenu(B.page, nickB);
+  await joinByLink(B.page, link);
+  await challengeWhite(A.page, B.page, nickB, { rated: false }); // tryb nauki działa tylko w towarzyskich
   const W = A.page; const Bl = B.page;
 
   // domyślnie bez podpowiedzi
@@ -519,10 +547,13 @@ test('wpisywanie notacją: bez podpowiedzi domyślnie, tryb nauki w towarzyskiej
 test('cofnięcie ruchu: komunikat o odmowie, limit próśb, zgoda; strona statystyk z kluczem', async ({ browser }) => {
   const A = await phone(browser);
   const B = await phone(browser);
-  await A.page.goto(FRONT + '/');
-  const { link } = await createClub(A.page, 'Klub cofania', 'Ala');
-  await joinByLink(B.page, link, 'Olek');
-  await challengeWhite(A.page, B.page, 'Olek');
+  const nickB = uniq('Olek');
+  await registerToMenu(A.page, uniq('Ala'));
+  const { link } = await createClub(A.page, 'Klub cofania');
+  await approvalOff(A.page);
+  await registerToMenu(B.page, nickB);
+  await joinByLink(B.page, link);
+  await challengeWhite(A.page, B.page, nickB, { rated: false });
   const W = A.page; const Bl = B.page;
   await playMoves(W, Bl, ['e4', 'e5', 'Nc3']); // pomyłka: chciał Nf3
 
@@ -570,52 +601,76 @@ test('cofnięcie ruchu: komunikat o odmowie, limit próśb, zgoda; strona statys
   await A.ctx.close(); await B.ctx.close(); await S.ctx.close();
 });
 
-test('panel trenera: hasło klubu, admin, podgląd na żywo, PGN, usuwanie członka; strona dla klubów', async ({ browser }) => {
+
+test('panel trenera: konto przy zakładaniu, hasło klubu, prośby, admin, podgląd na żywo, PGN, usuwanie i zaproszenie po nicku', async ({ browser }) => {
   const T = await phone(browser);
+  const nickT = uniq('Trener'); const nickA = uniq('Ala'); const nickB = uniq('Bob');
   await T.page.goto(FRONT + '/kluby.html');
   await expect(T.page.getByRole('heading', { level: 1 })).toContainText('prawdziwej szachownicy');
   await T.page.getByRole('link', { name: 'Załóż klub' }).first().click();
+  // bez konta najpierw rejestracja, potem od razu zakładanie klubu
+  await expect(T.page.getByRole('heading', { name: 'Załóż konto' })).toBeVisible();
+  await expect(T.page.locator('.lead')).toContainText('Do klubu potrzebne jest konto');
+  await T.page.locator('#room-nick').fill(nickT);
+  await T.page.locator('#acct-pass').fill(PASS);
+  await T.page.getByRole('button', { name: 'Załóż konto' }).click();
   await expect(T.page.getByRole('heading', { name: 'Nowy klub' })).toBeVisible();
   await T.page.locator('#room-name').fill('Szkółka Gambit');
-  await T.page.locator('#room-nick').fill('Trener');
   await T.page.getByRole('button', { name: 'Załóż klub' }).click();
   const code = (await T.page.locator('#club-code-show').textContent()).trim();
   expect(code).toMatch(/^SZKOL-[A-Z0-9]{5}$/); // polskie litery bez ogonków
   const link = await T.page.locator('#invite-link').inputValue();
+  await expect(T.page.locator('.dialog')).toContainText('czekają na zatwierdzenie');
 
   // hasło klubu oprócz kodu
   await T.page.getByRole('button', { name: 'Ustaw hasło klubu' }).click();
   await T.page.locator('#prompt-input').fill('gambit1');
   await T.page.locator('.dialog').getByRole('button', { name: 'Zapisz' }).click();
   await expect(T.page.locator('#toast')).toContainText('Ustawiono hasło klubu');
-  await expect(T.page.getByRole('button', { name: 'Zmień lub usuń hasło klubu' })).toBeVisible();
   await T.page.getByRole('button', { name: 'Gotowe' }).click();
-  await expect(T.page.getByRole('button', { name: 'Otwórz panel trenera' })).toBeVisible();
 
+  // uczniowie: link bez konta → rejestracja → kod czeka → hasło → prośba
   const A = await phone(browser);
   const B = await phone(browser);
-  await joinByLink(A.page, link, 'Ala', 'zle-haslo');
+  await A.page.goto(link);
+  await expect(A.page.getByRole('heading', { name: 'Załóż konto' })).toBeVisible();
+  await A.page.locator('#room-nick').fill(nickA);
+  await A.page.locator('#acct-pass').fill(PASS);
+  await A.page.getByRole('button', { name: 'Załóż konto' }).click();
+  await expect(A.page.getByText('Klub Szkółka Gambit')).toBeVisible();
+  await A.page.locator('#club-pass').fill('zle-haslo');
+  await A.page.getByRole('button', { name: 'Dołącz' }).click();
   await expect(A.page.locator('.error')).toContainText('Pozostało prób');
   await A.page.locator('#club-pass').fill('gambit1');
   await A.page.getByRole('button', { name: 'Dołącz' }).click();
-  await joinByLink(B.page, link, 'Bob', 'gambit1');
+  await expect(A.page.getByRole('heading', { name: 'Prośba wysłana' })).toBeVisible();
+  await registerToMenu(B.page, nickB);
+  await joinByLink(B.page, link, undefined, 'gambit1');
+  await expect(B.page.getByRole('heading', { name: 'Prośba wysłana' })).toBeVisible();
+
+  // trener przyjmuje obu
+  await expect(T.page.locator('.req-note')).toContainText('2');
+  await T.page.getByRole('button', { name: 'Otwórz panel trenera' }).click();
+  for (const n of [nickA, nickB]) await T.page.locator('#membership .friend-row', { hasText: n }).getByRole('button', { name: 'Przyjmij' }).click();
+  await expect(T.page.locator('#membership')).toContainText('Brak oczekujących próśb');
   for (const P of [A, B]) {
+    await P.page.getByRole('button', { name: 'Wróć do menu' }).click();
+    await P.page.locator('button[data-action="open-club"]', { hasText: 'Szkółka Gambit' }).click();
     await expect(P.page.locator('.who')).toContainText('Szkółka Gambit');
     await expect(P.page.getByRole('button', { name: 'Otwórz panel trenera' })).toHaveCount(0);
   }
 
   // założyciel mianuje Alę adminem → Ala widzi panel
-  await T.page.getByRole('button', { name: 'Otwórz panel trenera' }).click();
-  await T.page.locator('.coach-table tr', { hasText: 'Ala' }).getByRole('button', { name: 'zrób adminem' }).click();
-  await expect(T.page.locator('.coach-table tr', { hasText: 'Ala' })).toContainText('admin');
+  await T.page.locator('.coach-table tr', { hasText: nickA }).getByRole('button', { name: 'zrób adminem' }).click();
+  await expect(T.page.locator('.coach-table tr', { hasText: nickA })).toContainText('admin');
   await expect(A.page.getByRole('button', { name: 'Otwórz panel trenera' })).toBeVisible();
 
   // partia Ala–Bob, trener ogląda na żywo
-  await challengeWhite(A.page, B.page, 'Bob');
+  await challengeWhite(A.page, B.page, nickB);
   await play(A.page, 'e4');
   await expect(B.page.locator('.lm-san')).toHaveText('e4');
   await T.page.locator('button[data-action="coach-refresh"]').click();
-  await T.page.locator('.row', { hasText: 'Ala – Bob' }).click();
+  await T.page.locator('.row', { hasText: `${nickA} – ${nickB}` }).click();
   await expect(T.page.locator('.status')).toContainText('Podgląd trenera');
   await expect(T.page.locator('.mini-board')).toBeVisible();
   await expect(T.page.locator('#entry button.key')).toHaveCount(0);
@@ -627,24 +682,38 @@ test('panel trenera: hasło klubu, admin, podgląd na żywo, PGN, usuwanie czło
   // wyniki graczy i PGN
   await T.page.getByRole('button', { name: '← Partie' }).click();
   await T.page.locator('button[data-action="coach-refresh"]').click();
-  await expect(T.page.locator('.coach-table tr', { hasText: 'Ala' })).toContainText('1');
+  await expect(T.page.locator('.coach-table tr', { hasText: nickA })).toContainText('1');
   const [dl] = await Promise.all([
     T.page.waitForEvent('download'),
     T.page.getByRole('button', { name: 'Pobierz wszystkie partie (PGN)' }).click(),
   ]);
   const pgn = await (await import('node:fs/promises')).readFile(await dl.path(), 'utf8');
-  expect(pgn).toContain('[White "Ala"]');
+  expect(pgn).toContain(`[White "${nickA}"]`);
   expect(pgn).toContain('1. e4 e5');
 
-  // admin usuwa Boba → Bob wraca do ekranu startowego z komunikatem
+  // admin usuwa Boba → Bob wraca do startu; z konta nie wróci kodem
   await A.page.getByRole('button', { name: 'Wróć do listy partii' }).click();
   await A.page.getByRole('button', { name: 'Otwórz panel trenera' }).click();
-  await expect(A.page.locator('.coach-table tr', { hasText: 'Trener' }).getByRole('button', { name: 'usuń' })).toHaveCount(0);
-  await A.page.locator('.coach-table tr', { hasText: 'Bob' }).getByRole('button', { name: 'usuń' }).click();
+  await expect(A.page.locator('.coach-table tr', { hasText: nickT }).getByRole('button', { name: 'usuń' })).toHaveCount(0);
+  await A.page.locator('.coach-table tr', { hasText: nickB }).getByRole('button', { name: 'usuń' }).click();
   await A.page.locator('.dialog').getByRole('button', { name: 'Usuń' }).click();
   await expect(B.page.locator('#toast')).toContainText('usunięty z tego klubu');
   await expect(B.page.getByRole('button', { name: /Szybka gra/ })).toBeVisible();
-  await expect(A.page.locator('.coach-table tr', { hasText: 'Bob' })).toHaveCount(0);
+  await expect(A.page.locator('#membership')).toContainText(nickB); // na liście zablokowanych
+  await joinByLink(B.page, link, undefined, 'gambit1');
+  await expect(B.page.locator('.error')).toContainText('usunięty z tego klubu');
+
+  // zaproszenie po nicku zdejmuje blokadę: Bob wchodzi z „Moich klubów” bez kodu
+  await A.page.locator('#invite-nick').fill(nickB.toLowerCase());
+  await A.page.getByRole('button', { name: 'Zaproś' }).click();
+  await expect(A.page.locator('#toast')).toContainText('Zaproszono');
+  await B.page.getByRole('button', { name: '← Wróć' }).click();
+  await B.page.getByRole('button', { name: /Szybka gra/ }).click(); // odświeża „Moje kluby” z serwera
+  await B.page.getByRole('button', { name: 'Menu' }).click();
+  const inv = B.page.locator('button[data-action="open-club"]', { hasText: 'Szkółka Gambit' });
+  await expect(inv).toContainText('zaproszenie');
+  await inv.click();
+  await expect(B.page.locator('.who')).toContainText('Szkółka Gambit');
 
   // zmiana kodu: stary kod przestaje działać
   await T.page.getByRole('button', { name: '← Klub' }).click();
@@ -653,6 +722,7 @@ test('panel trenera: hasło klubu, admin, podgląd na żywo, PGN, usuwanie czło
   await T.page.locator('.dialog').getByRole('button', { name: 'Zmień kod' }).click();
   await expect(T.page.locator('#club-code-show')).not.toHaveText(code);
   const C = await phone(browser);
+  await registerToMenu(C.page, uniq('Cez'));
   await C.page.goto(link);
   await expect(C.page.locator('.error')).toContainText('Nie ma klubu o takim kodzie');
   for (const P of [T, A, B, C]) await P.ctx.close();

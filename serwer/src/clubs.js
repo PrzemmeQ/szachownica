@@ -48,7 +48,7 @@ export const clubMethods = {
     return code;
   },
 
-  // --- blokada: klucz = konto (a:id) albo urządzenie (d:id) ---
+  // --- blokada: klucz = konto (a:id); d:id zostało po dawnym dołączaniu bez konta ---
   lockState(key) {
     return this.sql.exec('SELECT * FROM code_locks WHERE key = ?', key).toArray()[0] || { key, stage: 0, fails: 0, banned_until: 0 };
   },
@@ -92,11 +92,10 @@ export const clubMethods = {
   },
 
   // Sprawdzenie kodu przed dołączeniem (ekran „Dołącz do klubu”): nazwa i czy potrzebne hasło.
-  async clubLookup(body, ip) {
-    const account = body.accountToken ? await this.acctVerify(body.accountToken) : null;
-    const key = this.lockKey(account, body.deviceId);
+  async clubLookup(body) {
+    const account = await this.needAccount(body.accountToken);
+    const key = this.lockKey(account);
     this.lockCheck(key);
-    if (!account) await this.softLimit(ip);
     const code = normalizeCode(body.code);
     const row = CLUB_CODE_RE.test(code) && this.sql.exec('SELECT * FROM room_dir WHERE code = ?', code).toArray()[0];
     if (!row) this.wrongCode(key);
@@ -105,29 +104,29 @@ export const clubMethods = {
   },
 
   // Dołączenie kodem (i hasłem, jeśli klub je ma). Pokój sam sprawdza kod i hasło.
-  async clubJoin(body, ip) {
-    const account = body.accountToken ? await this.acctVerify(body.accountToken) : null;
-    const key = this.lockKey(account, body.deviceId);
+  // Dołączenie kodem (i hasłem, jeśli klub je ma). Pokój sam sprawdza kod i hasło;
+  // przy włączonym zatwierdzaniu zwraca { pending } — klub trafia do „Moich klubów” jako oczekujący.
+  async clubJoin(body) {
+    const account = await this.needAccount(body.accountToken);
+    const key = this.lockKey(account);
     this.lockCheck(key);
-    if (!account) await this.softLimit(ip);
     const code = normalizeCode(body.code);
     const row = CLUB_CODE_RE.test(code) && this.sql.exec('SELECT * FROM room_dir WHERE code = ?', code).toArray()[0];
     if (!row) this.wrongCode(key);
     const res = await this.callRoomRaw(row.room_id, 'join', {
-      code, password: body.password, nick: body.nick, accountId: account?.id || null, accountNick: account?.nick || null,
+      code, password: body.password, nick: body.nick, accountId: account.id, accountNick: account.nick,
     });
     const data = await res.json().catch(() => ({}));
     if (res.status === 403 && data.wrongPassword) this.wrongCode(key);
     if (!res.ok) this.fail(data.error || 'Nie udało się dołączyć.');
     this.lockSuccess(key);
-    if (account) this.acctAddRoom(account.id, row.room_id, row.name);
+    this.acctAddRoom(account.id, row.room_id, row.name, data.pending ? 'pending' : 'member');
     return { room: row.room_id, code, ...data };
   },
-
-  // Łagodny limit dla graczy bez konta: 30 nieudanych/udanych prób z jednej sieci na godzinę.
-  async softLimit(ip) {
-    const limited = await this.takeLimit('clubjoin', ip);
-    if (limited) this.fail('Z tej sieci było zbyt wiele prób dołączenia. Spróbuj za godzinę albo zaloguj się na konto.');
+  async needAccount(token) {
+    const account = token ? await this.acctVerify(token) : null;
+    if (!account) this.fail('Do klubu dołączasz z kontem — zaloguj się albo załóż konto.');
+    return account;
   },
 
   // Krótki, 6-cyfrowy kod przeniesienia na inne urządzenie (łatwy do przepisania, np. na iPhonie).

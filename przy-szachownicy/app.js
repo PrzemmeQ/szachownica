@@ -5,6 +5,7 @@ import { DemoProvider } from './demo.js';
 import {
   RoomsProvider, roomsEnabled, savedAccount, savedClubs, savedClub, myClubs, createRoom, lookupClub, joinClub,
   claimTransfer, claimTransferCode, registerAccount, loginAccount, requestPasswordReset, resetPassword, restoreRoom,
+  setAccountRooms,
 } from './rooms.js';
 import {
   sanToPl, describeMove, speechForMove, statusPl, SPEED_PL, formatMs, PROMO_PIECES,
@@ -217,8 +218,9 @@ async function bootRoom() {
   const transfer = (hash.get('przenies') || '').trim();
   const reset = (hash.get('reset') || '').trim();
   const clean = () => history.replaceState(null, '', location.pathname);
-  if (location.hash === '#nowy-pokoj') { // ze strony dla klubów: od razu zakładanie klubu
+  if (location.hash === '#nowy-pokoj') { // ze strony dla klubów: od razu zakładanie klubu (najpierw konto)
     clean();
+    if (!savedAccount()) { openAccount('register', 'room-new'); return true; }
     S.view = 'room-new';
     render();
     return true;
@@ -326,10 +328,18 @@ function goMenu() {
 // Wejście do klubu z listy „Moje kluby”: z tego urządzenia albo (po zalogowaniu) przypięty do konta.
 async function openClub(room) {
   S.startError = '';
-  let c = savedClub(room);
+  // zaproszenie / oczekująca prośba: zawsze przez serwer (stary klucz z urządzenia mógł wygasnąć)
+  const st = myClubs().find((x) => x.room === room)?.status || 'member';
+  let c = st === 'member' ? savedClub(room) : null;
   if (!c) {
     S.waiting = { text: 'Otwieram klub…', kind: 'pending' }; render();
-    try { c = await restoreRoom(room); } catch (e) { S.waiting = null; toast(e.message, 5000); render(); return; }
+    try { c = await restoreRoom(room); } catch (e) {
+      S.waiting = null;
+      toast(e.message, 5000);
+      if (e.status === 404) setAccountRooms((savedAccount()?.rooms || []).filter((r) => r.room !== room)); // już nie należy
+      render();
+      return;
+    }
     S.waiting = null;
   }
   await enterWith(new RoomsProvider(c));
@@ -357,6 +367,11 @@ async function submitRoom() {
 
 // Dołączanie kodem: najpierw sprawdzenie kodu (nazwa klubu, czy jest hasło), potem nick/hasło.
 async function openClubJoin(code) {
+  if (!savedAccount()) { // do klubu dołącza się kontem; kod czeka do końca rejestracji/logowania
+    S.pendingClubCode = code || '';
+    openAccount('register', 'club-join');
+    return;
+  }
   S.joinRoom = { code: code || '', name: null, needsPassword: false, error: '', checked: false };
   S.view = 'club-join';
   render();
@@ -387,7 +402,9 @@ async function submitJoin() {
   S.waiting = { text: 'Dołączam…', kind: 'pending' }; render();
   try {
     const saved = await joinClub(j.code, nick, password);
-    S.waiting = null; S.joinRoom = null; S.startError = '';
+    S.waiting = null; S.startError = '';
+    if (saved.pending) { j.sent = true; render(); return; } // prośba czeka na założyciela/admina
+    S.joinRoom = null;
     await enterWith(new RoomsProvider(saved));
   } catch (e) {
     S.waiting = null; j.error = e.message; render();
@@ -446,6 +463,7 @@ async function submitAccount(kind) {
     S.roomForm.nick = r.saved.nick;
     if (f.next === 'public') { await enterWith(new RoomsProvider(r.saved)); return; }
     if (f.next === 'room-new') { S.view = 'room-new'; render(); return; }
+    if (f.next === 'club-join') { const code = S.pendingClubCode || ''; S.pendingClubCode = ''; await openClubJoin(code); return; }
     S.view = 'start';
     toast(kind === 'register' ? `Konto ${r.saved.nick} założone.` : `Zalogowano jako ${r.saved.nick}.`);
     render();
@@ -491,10 +509,29 @@ function onProviderEvent(ev) {
         : 'Sesja Lichess wygasła — zaloguj się ponownie.', 6000);
       logout();
       break;
-    case 'members':
+    case 'members': {
       if (S.provider?.me) S.user = { ...S.user, ratings: roomRatings(S.provider.me.ratings) };
+      // nowa prośba o dołączenie — założyciel/admin słyszy sygnał
+      const reqs = S.provider?.room?.requests || 0;
+      if (reqs > (S.lastRequests || 0) && !quiet) { toast(`Nowa prośba o dołączenie do klubu (${reqs}).`, 5000); beep(); }
+      S.lastRequests = reqs;
+      if (S.view === 'coach' && reqs !== S.coachReqs) loadCoach();
       if (S.view === 'lobby' || S.view === 'coach') render();
       break;
+    }
+    case 'myRooms':
+      if (S.view === 'start' || S.view === 'lobby') render();
+      break;
+    case 'clubStatus': {
+      const msgs = {
+        approved: `Przyjęto Cię do klubu „${ev.name}”. Otworzysz go w „Moich klubach” (Menu).`,
+        rejected: `Prośba o dołączenie do klubu „${ev.name}” została odrzucona.`,
+        invited: `Zaproszenie do klubu „${ev.name}”. Wejdziesz przez „Moje kluby” (Menu).`,
+        expired: `Prośba o dołączenie do klubu „${ev.name}” wygasła.`,
+      };
+      if (msgs[ev.event]) { toast(msgs[ev.event], 7000); beep(); }
+      break;
+    }
     case 'seeks':
     case 'social':
       if (S.view === 'lobby') render();
@@ -1036,7 +1073,10 @@ function viewStart() {
     <section class="card mode-card">
       <h2>Moje kluby</h2>
       <div class="stack">${clubs.map((c) => `
-        <button class="btn big mode-btn" data-action="open-club" data-id="${esc(c.room)}">👥 ${esc(c.name)}<span class="mode-sub">${c.here ? `jako ${esc(c.nick)}` : 'zapisany na koncie — otwórz'}</span></button>`).join('')}
+        <button class="btn big mode-btn ${c.status === 'invited' ? 'primary' : ''}" data-action="open-club" data-id="${esc(c.room)}">${c.status === 'pending' ? '⏳' : c.status === 'invited' ? '✉️' : '👥'} ${esc(c.name)}<span class="mode-sub">${
+  c.status === 'pending' ? 'czeka na zatwierdzenie przez założyciela lub admina'
+    : c.status === 'invited' ? 'zaproszenie — kliknij, żeby wejść'
+      : c.here ? `jako ${esc(c.nick)}` : 'zapisany na koncie — otwórz'}</span></button>`).join('')}
       </div>
       <p class="small"><button class="link" data-action="club-join-open">Dołącz do innego klubu</button> · <button class="link" data-action="room-new">Załóż klub</button></p>
     </section>` : '';
@@ -1125,7 +1165,7 @@ function viewAccount() {
   return `
   <main class="start">${back}
     <h1>Załóż konto</h1>
-    <p class="lead">Konto trzyma ranking, znajomych i kluby — zalogujesz się na każdym urządzeniu. Bez konta Lichess.</p>
+    <p class="lead">${f.next === 'club-join' || f.next === 'room-new' ? 'Do klubu potrzebne jest konto — wystarczy nick i hasło, bez e-maila. ' : ''}Konto trzyma ranking, znajomych i kluby — zalogujesz się na każdym urządzeniu. Bez konta Lichess.</p>
     ${form('register', `
     <label class="field">Nick (widoczny dla innych graczy) ${NICK_INPUT(f.nick, 'np. Ania_K')}</label>
     ${pass('acct-pass', 'Hasło (min. 8 znaków)', 'new-password')}
@@ -1153,11 +1193,10 @@ function viewRoomNew() {
         <input id="room-name" type="text" maxlength="40" autocomplete="off" value="${esc(f.name)}" placeholder="np. Klub Hetman — środy">
       </label>
       <label class="field">Twój nick w klubie ${NICK_INPUT(f.nick || acct?.nick || '', 'np. Ania')}</label>
-      ${acct ? `<p class="muted small">Klub zapisze się na koncie ${esc(acct.nick)} — wrócisz do niego po zalogowaniu na innym urządzeniu.</p>`
-    : `<p class="note small">Bez konta partie w klubie są tylko towarzyskie. Rankingowe wymagają konta u obojga graczy.</p>`}
+      <p class="muted small">Klub zapisze się na koncie ${esc(acct?.nick || '')} — wrócisz do niego po zalogowaniu na innym urządzeniu.</p>
       <div class="stack"><button type="submit" class="btn primary big">Załóż klub</button></div>
     </form>
-    <p class="muted small">Dostaniesz kod klubu (np. HETMA-7Q4MX) i link do wysłania. Możesz później zmienić kod i dodać hasło klubu.</p>
+    <p class="muted small">Dostaniesz kod klubu (np. HETMA-7Q4MX) i link do wysłania. Nowi członkowie dołączają kontem i czekają na Twoje zatwierdzenie (można to wyłączyć). Możesz też dodawać graczy po nicku, zmienić kod i ustawić hasło klubu.</p>
     <p class="muted small">Zapisujemy tylko nick, przynależność do klubu i partie. ${PRIVACY_LINK}</p>
   </main>`;
 }
@@ -1167,11 +1206,21 @@ function viewClubJoin() {
   const j = S.joinRoom || { code: '' };
   const f = S.roomForm;
   const acct = savedAccount();
+  if (j.sent) {
+    return `
+  <main class="start">
+    <header class="g-top"><button class="btn small" data-action="to-start">← Menu</button></header>
+    <h1>Prośba wysłana</h1>
+    <p class="lead">Klub <strong>${esc(j.name)}</strong> przyjmuje nowych członków po zatwierdzeniu. Założyciel albo administrator zobaczy Twoją prośbę.</p>
+    <p class="note small">Klub czeka w „Moich klubach” z dopiskiem „czeka na zatwierdzenie”. Gdy Cię przyjmą, dostaniesz powiadomienie (jeśli masz otwartą aplikację) i klub otworzy się jednym kliknięciem. Prośba ważna 7 dni.</p>
+    <div class="stack"><button class="btn primary big" data-action="to-start">Wróć do menu</button></div>
+  </main>`;
+  }
   const step2 = j.checked ? `
       <p class="lead">Klub <strong>${esc(j.name)}</strong></p>
       <label class="field">Twój nick w klubie ${NICK_INPUT(f.nick || acct?.nick || '', 'np. Bartek')}</label>
       ${j.needsPassword ? `<label class="field">Hasło klubu <input id="club-pass" type="password" autocomplete="off"></label>` : ''}
-      ${acct ? `<p class="muted small">Klub zapisze się na koncie ${esc(acct.nick)}.</p>` : `<p class="muted small">Bez konta urządzenie zapamięta Cię w klubie; partie rankingowe wymagają konta.</p>`}
+      <p class="muted small">Klub zapisze się na koncie ${esc(acct?.nick || '')}. Jeśli klub zatwierdza nowych członków, najpierw poczekasz na zgodę założyciela albo admina.</p>
       <div class="stack"><button type="submit" class="btn primary big">Dołącz</button></div>` : `
       <div class="stack"><button type="submit" class="btn primary big">Dalej</button></div>`;
   return `
@@ -1268,6 +1317,8 @@ function viewLobby() {
 
     ${viewNewGame()}
 
+    ${rooms && isCoach() && S.provider.room?.requests ? `<div class="notice req-note">Prośby o dołączenie do klubu: <strong>${S.provider.room.requests}</strong>
+      <button class="btn small primary" data-action="coach-open">Zobacz</button></div>` : ''}
     ${rooms && S.provider.isPublic ? viewFriends() : ''}
     ${rooms && isCoach() ? `<section class="card"><h2>Panel trenera</h2>
       <p class="muted small">Jako ${S.provider.me?.role === 'owner' ? 'założyciel' : 'administrator'} klubu widzisz partie wszystkich członków (podgląd na żywo, wyniki, zapis do analizy) i zarządzasz członkami.</p>
@@ -1845,9 +1896,41 @@ async function loadCoach() {
   try {
     const d = await S.provider.coachPanel();
     S.coach = { data: d, loading: false };
+    S.coachReqs = d.requests?.length || 0;
     if (!S.roomHistory) S.roomHistory = await S.provider.history();
   } catch (e) { S.coach = { loading: false, error: e.message }; }
   if (S.view === 'coach') render();
+}
+
+// Panel: prośby o dołączenie, dodawanie po nicku, zaproszenia, zablokowani.
+function viewMembership(d, myRole) {
+  const day = (t) => new Date(t).toLocaleDateString('pl-PL');
+  const btn = (action, id, label, cls = '') => `<button class="btn small ${cls}" data-action="${action}" data-id="${esc(id)}">${label}</button>`;
+  const row = (nick, sub, actions) => `<li class="friend-row"><span class="friend-nick">${esc(nick)}${sub ? ` <span class="muted small">${sub}</span>` : ''}</span><span class="row-actions">${actions}</span></li>`;
+  const reqs = d.requests || [];
+  return `
+  <section class="card friends" id="membership">
+    <h2>Członkostwo</h2>
+    ${myRole === 'owner'
+    ? `<label class="toggle"><input type="checkbox" data-action="approval" ${d.approve ? 'checked' : ''}>
+        <span>Nowi członkowie wymagają zatwierdzenia<br><span class="muted small">Kod i hasło klubu pozwalają tylko poprosić o dołączenie; wpuszczasz Ty albo admin.</span></span></label>`
+    : `<p class="muted small">Zatwierdzanie nowych członków: ${d.approve ? 'włączone' : 'wyłączone'} (zmienia założyciel).</p>`}
+    <h3>Prośby o dołączenie${reqs.length ? ` (${reqs.length})` : ''}</h3>
+    ${reqs.length ? `<ul class="friend-list">${reqs.map((r) => row(r.nick,
+    `${day(r.at)}${r.wasRemoved ? ' · <span class="warn">wcześniej usunięty</span>' : ''}${r.rejected ? ` · odrzucona ${r.rejected}×` : ''}`,
+    btn('req-approve', r.id, 'Przyjmij', 'primary') + btn('req-reject', r.id, 'Odrzuć'))).join('')}</ul>`
+    : `<p class="muted small">Brak oczekujących próśb. Prośba wygasa po 7 dniach.</p>`}
+    <h3>Dodaj do klubu po nicku</h3>
+    <form data-form="invite-nick" class="inline-form" autocomplete="off">
+      <input id="invite-nick" type="text" maxlength="20" autocapitalize="off" spellcheck="false" placeholder="Nick konta" aria-label="Nick konta do zaproszenia">
+      <button type="submit" class="btn small">Zaproś</button>
+    </form>
+    <p class="muted small">Zaproszony wchodzi jednym kliknięciem w „Moich klubach”, bez kodu. Zaproszenie zdejmuje blokadę.</p>
+    ${d.invites?.length ? `<ul class="friend-list">${d.invites.map((i) => row(i.nick, `zaproszony ${day(i.at)}`, btn('invite-cancel', i.id, 'Anuluj'))).join('')}</ul>` : ''}
+    <h3>Zablokowani w klubie</h3>
+    ${d.blocked?.length ? `<ul class="friend-list">${d.blocked.map((b) => row(b.nick, b.reason === 'removed' ? 'usunięty z klubu' : 'prośby odrzucone 2×', btn('member-unblock', b.id, 'Odblokuj'))).join('')}</ul>`
+    : `<p class="muted small">Nikt nie jest zablokowany.</p>`}
+  </section>`;
 }
 
 function viewCoach() {
@@ -1876,11 +1959,11 @@ function viewCoach() {
   const players = d ? `
     <div class="scroll"><table class="coach-table">
       <tr><th>Gracz</th><th>Partie</th><th>W</th><th>R</th><th>P</th><th>Ostatnia</th><th></th></tr>
-      ${d.members.map((m) => `<tr><td><span class="dot ${m.online ? 'on' : 'off'}"></span>${esc(m.nick)}${ROLE_PL[m.role] ? ` <span class="muted small">(${ROLE_PL[m.role]})</span>` : ''}${m.account ? '' : ' <span class="muted small" title="bez konta — tylko partie towarzyskie">·bez konta</span>'}</td>
+      ${d.members.map((m) => `<tr><td><span class="dot ${m.online ? 'on' : 'off'}"></span>${esc(m.nick)}${ROLE_PL[m.role] ? ` <span class="muted small">(${ROLE_PL[m.role]})</span>` : ''}</td>
         <td>${m.games}</td><td>${m.wins}</td><td>${m.draws}</td><td>${m.losses}</td><td>${ago(m.last)}</td><td class="nowrap">${manage(m)}</td></tr>`).join('')}
     </table></div>
     <p class="muted small">W — wygrane, R — remisy, P — przegrane. Liczą się zakończone partie (rankingowe i towarzyskie).
-      ${myRole === 'owner' ? 'Admin może przeglądać partie i usuwać członków.' : ''} Usunięta osoba z kontem nie wróci do klubu z tego konta.</p>` : '';
+      ${myRole === 'owner' ? 'Admin może przeglądać partie i usuwać członków.' : ''} Usunięta osoba nie wróci do klubu, dopóki jej nie odblokujesz (lista „Zablokowani w klubie”).</p>` : '';
   const hist = (S.roomHistory || []).filter((g) => g.status !== 'aborted' && g.status !== 'noStart');
   const games = hist.length ? `<ul class="hist-list">${hist.map((g) => `
       <li>
@@ -1899,6 +1982,7 @@ function viewCoach() {
     ${c.loading && !d ? '<p class="muted">Wczytywanie…</p>' : ''}
     <section class="card"><h2>Trwające partie</h2>${ongoing}
       <p class="muted small">Podgląd na żywo: ruchy, zegary i pozycja. Gracze nie widzą, że oglądasz.</p></section>
+    ${d ? viewMembership(d, myRole) : ''}
     <section class="card"><h2>Gracze</h2>${players}</section>
     <section class="card"><h2>Rozegrane partie</h2>${games}
       ${hist.length ? `<button class="btn small" data-action="room-pgn">Pobierz wszystkie partie (PGN)</button>` : ''}</section>
@@ -2026,8 +2110,7 @@ function viewModal() {
           <button class="btn small" data-action="club-password">${room.hasPassword ? 'Zmień lub usuń hasło klubu' : 'Ustaw hasło klubu'}</button>
         </div>
         <p class="muted small">Po zmianie kodu stary kod i link przestają działać; obecni członkowie zostają.</p>` : ''}
-      ${acct && !me.linked ? `<h3>Konto</h3><p class="small">Zapisz ten klub na koncie ${esc(acct.nick)} — wrócisz do niego po zalogowaniu na innym urządzeniu, a partie rankingowe policzą się do Twojego rankingu.</p>
-        <div class="row-actions"><button class="btn small" data-action="link-account">Zapisz klub na koncie</button></div>` : ''}`;
+      <p class="small">Nowi członkowie: <strong>${room.approve ? 'czekają na zatwierdzenie' : 'wchodzą od razu po kodzie'}</strong>${me.role === 'owner' || me.role === 'admin' ? ' · <button class="link small" data-action="coach-open">prośby i zaproszenia w panelu trenera</button>' : ''}.</p>`;
     const forget = p.isPublic
       ? (me.hasPassword
         ? `<button class="btn small" data-action="account-logout">Wyloguj z tego urządzenia</button>`
@@ -2142,7 +2225,7 @@ app.addEventListener('click', async (e) => {
   const a = el.dataset.action;
   const id = el.dataset.id;
   if (a === 'overlay') { if (e.target === el) { S.modal = null; render(); } return; }
-  if (a === 'history-toggle' || a === 'room-history' || a === 'rated' || a === 'setting') return; // obsługiwane przez 'change'/'toggle'
+  if (a === 'history-toggle' || a === 'room-history' || a === 'rated' || a === 'setting' || a === 'approval') return; // obsługiwane przez 'change'/'toggle'
   switch (a) {
     case 'login':
       try { await new LichessProvider().login(); } catch (err) { S.startError = 'Nie udało się rozpocząć logowania: ' + err.message; render(); }
@@ -2170,7 +2253,11 @@ app.addEventListener('click', async (e) => {
       confirmModal({ title: 'Wylogować?', text: S.provider?.isDemo ? 'Zakończysz tryb demo.' : 'Aplikacja straci dostęp do Twojego konta Lichess na tym urządzeniu.', okLabel: 'Wyloguj', onOk: logout });
       break;
     // --- wariant B: pokoje ---
-    case 'room-new': S.startError = ''; S.view = 'room-new'; render(); break;
+    case 'room-new':
+      S.startError = '';
+      if (!savedAccount()) { openAccount('register', 'room-new'); break; } // klub zakłada się z kontem
+      S.view = 'room-new'; render();
+      break;
     case 'to-start': S.joinRoom = null; S.view = 'start'; render(); break;
     // szybka gra = poczekalnia ogólna; bez konta najpierw rejestracja
     case 'quick-play': {
@@ -2246,12 +2333,24 @@ app.addEventListener('click', async (e) => {
         onOk: async () => { try { await S.provider.leaveRoom(); toast('Opuszczono klub.'); goMenu(); } catch (err) { toast(err.message); } },
       });
       break;
+    case 'req-approve':
+      try { await S.provider.approveRequest(id); toast('Przyjęto do klubu.'); await loadCoach(); } catch (err) { toast(err.message, 5000); }
+      break;
+    case 'req-reject':
+      try { await S.provider.rejectRequest(id); toast('Odrzucono prośbę.'); await loadCoach(); } catch (err) { toast(err.message, 5000); }
+      break;
+    case 'member-unblock':
+      try { await S.provider.unblockMember(id); toast('Odblokowano. Może znów poprosić o dołączenie.'); await loadCoach(); } catch (err) { toast(err.message, 5000); }
+      break;
+    case 'invite-cancel':
+      try { await S.provider.cancelInvite(id); await loadCoach(); } catch (err) { toast(err.message, 5000); }
+      break;
     case 'member-role':
       try { await S.provider.setRole(id, el.dataset.role); await loadCoach(); } catch (err) { toast(err.message); }
       break;
     case 'member-remove':
       confirmModal({
-        title: `Usunąć ${el.dataset.nick} z klubu?`, text: 'Ta osoba zostanie wylogowana z klubu. Jeśli ma konto, nie wróci z niego nawet znając kod (bez konta mogłaby dołączyć ponownie — wtedy zmień kod klubu). Jej partie zostają w historii.',
+        title: `Usunąć ${el.dataset.nick} z klubu?`, text: 'Ta osoba zostanie wylogowana z klubu i nie wróci, nawet znając kod — chyba że ją odblokujesz albo zaprosisz po nicku. Jej partie zostają w historii.',
         okLabel: 'Usuń', danger: true,
         onOk: async () => { try { await S.provider.removeMember(id); toast('Usunięto z klubu.'); await loadCoach(); } catch (err) { toast(err.message); } },
       });
@@ -2318,7 +2417,7 @@ app.addEventListener('click', async (e) => {
     case 'room-pgn':
       try { downloadText(`partie-${S.provider.roomCode}.pgn`, await S.provider.roomPgn()); } catch (err) { toast(err.message); }
       break;
-    case 'coach-open': S.view = 'coach'; await loadCoach(); break;
+    case 'coach-open': S.modal = null; S.view = 'coach'; await loadCoach(); break;
     case 'coach-refresh': S.roomHistory = null; await loadCoach(); break;
     case 'coach-close': S.view = 'lobby'; render(); break;
     case 'coach-watch': openGame(id); break;
@@ -2395,6 +2494,11 @@ app.addEventListener('click', async (e) => {
 app.addEventListener('change', (e) => {
   const el = e.target;
   if (el.dataset.action === 'rated') { S.form.rated = el.checked; saveForm(); }
+  if (el.dataset.action === 'approval') {
+    S.provider.setApproval(el.checked)
+      .then((on) => { toast(on ? 'Nowi członkowie będą czekać na zatwierdzenie.' : 'Nowi członkowie wchodzą od razu po kodzie.'); loadCoach(); })
+      .catch((err) => { toast(err.message); el.checked = !el.checked; });
+  }
   if (el.dataset.action === 'setting') {
     S.settings[el.dataset.key] = el.checked; saveSettings();
     if (['sanEntry', 'englishNotation', 'learnMode'].includes(el.dataset.key)) { resetEntry(); S.entryMsg = ''; }
@@ -2417,6 +2521,12 @@ app.addEventListener('submit', async (e) => {
       if (await social(() => S.provider.friendInvite(nick), `Wysłano zaproszenie do ${nick}.`)) {
         const i = document.getElementById('friend-nick'); if (i) i.value = '';
       }
+      break;
+    }
+    case 'invite-nick': {
+      const nick = (document.getElementById('invite-nick')?.value || '').trim();
+      if (!nick) { toast('Wpisz nick konta.'); break; }
+      try { const r = await S.provider.inviteNick(nick); toast(`Zaproszono ${r.nick}.`); await loadCoach(); } catch (err) { toast(err.message, 5000); }
       break;
     }
     case 'prompt': { const m = S.modal; const v = document.getElementById('prompt-input')?.value || ''; S.modal = null; render(); if (m?.onOk) await m.onOk(v); break; }

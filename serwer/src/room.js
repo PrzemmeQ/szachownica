@@ -8,6 +8,7 @@ import { accountMethods, hashPassword, verifyPassword } from './accounts.js';
 import { statsMethods } from './stats.js';
 import { clubMethods } from './clubs.js';
 import { socialMethods } from './social.js';
+import { memberMethods } from './members.js';
 
 const ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
 export const ROOM_ID_RE = /^[abcdefghjkmnpqrstuvwxyz23456789]{12}$/;
@@ -126,6 +127,7 @@ export class Room extends DurableObject {
       CREATE TABLE IF NOT EXISTS blocks (blocker TEXT NOT NULL, blocked TEXT NOT NULL, since INTEGER NOT NULL, PRIMARY KEY (blocker, blocked));
       CREATE TABLE IF NOT EXISTS invite_log (from_id TEXT NOT NULL, at INTEGER NOT NULL);
     `);
+    this.migrateMembers();
   }
 
   isPublic() { return this.kv('public') === '1'; }
@@ -371,6 +373,8 @@ export class Room extends DurableObject {
     return {
       code: this.kv('code'), name: this.kv('name'), public: this.isPublic(), id: this.kv('room_id'),
       hasPassword: !!this.kv('pass_hash'), role: m?.role || 'member', canManage: !!manager,
+      approve: this.isPublic() ? false : this.approvalOn(),
+      ...(manager && !this.isPublic() ? { requests: this.requestsList().length } : {}),
     };
   }
 
@@ -418,7 +422,8 @@ export class Room extends DurableObject {
         const name = String(body.name ?? '').trim().replace(/\s+/g, ' ');
         if (name.length < 1 || name.length > 40) fail('Nazwa klubu: 1–40 znaków.');
         const account = await this.accountFromToken(body.accountToken);
-        const nick = body.nick || account?.nick;
+        if (!account) fail('Klub zakłada się z kontem — zaloguj się albo załóż konto.');
+        const nick = body.nick || account.nick;
         if (!NICK_RE.test(cleanNick(nick))) fail(NICK_ERR);
         const reg = await this.callPublic('acct-room-register', { roomId, name });
         if (!reg?.code) fail('Nie udało się nadać kodu klubu. Spróbuj ponownie.');
@@ -426,10 +431,11 @@ export class Room extends DurableObject {
         this.kv('room_id', roomId);
         this.kv('code', reg.code);
         this.kv('created_at', Date.now());
-        const m = await this.addMember(nick, 'owner', account?.id || null);
+        this.kv('approve', '1'); // nowi członkowie czekają na zatwierdzenie
+        const m = await this.addMember(nick, 'owner', account.id);
         this.kv('owner_id', m.memberId);
         this.reportStat({ kind: 'room' });
-        if (account) await this.callPublic('acct-room-add', { accountId: account.id, roomId, name });
+        await this.callPublic('acct-room-add', { accountId: account.id, roomId, name });
         return json({ name, code: reg.code, ...m });
       }
       if (!this.roomExists() && req.headers.get('X-Room') === PUBLIC_CODE) {
@@ -450,9 +456,8 @@ export class Room extends DurableObject {
       if (action === 'account-login') {
         const account = await this.accountFromToken(body.accountToken);
         if (!account) fail('Zaloguj się na konto.');
-        const m = this.sql.exec('SELECT * FROM members WHERE account_id = ? AND removed = 0', account.id).toArray()[0];
-        if (!m) return json({ error: 'Twoje konto nie należy do tego klubu.' }, 404);
-        return json({ name: this.kv('name'), code: this.kv('code'), memberId: m.id, nick: m.nick, token: await this.issueToken(m.id) });
+        const r = await this.accountEnter(account);
+        return json(r.body, r.status);
       }
       if (action === 'transfer') {
         const hash = await sha256(String(body.code ?? '').toLowerCase());
@@ -509,6 +514,8 @@ export class Room extends DurableObject {
       }
       case 'acct-room-add': this.acctAddRoom(body.accountId, body.roomId, body.name); return { ok: true };
       case 'acct-room-remove': this.acctRemoveRoom(body.accountId, body.roomId); return { ok: true };
+      case 'acct-room-status': this.acctRoomStatus(body); return { ok: true };
+      case 'acct-find': return this.acctFind(body.nick);
       case 'acct-ratings': return this.acctRatings(body.ids);
       case 'acct-rate': return this.acctRate(body);
       case 'acct-stat': this.statRecord(body); return { ok: true };
@@ -526,23 +533,8 @@ export class Room extends DurableObject {
     if (ph && !(await verifyPassword(String(body.password || ''), ph))) {
       return json({ error: 'Złe hasło klubu.', wrongPassword: true, needsPassword: true }, 403);
     }
-    const accountId = body.accountId || null;
-    if (accountId) {
-      if (this.sql.exec('SELECT 1 FROM banned_accounts WHERE account_id = ?', accountId).toArray().length) fail('Zostałeś usunięty z tego klubu.');
-      const had = this.sql.exec('SELECT * FROM members WHERE account_id = ? AND removed = 0', accountId).toArray()[0];
-      if (had) return json({ name: this.kv('name'), code: this.kv('code'), memberId: had.id, nick: had.nick, token: await this.issueToken(had.id) });
-      // wraca ktoś, kto sam wyszedł: to samo miejsce w klubie (historia partii), jeśli nick jest wolny
-      const left = this.sql.exec('SELECT * FROM members WHERE account_id = ? AND removed = 1 ORDER BY joined_at DESC', accountId).toArray()[0];
-      if (left && !this.sql.exec('SELECT 1 FROM members WHERE nick_key = ?', nickKey(left.nick)).toArray().length) {
-        this.sql.exec('UPDATE members SET removed = 0, nick_key = ? WHERE id = ?', nickKey(left.nick), left.id);
-        this.broadcastMembers();
-        return json({ name: this.kv('name'), code: this.kv('code'), memberId: left.id, nick: left.nick, token: await this.issueToken(left.id) });
-      }
-    }
-    const m = await this.addMember(body.nick || body.accountNick, 'member', accountId);
-    await this.refreshRatings(true);
-    this.broadcastMembers();
-    return json({ name: this.kv('name'), code: this.kv('code'), ...m });
+    if (!body.accountId) fail('Do klubu dołączasz z kontem — zaloguj się albo załóż konto.');
+    return json(await this.joinWithAccount(String(body.accountId), body.accountNick, body.nick));
   }
 
   acceptSocket(req) {
@@ -744,6 +736,12 @@ export class Room extends DurableObject {
         return {};
       }
       case 'removeMember': return this.cmdRemoveMember(me, String(msg.id || ''));
+      case 'approveRequest': return this.cmdApprove(me, msg.id);
+      case 'rejectRequest': return this.cmdReject(me, msg.id);
+      case 'unblockMember': return this.cmdUnblockMember(me, msg.id);
+      case 'inviteNick': return this.cmdInviteNick(me, msg.nick);
+      case 'cancelInvite': return this.cmdCancelInvite(me, msg.id);
+      case 'setApproval': return this.cmdSetApproval(me, !!msg.on);
       case 'leaveRoom': {
         const m = this.member(me);
         if (m.role === 'owner') fail('Założyciel nie może opuścić klubu.');
@@ -778,7 +776,7 @@ export class Room extends DurableObject {
     // nick zostaje w historii partii, ale zwalnia się dla innych (nick_key z dopiskiem)
     this.sql.exec('UPDATE members SET removed = 1, role = ?, nick_key = ? WHERE id = ?', 'member', `${m.nick_key}#${m.id}`, m.id);
     this.sql.exec('DELETE FROM tokens WHERE member_id = ?', m.id);
-    if (ban && m.account_id) this.sql.exec('INSERT OR REPLACE INTO banned_accounts (account_id, at) VALUES (?, ?)', m.account_id, Date.now());
+    if (ban && m.account_id) this.sql.exec('INSERT OR REPLACE INTO banned_accounts (account_id, at, nick) VALUES (?, ?, ?)', m.account_id, Date.now(), m.nick);
     for (const ch of this.sql.exec('SELECT * FROM challenges WHERE from_id = ? OR to_id = ?', m.id, m.id).toArray()) this.endChallenge(ch, 'canceled');
     this.sql.exec('DELETE FROM seeks WHERE member_id = ?', m.id);
     if (m.account_id) {
@@ -836,6 +834,7 @@ export class Room extends DurableObject {
         id: g.id, white: this.member(g.white_id)?.nick || '?', black: this.member(g.black_id)?.nick || '?',
         plies: g.moves.length, speed: g.speed, label: `${g.time_ms / 60000}+${g.inc_ms / 1000}`, rated: !!g.rated,
       })),
+      requests: this.requestsList(), blocked: this.blockedList(), invites: this.invitesList(), approve: this.approvalOn(),
     };
   }
 
@@ -1261,7 +1260,7 @@ export class Room extends DurableObject {
   }
 }
 
-Object.assign(Room.prototype, accountMethods, statsMethods, clubMethods, socialMethods);
+Object.assign(Room.prototype, accountMethods, statsMethods, clubMethods, socialMethods, memberMethods);
 
 function hasMatingMaterial(chess, c) {
   let minors = 0;

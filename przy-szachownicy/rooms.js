@@ -54,11 +54,18 @@ export function touchClub(room, patch) {
   lsSet(LS_CLUBS, savedClubs().map((c) => (c.room === room ? { ...c, ...patch } : c)));
 }
 // Kluby do pokazania: zapisane na urządzeniu + przypięte do konta (te otworzą się po zalogowaniu).
+// status: member | pending (czeka na zatwierdzenie) | invited (zaproszenie od założyciela/admina)
 export function myClubs() {
-  const list = savedClubs().map((c) => ({ room: c.room, name: c.name, nick: c.nick, here: true }));
-  for (const r of savedAccount()?.rooms || []) if (!list.some((c) => c.room === r.room)) list.push({ room: r.room, name: r.name, here: false });
+  const list = savedClubs().map((c) => ({ room: c.room, name: c.name, nick: c.nick, here: true, status: 'member' }));
+  for (const r of savedAccount()?.rooms || []) {
+    const st = r.status || 'member';
+    const mine = list.find((c) => c.room === r.room);
+    if (mine) { if (st !== 'member') mine.status = st; } else list.push({ room: r.room, name: r.name, here: false, status: st });
+  }
   return list;
 }
+// Lista klubów konta po zmianie (z serwera: zatwierdzenie, odrzucenie, zaproszenie).
+export function setAccountRooms(rooms) { updateAccount({ rooms: rooms || [] }); }
 
 async function http(method, path, body) {
   let res;
@@ -71,7 +78,7 @@ async function http(method, path, body) {
   }
   let data = null;
   try { data = await res.json(); } catch {}
-  if (!res.ok) throw new Error(data?.error || `Błąd serwera (${res.status})`);
+  if (!res.ok) throw Object.assign(new Error(data?.error || `Błąd serwera (${res.status})`), { status: res.status, data });
   return data;
 }
 
@@ -91,6 +98,8 @@ export async function resetPassword(token, password) {
 // Klub przypięty do konta, otwierany na nowym urządzeniu.
 export async function restoreRoom(room) {
   const d = await http('POST', `/api/rooms/${encodeURIComponent(room)}/account-login`, { accountToken: accountToken() });
+  // zaproszenie przyjęte albo prośba zatwierdzona — od teraz zwykły członek
+  setAccountRooms((savedAccount()?.rooms || []).map((r) => (r.room === room ? { ...r, status: 'member' } : r)));
   return rememberClub(room, d);
 }
 export async function createRoom(name, nick) {
@@ -99,10 +108,16 @@ export async function createRoom(name, nick) {
 }
 // Kod klubu: nazwa i czy potrzebne hasło (błędne kody liczą się do blokady).
 export async function lookupClub(code) {
-  return http('POST', '/api/rooms/lookup', { code, accountToken: accountToken(), deviceId: deviceId() });
+  return http('POST', '/api/rooms/lookup', { code, accountToken: accountToken() });
 }
+// Zwraca zapisany klub albo { pending, room, name }, gdy klub wymaga zatwierdzenia.
 export async function joinClub(code, nick, password) {
-  const d = await http('POST', '/api/rooms/join', { code, nick: nick || undefined, password: password || undefined, accountToken: accountToken(), deviceId: deviceId() });
+  const d = await http('POST', '/api/rooms/join', { code, nick: nick || undefined, password: password || undefined, accountToken: accountToken() });
+  if (d.pending) {
+    const rooms = (savedAccount()?.rooms || []).filter((r) => r.room !== d.room);
+    setAccountRooms([{ room: d.room, name: d.name, status: 'pending' }, ...rooms]);
+    return { pending: true, room: d.room, name: d.name };
+  }
   return rememberClub(d.room, d);
 }
 // Przeniesienie na inne urządzenie: link (#przenies=pokój.kod) albo 6 cyfr.
@@ -323,6 +338,10 @@ export class RoomsProvider {
         this.social = m.social;
         this.onEvent({ type: 'social' });
         break;
+      case 'myRooms': // kluby konta po zatwierdzeniu, odrzuceniu albo zaproszeniu
+        if (this.isPublic) { this.s = { ...this.s, rooms: m.rooms || [] }; this._save(); }
+        this.onEvent({ type: 'myRooms' });
+        break;
       case 'presence':
         if (this.social) {
           for (const list of [this.social.friends, this.social.recent]) for (const p of list || []) if (p.id === m.id) p.online = m.online;
@@ -520,6 +539,13 @@ export class RoomsProvider {
   async setRoomPassword(password) { const r = await this.req('setRoomPassword', { password }); if (this.welcome) this.welcome.room.hasPassword = r.hasPassword; return r.hasPassword; }
   async setRole(id, role) { await this.req('setRole', { id, role }); }
   async removeMember(id) { await this.req('removeMember', { id }); }
+  // zatwierdzanie członków (założyciel/admin)
+  approveRequest(id) { return this.req('approveRequest', { id }); }
+  rejectRequest(id) { return this.req('rejectRequest', { id }); }
+  unblockMember(id) { return this.req('unblockMember', { id }); }
+  inviteNick(nick) { return this.req('inviteNick', { nick }); }
+  cancelInvite(id) { return this.req('cancelInvite', { id }); }
+  async setApproval(on) { const r = await this.req('setApproval', { on }); if (this.welcome) this.welcome.room.approve = r.approve; return r.approve; }
   async leaveRoom() { await this.req('leaveRoom'); this._shutdown(); this._forget(); }
 
   // --- znajomi (poczekalnia ogólna) ---

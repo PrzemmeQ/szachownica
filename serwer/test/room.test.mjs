@@ -18,21 +18,31 @@ async function register(prefix = 'G') {
   assert.equal(r.status, 200, JSON.stringify(r.data));
   return { nick, id: r.data.memberId, token: r.data.token };
 }
-async function createClub(name, nick, accountToken) {
-  const r = await api(srv.base, 'POST', '/api/rooms', { name, nick, accountToken });
+// Klub zakłada konto; domyślnie z wyłączonym zatwierdzaniem (szybkie dołączanie w testach).
+async function createClub(name, nick, owner, { approve = false } = {}) {
+  const acc = owner || await register('Own');
+  const r = await api(srv.base, 'POST', '/api/rooms', { name, nick, accountToken: acc.token });
   assert.equal(r.status, 200, JSON.stringify(r.data));
-  return r.data;
+  if (!approve) {
+    const O = await connect(r.data.room, r.data.token);
+    assert.ok((await O.req('setApproval', { on: false })).ok);
+    O.close();
+  }
+  return { ...r.data, owner: acc };
 }
+// Dołączenie kontem (nowym, jeśli nie podano).
 async function joinClub(code, opts = {}) {
-  return api(srv.base, 'POST', '/api/rooms/join', { code, deviceId: opts.deviceId || dev(), ...opts });
+  const acc = opts.account || await register('J');
+  const r = await api(srv.base, 'POST', '/api/rooms/join', { code, nick: opts.nick, password: opts.password, accountToken: acc.token });
+  return { ...r, account: acc };
 }
 async function connect(room, token) { const c = new Client(srv.base, room, token); await c.connect(); return c; }
 
-async function clubWithTwo({ accounts = true } = {}) {
-  const a = accounts ? await register('A') : null;
-  const b = accounts ? await register('B') : null;
-  const club = await createClub('Klub ' + uniq(), accounts ? undefined : 'Ania', a?.token);
-  const j = await joinClub(club.code, accounts ? { accountToken: b.token } : { nick: 'Bartek' });
+async function clubWithTwo() {
+  const a = await register('A');
+  const b = await register('B');
+  const club = await createClub('Klub ' + uniq(), undefined, a);
+  const j = await joinClub(club.code, { account: b });
   assert.equal(j.status, 200, JSON.stringify(j.data));
   const A = await connect(club.room, club.token);
   const B = await connect(club.room, j.data.token);
@@ -65,10 +75,12 @@ test('Glicko-2: start 1200, wygrana podnosi', () => {
   assert.ok(r.white.rating > 1300 && r.black.rating < 1100);
 });
 
-test('klub: kod NAZWA-XXXXX, sprawdzenie, dołączenie samym nickiem, zajęty nick, kod bez myślnika', async () => {
+test('klub: tylko z kontem; kod NAZWA-XXXXX, sprawdzenie, własny nick, zajęty nick, kod bez myślnika', async () => {
+  assert.match((await api(srv.base, 'POST', '/api/rooms', { name: 'Bez konta', nick: 'Ala' })).data.error, /z kontem/);
   const c = await createClub('Klub Hetman — środy', 'Trener');
   assert.match(c.code, /^KLUBH-[A-Z0-9]{5}$/);
-  const look = await api(srv.base, 'POST', '/api/rooms/lookup', { code: c.code.toLowerCase(), deviceId: dev() });
+  assert.match((await api(srv.base, 'POST', '/api/rooms/join', { code: c.code, nick: 'Anon', deviceId: dev() })).data.error, /z kontem/);
+  const look = await api(srv.base, 'POST', '/api/rooms/lookup', { code: c.code.toLowerCase(), accountToken: c.owner.token });
   assert.deepEqual(look.data, { code: c.code, name: 'Klub Hetman — środy', needsPassword: false });
   const j = await joinClub(c.code.replace('-', ''), { nick: 'Kasia' });
   assert.equal(j.status, 200, JSON.stringify(j.data));
@@ -104,14 +116,14 @@ test('blokada za złe kody: rośnie (test: 3 → 3 s, potem 2 → 3 s), dotyczy 
 
 test('hasło klubu, zmiana kodu, administrator, usuwanie członków i wyjście', async () => {
   const owner = await register('O');
-  const c = await createClub('Szachy Plus', undefined, owner.token);
+  const c = await createClub('Szachy Plus', undefined, owner);
   const O = await connect(c.room, c.token);
   let r = await O.req('setRoomPassword', { password: 'wieza8' });
   assert.ok(r.ok && r.hasPassword, r.error);
-  assert.equal((await api(srv.base, 'POST', '/api/rooms/lookup', { code: c.code, deviceId: dev() })).data.needsPassword, true);
+  assert.equal((await api(srv.base, 'POST', '/api/rooms/lookup', { code: c.code, accountToken: owner.token })).data.needsPassword, true);
   assert.match((await joinClub(c.code, { nick: 'Bez' })).data.error, /hasło jest złe/);
   const p1 = await register('P');
-  const j1 = await joinClub(c.code, { accountToken: p1.token, password: 'wieza8' });
+  const j1 = await joinClub(c.code, { account: p1, password: 'wieza8' });
   assert.equal(j1.status, 200, JSON.stringify(j1.data));
   const j2 = await joinClub(c.code, { nick: 'Zosia', password: 'wieza8' });
   const P1 = await connect(c.room, j1.data.token);
@@ -133,13 +145,83 @@ test('hasło klubu, zmiana kodu, administrator, usuwanie członków i wyjście',
 
   assert.ok((await O.req('setRole', { id: j1.data.memberId, role: 'member' })).ok);
   assert.ok((await O.req('removeMember', { id: j1.data.memberId })).ok);
-  assert.match((await joinClub(nc.code, { accountToken: p1.token, password: 'wieza8' })).data.error, /usunięty/);
+  assert.match((await joinClub(nc.code, { account: p1, password: 'wieza8' })).data.error, /usunięty/);
   const p2 = await register('Q');
-  const j3 = await joinClub(nc.code, { accountToken: p2.token, password: 'wieza8' });
+  const j3 = await joinClub(nc.code, { account: p2, password: 'wieza8' });
   const Q = await connect(c.room, j3.data.token);
   assert.ok((await Q.req('leaveRoom')).ok);
-  assert.equal((await joinClub(nc.code, { accountToken: p2.token, password: 'wieza8' })).status, 200);
+  assert.equal((await joinClub(nc.code, { account: p2, password: 'wieza8' })).status, 200);
   O.close();
+});
+
+test('zatwierdzanie członków: prośba, odrzucenia (2 → blokada), odblokowanie, zatwierdzenie, zaproszenie po nicku', async () => {
+  const c = await createClub('Klub zatwierdzany', undefined, undefined, { approve: true });
+  const O = await connect(c.room, c.token);
+  assert.equal(O.welcome.room.approve, true);
+  assert.equal(O.welcome.room.requests, 0);
+  const p = await register('Pr');
+  const P = await connect('publiczny', p.token);
+  const enter = () => api(srv.base, 'POST', `/api/rooms/${c.room}/account-login`, { accountToken: p.token });
+
+  // prośba: „oczekuje” w Moich klubach, założyciel widzi licznik
+  let mark = O.mark();
+  let j = await joinClub(c.code, { account: p, nick: 'Prosi' });
+  assert.equal(j.data.pending, true, JSON.stringify(j.data));
+  assert.equal((await O.wait((m) => m.t === 'roomInfo' && m.room.requests === 1, 5000, mark)).room.requests, 1);
+  assert.equal((await P.req('myRooms')).rooms.find((r) => r.room === c.room).status, 'pending');
+  const e1 = await enter();
+  assert.equal(e1.status, 409); assert.equal(e1.data.pending, true);
+  assert.equal((await O.req('coachPanel')).requests[0].nick, 'Prosi');
+
+  // dwa odrzucenia → kolejna prośba zablokowana, osoba na liście zablokowanych
+  for (let i = 0; i < 2; i++) {
+    mark = P.mark();
+    assert.ok((await O.req('rejectRequest', { id: p.id })).ok);
+    await P.wait((m) => m.t === 'event' && m.ev.type === 'clubStatus' && m.ev.event === 'rejected', 5000, mark);
+    if (i === 0) assert.equal((await joinClub(c.code, { account: p })).data.pending, true);
+  }
+  assert.equal((await P.req('myRooms')).rooms.some((r) => r.room === c.room), false);
+  assert.match((await joinClub(c.code, { account: p })).data.error, /odrzucone/);
+  let panel = await O.req('coachPanel');
+  assert.deepEqual(panel.blocked.map((b) => [b.nick, b.reason]), [[p.nick, 'rejected']]); // druga prośba była z nickiem konta
+
+  // odblokowanie → nowa prośba → zatwierdzenie
+  assert.ok((await O.req('unblockMember', { id: p.id })).ok);
+  assert.equal((await joinClub(c.code, { account: p, nick: 'Prosi' })).data.pending, true);
+  mark = P.mark();
+  assert.ok((await O.req('approveRequest', { id: p.id })).ok);
+  await P.wait((m) => m.t === 'event' && m.ev.type === 'clubStatus' && m.ev.event === 'approved', 5000, mark);
+  assert.equal((await P.req('myRooms')).rooms.find((r) => r.room === c.room).status, 'member');
+  const e2 = await enter();
+  assert.equal(e2.status, 200, JSON.stringify(e2.data));
+  assert.equal(e2.data.nick, 'Prosi');
+
+  // zaproszenie po nicku: wejście jednym kliknięciem, bez kodu; zdejmuje blokadę po usunięciu
+  const q = await register('Zap');
+  const Q = await connect('publiczny', q.token);
+  assert.match((await O.req('inviteNick', { nick: 'nie-ma-' + uniq() })).error, /Nie ma konta/);
+  mark = Q.mark();
+  assert.ok((await O.req('inviteNick', { nick: q.nick.toLowerCase() })).ok);
+  await Q.wait((m) => m.t === 'event' && m.ev.type === 'clubStatus' && m.ev.event === 'invited', 5000, mark);
+  assert.equal((await Q.req('myRooms')).rooms.find((r) => r.room === c.room).status, 'invited');
+  let eq = await api(srv.base, 'POST', `/api/rooms/${c.room}/account-login`, { accountToken: q.token });
+  assert.equal(eq.status, 200, JSON.stringify(eq.data));
+  assert.equal(eq.data.nick, q.nick);
+  assert.ok((await O.req('removeMember', { id: eq.data.memberId })).ok);
+  panel = await O.req('coachPanel');
+  assert.ok(panel.blocked.some((b) => b.id === q.id && b.reason === 'removed'));
+  assert.match((await joinClub(c.code, { account: q })).data.error, /usunięty/);
+  assert.ok((await O.req('inviteNick', { nick: q.nick })).ok);
+  eq = await api(srv.base, 'POST', `/api/rooms/${c.room}/account-login`, { accountToken: q.token });
+  assert.equal(eq.status, 200, JSON.stringify(eq.data));
+
+  // ustawienie zmienia tylko założyciel; po wyłączeniu wejście od razu
+  const M = await connect(c.room, e2.data.token);
+  assert.ok((await O.req('setRole', { id: e2.data.memberId, role: 'admin' })).ok);
+  assert.match((await M.req('setApproval', { on: false })).error, /założyciel/);
+  assert.ok((await O.req('setApproval', { on: false })).ok);
+  assert.ok((await joinClub(c.code)).data.token);
+  for (const x of [O, P, Q, M]) x.close();
 });
 
 test('partia 10+5: ruch nielegalny, zegar, roszada; rankingowa liczy się do wspólnego rankingu', async () => {
@@ -177,10 +259,7 @@ test('partia 10+5: ruch nielegalny, zegar, roszada; rankingowa liczy się do wsp
   for (const x of [W, Bl, P]) x.close();
 });
 
-test('ranking: bez konta tylko towarzysko; krótkie poddanie się nie liczy; limit 3 dziennie z tym samym rywalem', async () => {
-  const nc = await clubWithTwo({ accounts: false });
-  assert.match((await nc.A.req('challenge', { to: nc.bId, time: 10, increment: 0, rated: true })).error, /wymaga konta/);
-  nc.A.close(); nc.B.close();
+test('ranking: krótkie poddanie się nie liczy; limit 3 dziennie z tym samym rywalem', async () => {
   const ctx = await clubWithTwo();
   let g = await startGame(ctx, { rated: true });
   await playMoves(g.gameId, g.W, g.Bl, OPENING.slice(0, 4));
@@ -206,7 +285,7 @@ test('ponowne połączenie, koniec czasu z alarmu, wyjście rywala z odliczaniem
   await playMoves(gameId, W, Bl, ['d2d4', 'd7d5', 'c2c4']);
   Bl.close();
   await sleep(3000);
-  const tok = (await joinClub(ctx.club.code, { accountToken: ctx.b.token })).data.token;
+  const tok = (await joinClub(ctx.club.code, { account: ctx.b })).data.token;
   const back = await connect(ctx.club.room, tok);
   await back.req('watch', { gameId });
   const lost = 600000 - (await gm(back, gameId, 'full')).state.btime;
@@ -217,7 +296,7 @@ test('ponowne połączenie, koniec czasu z alarmu, wyjście rywala z odliczaniem
   await W.wait((m) => m.t === 'game' && m.msg.type === 'opponentGone' && m.msg.claimWinInSeconds === 0, 8000);
   assert.ok((await W.req('claimDraw', { gameId })).ok);
   W.close();
-  const c2 = await clubWithTwo({ accounts: false });
+  const c2 = await clubWithTwo();
   const g2 = await startGame(c2, { time: 0.05, increment: 0 });
   await playMoves(g2.gameId, g2.W, g2.Bl, ['e2e4', 'e7e5']);
   const st = await g2.W.wait((m) => m.t === 'game' && m.msg.type === 'state' && m.msg.state.status === 'outoftime', 8000);
@@ -226,7 +305,7 @@ test('ponowne połączenie, koniec czasu z alarmu, wyjście rywala z odliczaniem
 });
 
 test('cofnięcie ruchu: zgoda, odmowa; limity próśb (2 na ruch do 2 odmów, potem 1)', async () => {
-  const ctx = await clubWithTwo({ accounts: false });
+  const ctx = await clubWithTwo();
   const { gameId, W, Bl } = await startGame(ctx);
   assert.equal((await W.req('takeback', { gameId, yes: true })).ok, false);
   await playMoves(gameId, W, Bl, ['e2e4', 'e7e5', 'g1f3']);
@@ -248,7 +327,7 @@ test('cofnięcie ruchu: zgoda, odmowa; limity próśb (2 na ruch do 2 odmów, po
 });
 
 test('wzajemne wyzwanie (rewanż u obu) od razu startuje partię', async () => {
-  const ctx = await clubWithTwo({ accounts: false });
+  const ctx = await clubWithTwo();
   assert.ok((await ctx.A.req('challenge', { to: ctx.bId, time: 10, increment: 0, color: 'white' })).id);
   const b = await ctx.B.req('challenge', { to: ctx.aId, time: 10, increment: 0, color: 'black' });
   assert.ok(b.matched && b.gameId, JSON.stringify(b));
@@ -256,7 +335,7 @@ test('wzajemne wyzwanie (rewanż u obu) od razu startuje partię', async () => {
 });
 
 test('poczekalnia: tylko z kontem, parowanie tego samego tempa, szukanie znika po rozłączeniu', async () => {
-  assert.match((await api(srv.base, 'POST', '/api/rooms/join', { code: 'publiczny', deviceId: dev() })).data.error, /Nie ma klubu/);
+  assert.match((await api(srv.base, 'POST', '/api/rooms/join', { code: 'publiczny', deviceId: dev() })).data.error, /z kontem/);
   const [p, q, r] = [await register('P'), await register('Q'), await register('R')];
   const P = await connect('publiczny', p.token), Q = await connect('publiczny', q.token), R = await connect('publiczny', r.token);
   const sp = await P.req('seek', { time: 10, increment: 5, rated: true });
@@ -315,7 +394,7 @@ test('konto: popularne hasła, obce litery, zmiana hasła wylogowuje inne urząd
 
 test('Moje kluby przy koncie, wejście na nowym urządzeniu; przeniesienie kodem 6-cyfrowym', async () => {
   const a = await register('Mk');
-  const c = await createClub('Klub konta', undefined, a.token);
+  const c = await createClub('Klub konta', undefined, a);
   const P = await connect('publiczny', a.token);
   assert.deepEqual(P.welcome.me.rooms.map((x) => x.room), [c.room]);
   assert.equal((await api(srv.base, 'POST', `/api/rooms/${c.room}/account-login`, { accountToken: a.token })).data.memberId, c.memberId);
@@ -331,8 +410,9 @@ test('Moje kluby przy koncie, wejście na nowym urządzeniu; przeniesienie kodem
 
 test('limity zakładania; ochrona: zalewanie, wewnętrzne akcje niedostępne', async () => {
   const ip = { 'X-Test-IP': 'test-limit-' + uniq() };
-  for (let i = 0; i < 3; i++) assert.equal((await api(srv.base, 'POST', '/api/rooms', { name: 'L' + i, nick: 'Ala' }, ip)).status, 200);
-  assert.equal((await api(srv.base, 'POST', '/api/rooms', { name: 'L4', nick: 'Ala' }, ip)).status, 400);
+  const own = await register('Lim');
+  for (let i = 0; i < 3; i++) assert.equal((await api(srv.base, 'POST', '/api/rooms', { name: 'L' + i, accountToken: own.token }, ip)).status, 200);
+  assert.equal((await api(srv.base, 'POST', '/api/rooms', { name: 'L4', accountToken: own.token }, ip)).status, 400);
   const p = await register('Z');
   const P = await connect('publiczny', p.token);
   for (let i = 0; i < 60; i++) P.ws.send(JSON.stringify({ t: 'members', reqId: 1000 + i }));

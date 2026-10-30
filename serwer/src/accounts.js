@@ -166,16 +166,29 @@ export const accountMethods = {
   },
 
   // „Moje kluby” przy koncie: identyfikator pokoju i nazwa.
-  acctAddRoom(accountId, roomId, name) {
+  // status: member | pending (czeka na zatwierdzenie) | invited (zaproszony przez założyciela/admina)
+  acctAddRoom(accountId, roomId, name, status = 'member') {
     if (!this.member(accountId)) return;
-    this.sql.exec('INSERT OR REPLACE INTO account_rooms (member_id, room_id, name, joined_at) VALUES (?, ?, ?, ?)',
-      accountId, roomId, name, Date.now());
+    this.sql.exec('INSERT OR REPLACE INTO account_rooms (member_id, room_id, name, joined_at, status) VALUES (?, ?, ?, ?, ?)',
+      accountId, roomId, name, Date.now(), status);
   },
   acctRemoveRoom(accountId, roomId) {
     this.sql.exec('DELETE FROM account_rooms WHERE member_id = ? AND room_id = ?', accountId, roomId);
   },
   acctRooms(accountId) {
-    return this.sql.exec('SELECT room_id AS room, name FROM account_rooms WHERE member_id = ? ORDER BY joined_at DESC', accountId).toArray();
+    return this.sql.exec('SELECT room_id AS room, name, status FROM account_rooms WHERE member_id = ? ORDER BY joined_at DESC', accountId).toArray();
+  },
+  // Zmiana statusu klubu u konta (zatwierdzenie, odrzucenie, zaproszenie) + powiadomienie, gdy jest online.
+  acctRoomStatus({ accountId, roomId, name, status, event }) {
+    const id = String(accountId || '');
+    if (status) this.acctAddRoom(id, String(roomId), String(name || ''), status);
+    else this.acctRemoveRoom(id, String(roomId));
+    this.toMember(id, { t: 'myRooms', rooms: this.acctRooms(id) });
+    if (event) this.toMember(id, { t: 'event', ev: { type: 'clubStatus', name, event, room: roomId } });
+  },
+  acctFind(nick) {
+    const m = this.sql.exec('SELECT id, nick FROM members WHERE nick_key = ? AND removed = 0', this.nickKey(String(nick || ''))).toArray()[0];
+    return m ? { id: m.id, nick: m.nick } : {};
   },
 
   // --- wspólny ranking (jeden na konto dla każdego tempa, dla poczekalni i wszystkich klubów) ---
