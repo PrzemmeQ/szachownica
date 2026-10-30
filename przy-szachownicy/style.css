@@ -245,3 +245,6 @@ code { font-family: var(--mono); font-size: 0.9em; }
 .mode-sub { font-size: 0.84rem; font-weight: 400; opacity: 0.8; }
 .account-line { margin: 4px 0 0; font-size: 0.95rem; }
 .account-line .link { margin-left: 6px; }
+/* tryb prosty wpisywania */
+.slot-label { color: var(--muted); font-size: 0.92rem; margin-right: 4px; }
+.entry-mode { text-align: center; margin-top: 8px; }

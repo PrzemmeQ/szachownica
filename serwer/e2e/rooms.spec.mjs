@@ -33,8 +33,11 @@ async function phone(browser) {
   return { ctx, page };
 }
 
+// Tryb prosty (domyślny): tylko pole docelowe; gdy aplikacja pyta, którą bierką — wybiera tę z pola from.
 async function play(page, from, to) {
-  for (const ch of from + to) await page.locator(`#entry button.key[data-k="${ch}"]`).click();
+  for (const ch of to) await page.locator(`#entry button.key[data-k="${ch}"]`).click();
+  const chip = page.locator(`#entry button.chip[data-action="pick"][data-id="${from}"]`);
+  if (await chip.count()) await chip.click();
   await page.getByRole('button', { name: 'Wyślij ruch' }).click();
 }
 
@@ -377,4 +380,36 @@ test('konto: rejestracja, pokój na koncie, logowanie na nowym telefonie przywra
   await C.page.getByRole('button', { name: 'Wyślij link' }).click();
   await expect(C.page.locator('.note')).toContainText('nie jest jeszcze włączone');
   await C.ctx.close();
+});
+
+test('wpisywanie: tryb prosty (pytanie o bierkę) i przełączenie na „skąd → dokąd”', async ({ browser }) => {
+  const { ctx, page } = await phone(browser);
+  await page.goto(FRONT_A + '/');
+  await page.getByRole('button', { name: 'Wypróbuj bez logowania' }).click();
+  await page.locator('button.chip[data-action="color"][data-id="white"]').click();
+  await page.getByRole('button', { name: 'Zagraj z komputerem' }).click();
+  await expect(page.locator('.slot-label')).toHaveText('na pole');
+
+  // f3: może pójść pion f2 albo skoczek g1 → pytanie
+  for (const ch of 'f3') await page.locator(`#entry button.key[data-k="${ch}"]`).click();
+  await expect(page.locator('#entry')).toContainText('Którą zagrałeś?');
+  await page.locator('#entry button.chip[data-action="pick"][data-id="g1"]').click();
+  await page.getByRole('button', { name: 'Wyślij ruch' }).click();
+  await expect(page.locator('.hlist')).toContainText('Sf3');
+
+  // pole, na które nic nie może pójść
+  await expect(page.locator('.status')).toHaveText('Twój ruch', { timeout: 10000 });
+  for (const ch of 'e6') await page.locator(`#entry button.key[data-k="${ch}"]`).click();
+  await expect(page.locator('.entry-msg')).toContainText('Żadna Twoja bierka nie może teraz pójść na e6');
+  await page.getByRole('button', { name: '⌫ Cofnij' }).click();
+  await page.getByRole('button', { name: '⌫ Cofnij' }).click();
+
+  // przełączenie na tryb dokładny
+  await page.getByRole('button', { name: /przełącz na „skąd → dokąd”/ }).click();
+  await expect(page.locator('.slot-label')).toHaveCount(0);
+  await expect(page.locator('.slots .slot')).toHaveCount(4);
+  for (const ch of 'e2e4') await page.locator(`#entry button.key[data-k="${ch}"]`).click();
+  await page.getByRole('button', { name: 'Wyślij ruch' }).click();
+  await expect(page.locator('.hlist')).toContainText('e4');
+  await ctx.close();
 });

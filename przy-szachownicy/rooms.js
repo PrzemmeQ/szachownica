@@ -437,7 +437,8 @@ export class RoomsProvider {
 
   async transferLink() {
     const r = await this.req('transferCreate');
-    return { url: appLink({ pokoj: this.roomCode, przenies: r.code }), expiresIn: r.expiresIn };
+    // kod przeniesienia po # (nie trafia do logów serwera stron)
+    return { url: `${appLink({ pokoj: this.roomCode })}#przenies=${r.code}`, expiresIn: r.expiresIn };
   }
 
   gameUrl() { return null; }

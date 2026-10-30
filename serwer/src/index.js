@@ -39,9 +39,17 @@ function roomStub(env, code) {
   return ns.get(ns.idFromName(code));
 }
 
+// Adres klienta tylko do limitów (pokój go nie zapisuje — trzyma skrót z dzienną solą, najwyżej godzinę).
+// Nagłówek ustawia Cloudflare; klient go nie podrobi. X-Test-IP działa tylko w trybie testowym.
+function clientIp(req, env) {
+  if (env.TEST_MODE === '1' && req.headers.get('X-Test-IP')) return req.headers.get('X-Test-IP');
+  return req.headers.get('CF-Connecting-IP') || '';
+}
+
 async function forward(env, code, action, req, body) {
   const stub = roomStub(env, code);
-  const init = { method: req.method, headers: { 'X-Room': code } };
+  // nagłówki budujemy od zera — klient nie przemyci X-Room ani X-Client-IP
+  const init = { method: req.method, headers: { 'X-Room': code, 'X-Client-IP': clientIp(req, env) } };
   if (body !== undefined) { init.method = 'POST'; init.body = JSON.stringify(body); init.headers['Content-Type'] = 'application/json'; }
   return stub.fetch('https://pokoj/' + action, init);
 }
@@ -93,6 +101,9 @@ async function route(req, env, url) {
   // utworzenie pokoju
   if (parts.length === 2 && req.method === 'POST') {
     const body = await readJson(req);
+    // limit zakładania pokoi liczy poczekalnia ogólna (jedno miejsce dla wszystkich pokoi)
+    const lim = await forward(env, PUBLIC_CODE, 'acct-limit', req, { kind: 'room' });
+    if (!lim.ok) return lim;
     for (let i = 0; i < 5; i++) {
       const code = randomCode(12);
       const res = await forward(env, code, 'create', req, { name: body.name, nick: body.nick, accountToken: body.accountToken });
@@ -111,12 +122,18 @@ async function route(req, env, url) {
   if (!action && req.method === 'GET') return forward(env, code, 'info', req);
   if (action === 'join' && req.method === 'POST') return forward(env, code, 'join', req, await readJson(req));
   if (action === 'transfer' && req.method === 'POST') return forward(env, code, 'transfer', req, await readJson(req));
-  if (action === 'account-login' && req.method === 'POST') return forward(env, code, 'account-login', req, await readJson(req));
+  if (action === 'account-login' && req.method === 'POST' && code !== PUBLIC_CODE) {
+    return forward(env, code, 'account-login', req, await readJson(req));
+  }
   if (action === 'ws') {
     if (req.headers.get('Upgrade') !== 'websocket') return json({ error: 'Oczekiwano WebSocket.' }, 426);
     const stub = roomStub(env, code);
-    const fwd = new Request('https://pokoj/ws', req);
-    return stub.fetch(fwd);
+    // tylko nagłówki potrzebne do WebSocket (bez nagłówków od klienta, które pokój mógłby wziąć za swoje)
+    const h = new Headers();
+    for (const k of ['Upgrade', 'Connection', 'Sec-WebSocket-Key', 'Sec-WebSocket-Version', 'Sec-WebSocket-Protocol', 'Sec-WebSocket-Extensions', 'Origin']) {
+      if (req.headers.get(k)) h.set(k, req.headers.get(k));
+    }
+    return stub.fetch(new Request('https://pokoj/ws', { headers: h }));
   }
   return json({ error: 'Nie znaleziono.' }, 404);
 }

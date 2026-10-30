@@ -254,11 +254,11 @@ test('przeniesienie na inne urządzenie: jednorazowy kod', async () => {
 const uniq = () => Math.random().toString(36).slice(2, 8);
 
 async function publicPlayer(nick) {
-  const j = await api(srv.base, 'POST', '/api/rooms/publiczny/join', { nick });
+  const j = await api(srv.base, 'POST', '/api/account/register', { nick, password: 'gracz-testowy-' + uniq() });
   assert.equal(j.status, 200, JSON.stringify(j.data));
   const c = new Client(srv.base, 'publiczny', j.data.token);
   await c.connect();
-  return { c, id: j.data.memberId };
+  return { c, id: j.data.memberId, token: j.data.token };
 }
 
 test('poczekalnia ogólna: tworzy się sama, parowanie tego samego tempa', async () => {
@@ -357,21 +357,80 @@ test('konto: rejestracja, logowanie na innym urządzeniu, blokada po błędnych 
   assert.equal(again.status, 200, JSON.stringify(again.data));
 });
 
-test('konto: zabezpieczenie istniejącego nicku hasłem bez utraty rankingu, zmiana hasła', async () => {
-  const P = await publicPlayer('Z' + uniq());
-  const nick = P.c.welcome.me.name;
-  assert.equal(P.c.welcome.me.hasPassword, false);
-  const noPass = await api(srv.base, 'POST', '/api/account/login', { nick, password: 'cokolwiek1' });
-  assert.match(noPass.data.error, /nie ma jeszcze hasła/);
-  let r = await P.c.req('setPassword', { password: 'pierwsze-haslo', email: '' });
-  assert.ok(r.ok && r.hasPassword, r.error);
-  r = await P.c.req('setPassword', { password: 'drugie-haslo-x', oldPassword: 'zle' });
+test('konto: zmiana hasła wylogowuje inne urządzenia, to zostaje; poczekalnia tylko z kontem', async () => {
+  const nick = 'Z' + uniq();
+  const reg = await api(srv.base, 'POST', '/api/account/register', { nick, password: 'pierwsze-haslo' });
+  const other = await api(srv.base, 'POST', '/api/account/login', { nick, password: 'pierwsze-haslo' }); // drugie urządzenie
+  const P = new Client(srv.base, 'publiczny', reg.data.token);
+  await P.connect();
+  let r = await P.req('setPassword', { password: 'drugie-haslo-x', oldPassword: 'zle' });
   assert.equal(r.ok, false);
-  r = await P.c.req('setPassword', { password: 'drugie-haslo-x', oldPassword: 'pierwsze-haslo' });
+  r = await P.req('setPassword', { password: 'drugie-haslo-x', oldPassword: 'pierwsze-haslo' });
   assert.ok(r.ok, r.error);
+  const old = new Client(srv.base, 'publiczny', other.data.token);
+  assert.equal((await old.connect()).t, 'authFailed'); // drugie urządzenie wylogowane
+  const same = new Client(srv.base, 'publiczny', reg.data.token);
+  assert.equal((await same.connect()).t, 'welcome'); // to urządzenie zostaje
   const login = await api(srv.base, 'POST', '/api/account/login', { nick, password: 'drugie-haslo-x' });
-  assert.equal(login.data.memberId, P.id); // to samo konto = ten sam ranking
-  P.c.close();
+  assert.equal(login.data.memberId, reg.data.memberId); // to samo konto = ten sam ranking
+  const join = await api(srv.base, 'POST', '/api/rooms/publiczny/join', { nick: 'B' + uniq() });
+  assert.match(join.data.error, /potrzebne jest konto/);
+  P.close(); same.close();
+});
+
+test('hasła: popularne, proste i z nickiem odrzucone; nick z obcego alfabetu odrzucony', async () => {
+  for (const pw of ['qwerty123', 'Haslo123', '12345678', 'aaaaaaaa', 'abcabcabc', 'zaq12wsx', 'SZACHY123']) {
+    const r = await api(srv.base, 'POST', '/api/account/register', { nick: 'H' + uniq(), password: pw });
+    assert.equal(r.status, 400, pw);
+    assert.match(r.data.error, /popularne|proste/, pw);
+  }
+  const n = 'Ola' + uniq();
+  const withNick = await api(srv.base, 'POST', '/api/account/register', { nick: n, password: 'xx' + n + 'yy' });
+  assert.match(withNick.data.error, /nicku/);
+  const cyr = await api(srv.base, 'POST', '/api/account/register', { nick: 'Аnia' + uniq(), password: 'dobre-haslo-77' }); // cyrylickie А
+  assert.equal(cyr.status, 400);
+  const pl = await api(srv.base, 'POST', '/api/account/register', { nick: 'Łucja' + uniq().slice(0, 3), password: 'dobre-haslo-77' });
+  assert.equal(pl.status, 200, JSON.stringify(pl.data));
+});
+
+test('limity: zakładanie kont i pokoi z jednej sieci, blokada logowania tylko dla tej sieci', async () => {
+  const ip = { 'X-Test-IP': 'test-limit-' + uniq() };
+  for (let i = 0; i < 3; i++) {
+    const r = await api(srv.base, 'POST', '/api/account/register', { nick: 'Lim' + uniq(), password: 'limit-haslo-9' }, ip);
+    assert.equal(r.status, 200, JSON.stringify(r.data));
+  }
+  const fourth = await api(srv.base, 'POST', '/api/account/register', { nick: 'Lim' + uniq(), password: 'limit-haslo-9' }, ip);
+  assert.match(fourth.data.error, /zbyt wiele kont/);
+  const elsewhere = await api(srv.base, 'POST', '/api/account/register', { nick: 'Lim' + uniq(), password: 'limit-haslo-9' }, { 'X-Test-IP': 'test-limit-' + uniq() });
+  assert.equal(elsewhere.status, 200);
+
+  const rip = { 'X-Test-IP': 'test-limit-' + uniq() };
+  for (let i = 0; i < 3; i++) assert.equal((await api(srv.base, 'POST', '/api/rooms', { name: 'P' + i, nick: 'Ala' }, rip)).status, 200);
+  const room4 = await api(srv.base, 'POST', '/api/rooms', { name: 'P4', nick: 'Ala' }, rip);
+  assert.equal(room4.status, 429);
+  assert.match(room4.data.error, /zbyt wiele pokoi/);
+
+  // blokada po błędnych hasłach dotyczy tylko sieci, z której zgadywano
+  const nick = 'Blk' + uniq();
+  await api(srv.base, 'POST', '/api/account/register', { nick, password: 'blokada-haslo-1' });
+  const bad = { 'X-Test-IP': 'zgadywacz-' + uniq() };
+  for (let i = 0; i < 3; i++) await api(srv.base, 'POST', '/api/account/login', { nick, password: 'zle-zle-zle' }, bad);
+  assert.match((await api(srv.base, 'POST', '/api/account/login', { nick, password: 'blokada-haslo-1' }, bad)).data.error, /Za dużo/);
+  const mine = await api(srv.base, 'POST', '/api/account/login', { nick, password: 'blokada-haslo-1' }, { 'X-Test-IP': 'wlasciciel-' + uniq() });
+  assert.equal(mine.status, 200);
+});
+
+test('ochrona: zalewanie wiadomościami rozłącza, wewnętrzne akcje niedostępne', async () => {
+  const P = await publicPlayer('F' + uniq());
+  for (let i = 0; i < 60; i++) P.c.ws.send(JSON.stringify({ t: 'members', reqId: 1000 + i }));
+  await P.c.wait((m) => m.t === 'error' && /Zbyt wiele/.test(m.message), 5000);
+  await sleep(300);
+  assert.equal(P.c.closed, true);
+  const pub = await api(srv.base, 'POST', '/api/rooms/publiczny/account-login', { accountToken: 'x' });
+  assert.equal(pub.status, 404);
+  for (const p of ['/api/account/verify', '/api/account/limit', '/api/account/room-add']) {
+    assert.equal((await api(srv.base, 'POST', p, {})).status, 404, p);
+  }
 });
 
 test('konto: odzyskiwanie hasła linkiem (e-mail wyłączony lokalnie, token testowy)', async () => {

@@ -39,9 +39,9 @@ export async function startServer(port = 8799) {
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-export async function api(base, method, p, body) {
+export async function api(base, method, p, body, headers = {}) {
   const r = await fetch(base + p, {
-    method, headers: body ? { 'Content-Type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined,
+    method, headers: { ...(body ? { 'Content-Type': 'application/json' } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined,
   });
   let data = null;
   try { data = await r.json(); } catch {}

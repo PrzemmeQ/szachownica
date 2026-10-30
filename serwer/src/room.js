@@ -10,7 +10,12 @@ export const ROOM_CODE_RE = /^[abcdefghjkmnpqrstuvwxyz23456789]{12}$/;
 // Poczekalnia ogólna: jeden stały pokój dla wszystkich (kod spoza alfabetu losowych kodów).
 export const PUBLIC_CODE = 'publiczny';
 const PUBLIC_NAME = 'Poczekalnia ogólna';
-const NICK_RE = /^[\p{L}\p{N}][\p{L}\p{N} _.-]{1,19}$/u;
+// Tylko litery łacińskie (z polskimi znakami) i cyfry — bez liter z innych alfabetów,
+// które wyglądają tak samo (np. cyrylickie „а”), żeby nikt nie podszył się pod cudzy nick.
+const NICK_RE = /^[A-Za-z0-9ĄĆĘŁŃÓŚŹŻąćęłńóśźż][A-Za-z0-9ĄĆĘŁŃÓŚŹŻąćęłńóśźż _.-]{1,19}$/;
+const NICK_ERR = 'Nick: 2–20 znaków — litery (także polskie), cyfry, spacja, _ . -';
+const MSG_MAX = 4096; // bajtów na wiadomość WebSocket
+const MSG_RATE = { count: 40, ms: 10000 }; // wiadomości na gniazdo w oknie czasu
 const UCI_RE = /^[a-h][1-8][a-h][1-8][qrbn]?$/;
 const MAX_MEMBERS = 100;
 const MAX_MEMBERS_PUBLIC = 1000000;
@@ -98,6 +103,8 @@ export class Room extends DurableObject {
       CREATE INDEX IF NOT EXISTS ratings_top ON ratings (speed, rating);
       CREATE TABLE IF NOT EXISTS resets (hash TEXT PRIMARY KEY, member_id TEXT NOT NULL, expires_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS login_fails (nick_key TEXT PRIMARY KEY, count INTEGER NOT NULL, until INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS limits (kind TEXT NOT NULL, ip_key TEXT NOT NULL, at INTEGER NOT NULL);
+      CREATE INDEX IF NOT EXISTS limits_at ON limits (kind, at);
       CREATE TABLE IF NOT EXISTS account_rooms (
         member_id TEXT NOT NULL, code TEXT NOT NULL, name TEXT, joined_at INTEGER NOT NULL, PRIMARY KEY (member_id, code));
     `);
@@ -114,6 +121,7 @@ export class Room extends DurableObject {
   isPublic() { return this.kv('public') === '1'; }
   // pomocnicze dla accounts.js
   fail(msg) { fail(msg); }
+  checkNewNick(n) { if (!NICK_RE.test(cleanNick(n))) fail(NICK_ERR); }
   nickKey(s) { return nickKey(s); }
   sha256(s) { return sha256(s); }
   randomCode(n) { return randomCode(n); }
@@ -168,7 +176,7 @@ export class Room extends DurableObject {
 
   async addMember(nick, role) {
     const n = cleanNick(nick);
-    if (!NICK_RE.test(n)) fail('Nick: 2–20 znaków, litery, cyfry, spacja, _ . -');
+    if (!NICK_RE.test(n)) fail(NICK_ERR);
     const count = this.sql.exec('SELECT COUNT(*) AS c FROM members').one().c;
     if (count >= (this.isPublic() ? MAX_MEMBERS_PUBLIC : MAX_MEMBERS)) fail('Pokój jest pełny.');
     if (this.sql.exec('SELECT 1 FROM members WHERE nick_key = ?', nickKey(n)).toArray().length) fail('Ten nick jest już zajęty w pokoju.');
@@ -337,7 +345,7 @@ export class Room extends DurableObject {
         if (name.length < 1 || name.length > 40) fail('Nazwa pokoju: 1–40 znaków.');
         const account = await this.accountFromToken(body.accountToken);
         const nick = body.nick || account?.nick;
-        if (!NICK_RE.test(cleanNick(nick))) fail('Nick: 2–20 znaków, litery, cyfry, spacja, _ . -');
+        if (!NICK_RE.test(cleanNick(nick))) fail(NICK_ERR);
         this.kv('name', name);
         this.kv('code', req.headers.get('X-Room') || '');
         this.kv('created_at', Date.now());
@@ -359,8 +367,13 @@ export class Room extends DurableObject {
       // --- konta (tylko poczekalnia ogólna); acct-verify i acct-room-add wołają inne pokoje, nie przeglądarka
       if (action.startsWith('acct-')) {
         if (!this.isPublic()) return json({ error: 'Nie znaleziono.' }, 404);
-        if (action === 'acct-register') return json(await this.acctRegister(body));
-        if (action === 'acct-login') return json(await this.acctLogin(body));
+        const ip = req.headers.get('X-Client-IP') || '';
+        if (action === 'acct-register') return json(await this.acctRegister(body, ip));
+        if (action === 'acct-login') return json(await this.acctLogin(body, ip));
+        if (action === 'acct-limit') {
+          const limited = await this.takeLimit(body.kind === 'room' ? 'room' : 'register', ip);
+          return limited ? json({ error: limited }, 429) : json({ ok: true });
+        }
         if (action === 'acct-reset-request') return json(await this.acctResetRequest(body));
         if (action === 'acct-reset') return json(await this.acctReset(body));
         if (action === 'acct-verify') {
@@ -371,7 +384,9 @@ export class Room extends DurableObject {
         return json({ error: 'Nie znaleziono.' }, 404);
       }
       if (action === 'join') {
-        const account = this.isPublic() ? null : await this.accountFromToken(body.accountToken);
+        // do poczekalni ogólnej tylko z kontem (hasło + limit zakładania); stare nicki bez hasła działają dalej
+        if (this.isPublic()) fail('Do szybkiej gry potrzebne jest konto — załóż je w aplikacji.');
+        const account = await this.accountFromToken(body.accountToken);
         if (account) {
           // to konto już jest w pokoju — zwróć ten sam nick (np. drugie urządzenie)
           const had = this.sql.exec('SELECT * FROM members WHERE account_id = ?', account.id).toArray()[0];
@@ -420,7 +435,20 @@ export class Room extends DurableObject {
 
   // --- WebSocket ----------------------------------------------------------------
   async webSocketMessage(ws, raw) {
-    if (typeof raw !== 'string') return;
+    if (typeof raw !== 'string' || raw.length > MSG_MAX) return;
+    // ochrona przed zalewaniem: zbyt wiele wiadomości z jednego gniazda → rozłączenie
+    const now = Date.now();
+    this.msgRate ||= new WeakMap();
+    const r = this.msgRate.get(ws) || { start: now, n: 0 };
+    if (now - r.start > MSG_RATE.ms) { r.start = now; r.n = 0; }
+    r.n++;
+    this.msgRate.set(ws, r);
+    if (r.n > MSG_RATE.count) {
+      this.send(ws, { t: 'error', message: 'Zbyt wiele poleceń naraz.' });
+      try { ws.close(4008, 'rate'); } catch {}
+      this.onSocketGone(ws);
+      return;
+    }
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
     if (!msg || typeof msg !== 'object') return;
@@ -499,7 +527,7 @@ export class Room extends DurableObject {
       case 'history': return { games: this.history(this.isPublic() ? me : null) };
       case 'setPassword':
         if (!this.isPublic()) fail('Konto ustawiasz w poczekalni ogólnej.');
-        return this.acctSetPassword(me, msg);
+        return this.acctSetPassword(me, msg, a.th);
       case 'accountInfo':
         if (!this.isPublic()) fail('Konto ustawiasz w poczekalni ogólnej.');
         return this.accountInfo(me);
