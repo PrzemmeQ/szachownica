@@ -46,10 +46,10 @@ function clientIp(req, env) {
   return req.headers.get('CF-Connecting-IP') || '';
 }
 
-async function forward(env, code, action, req, body) {
+async function forward(env, code, action, req, body, extraHeaders = {}) {
   const stub = roomStub(env, code);
   // nagłówki budujemy od zera — klient nie przemyci X-Room ani X-Client-IP
-  const init = { method: req.method, headers: { 'X-Room': code, 'X-Client-IP': clientIp(req, env) } };
+  const init = { method: req.method, headers: { ...extraHeaders, 'X-Room': code, 'X-Client-IP': clientIp(req, env) } };
   if (body !== undefined) { init.method = 'POST'; init.body = JSON.stringify(body); init.headers['Content-Type'] = 'application/json'; }
   return stub.fetch('https://pokoj/' + action, init);
 }
@@ -71,7 +71,7 @@ export default {
         headers: {
           'Access-Control-Allow-Origin': o,
           'Access-Control-Allow-Methods': 'GET, POST',
-          'Access-Control-Allow-Headers': 'Content-Type',
+          'Access-Control-Allow-Headers': 'Content-Type, Authorization',
           'Access-Control-Max-Age': '86400',
           Vary: 'Origin',
         },
@@ -90,6 +90,12 @@ async function route(req, env, url) {
   if (parts[0] !== 'api') return json({ error: 'Nie znaleziono.' }, 404);
 
   if (parts[1] === 'health') return json({ ok: true });
+
+  // statystyki dla właściciela: GET /api/stats, nagłówek Authorization: Bearer <STATS_KEY>
+  if (parts[1] === 'stats' && parts.length === 2 && req.method === 'GET') {
+    const key = (req.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
+    return forward(env, PUBLIC_CODE, 'acct-stats', req, undefined, { 'X-Stats-Key': key });
+  }
 
   // konta: POST /api/account/(register|login|reset-request|reset)
   if (parts[1] === 'account' && req.method === 'POST' && ['register', 'login', 'reset-request', 'reset'].includes(parts[2])) {

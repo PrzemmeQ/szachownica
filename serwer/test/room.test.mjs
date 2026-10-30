@@ -490,3 +490,82 @@ test('konto + pokój: połączenie istniejącego nicku w pokoju z kontem', async
   assert.equal(back.data.nick, 'Bartek');
   ctx.A.close(); ctx.B.close();
 });
+
+// --- cofnięcie ruchu ------------------------------------------------------------------
+test('cofnięcie ruchu: tylko za zgodą rywala; 1 albo 2 półruchy; nowy ruch kasuje prośbę', async () => {
+  const ctx = await roomWithTwo();
+  const { gameId, W, Bl } = await startGame(ctx, { rated: false });
+  let r = await W.req('takeback', { gameId, yes: true });
+  assert.equal(r.ok, false); // nic jeszcze nie zagrał
+  await W.req('move', { gameId, uci: 'e2e4', ply: 0 });
+  await Bl.req('move', { gameId, uci: 'e7e5', ply: 1 });
+  await W.req('move', { gameId, uci: 'g1f3', ply: 2 });
+
+  // białe proszą od razu po swoim ruchu → cofa się 1 półruch
+  let mark = Bl.mark();
+  await W.req('takeback', { gameId, yes: true });
+  let st = await Bl.gameMsg(gameId, 'state', mark);
+  assert.equal(st.state.wtakeback, true);
+  mark = W.mark();
+  await Bl.req('takeback', { gameId, yes: false }); // odmowa
+  st = await W.gameMsg(gameId, 'state', mark);
+  assert.equal(st.state.wtakeback, false);
+  assert.equal(st.state.moves.length, 3);
+  await W.req('takeback', { gameId, yes: true });
+  mark = W.mark();
+  await Bl.req('takeback', { gameId, yes: true }); // zgoda
+  st = await W.gameMsg(gameId, 'state', mark);
+  assert.deepEqual(st.state.moves, ['e2e4', 'e7e5']);
+
+  // białe grają inaczej, czarne odpowiadają, białe proszą → cofają się 2 półruchy (ruch czarnych i białych)
+  await W.req('move', { gameId, uci: 'b1c3', ply: 2 });
+  await Bl.req('move', { gameId, uci: 'g8f6', ply: 3 });
+  await W.req('takeback', { gameId, yes: true });
+  mark = W.mark();
+  await Bl.req('takeback', { gameId, yes: true });
+  st = await W.gameMsg(gameId, 'state', mark);
+  assert.deepEqual(st.state.moves, ['e2e4', 'e7e5']);
+
+  // prośba czarnych znika, gdy białe zagrają
+  await W.req('move', { gameId, uci: 'f1c4', ply: 2 });
+  await Bl.req('move', { gameId, uci: 'b8c6', ply: 3 });
+  await Bl.req('takeback', { gameId, yes: true });
+  mark = Bl.mark();
+  await W.req('move', { gameId, uci: 'd2d3', ply: 4 });
+  st = await Bl.gameMsg(gameId, 'state', mark);
+  assert.equal(st.state.btakeback, false);
+  assert.equal(st.state.moves.length, 5);
+  W.close(); Bl.close();
+});
+
+// --- statystyki ------------------------------------------------------------------------
+test('statystyki: klucz wymagany, liczniki partii i graczy', async () => {
+  const bad = await api(srv.base, 'GET', '/api/stats', undefined, { Authorization: 'Bearer zly' });
+  assert.equal(bad.status, 401);
+  const none = await api(srv.base, 'GET', '/api/stats');
+  assert.equal(none.status, 401);
+  const before = await api(srv.base, 'GET', '/api/stats', undefined, { Authorization: 'Bearer klucz-testowy-statystyk' });
+  assert.equal(before.status, 200, JSON.stringify(before.data));
+
+  const ctx = await roomWithTwo();
+  const { gameId, W, Bl } = await startGame(ctx, { rated: true });
+  await W.req('move', { gameId, uci: 'e2e4', ply: 0 });
+  await Bl.req('move', { gameId, uci: 'e7e5', ply: 1 });
+  const mark = W.mark();
+  await Bl.req('resign', { gameId });
+  await W.gameMsg(gameId, 'state', mark);
+  await sleep(500); // zdarzenie idzie z pokoju do poczekalni w tle
+
+  const after = await api(srv.base, 'GET', '/api/stats', undefined, { Authorization: 'Bearer klucz-testowy-statystyk' });
+  const s = after.data;
+  assert.equal(s.totals.game, before.data.totals.game + 1);
+  assert.equal(s.totals.game_start, before.data.totals.game_start + 1);
+  assert.ok(s.totals.room >= before.data.totals.room + 1);
+  assert.ok(s.active.last7 >= 2);
+  assert.equal(s.days.length, 30);
+  const today = s.days[29];
+  assert.ok(today.game >= 1 && today.players >= 2);
+  assert.ok(s.rooms.some((r) => r.room === 'Klub testowy'));
+  assert.equal(typeof s.successThreshold, 'boolean');
+  ctx.A.close(); ctx.B.close();
+});

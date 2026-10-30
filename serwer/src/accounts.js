@@ -68,7 +68,7 @@ export function cleanEmail(e) {
 
 // Metody dodawane do klasy Room (this = obiekt pokoju). Wywoływane tylko w poczekalni ogólnej.
 // Limity zakładania (na godzinę): z jednego adresu i łącznie. Szkółka na jednym Wi-Fi zmieści grupę.
-const LIMITS = { register: { perIp: 10, total: 300 }, room: { perIp: 10, total: 300 } };
+const LIMITS = { register: { perIp: 10, total: 300 }, room: { perIp: 10, total: 300 }, statsfail: { perIp: 10, total: 1000 } };
 
 export const accountMethods = {
   pbkdf2Iterations() { return this.test ? 1000 : PBKDF2_MAX; },
@@ -127,6 +127,7 @@ export const accountMethods = {
     const limited = await this.takeLimit('register', ip);
     if (limited) this.fail(limited);
     const m = await this.addMember(body.nick, 'member');
+    this.statRecord({ kind: 'account' });
     this.sql.exec('UPDATE members SET pass_hash = ?, email = ?, email_key = ? WHERE id = ?',
       await hashPassword(String(body.password), this.pbkdf2Iterations()), e.email, e.key, m.memberId);
     return { name: this.kv('name'), ...m, rooms: [] };

@@ -418,6 +418,7 @@ export class RoomsProvider {
   async resign(id) { await this.req('resign', { gameId: id }); }
   async abort(id) { await this.req('abort', { gameId: id }); }
   async draw(id, yes) { await this.req('draw', { gameId: id, yes: !!yes }); }
+  async takeback(id, yes) { await this.req('takeback', { gameId: id, yes: !!yes }); }
   async claimVictory(id) { await this.req('claimVictory', { gameId: id }); }
   async claimDraw(id) { await this.req('claimDraw', { gameId: id }); }
 

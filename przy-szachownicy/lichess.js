@@ -46,6 +46,7 @@ function normState(s) {
     wtime: s.wtime, btime: s.btime, winc: s.winc, binc: s.binc,
     status: s.status, winner: s.winner || null,
     wdraw: !!s.wdraw, bdraw: !!s.bdraw,
+    wtakeback: !!s.wtakeback, btakeback: !!s.btakeback,
   };
 }
 
@@ -363,6 +364,8 @@ export class LichessProvider {
   async resign(id) { await this.apiJson(`/api/board/game/${id}/resign`, { method: 'POST' }); }
   async abort(id) { await this.apiJson(`/api/board/game/${id}/abort`, { method: 'POST' }); }
   async draw(id, yes) { await this.apiJson(`/api/board/game/${id}/draw/${yes ? 'yes' : 'no'}`, { method: 'POST' }); }
+  // prośba o cofnięcie / zgoda (yes) albo odmowa (no) — rywal na Lichess musi zaakceptować
+  async takeback(id, yes) { await this.apiJson(`/api/board/game/${id}/takeback/${yes ? 'yes' : 'no'}`, { method: 'POST' }); }
   async claimVictory(id) { await this.apiJson(`/api/board/game/${id}/claim-victory`, { method: 'POST' }); }
   async claimDraw(id) { await this.apiJson(`/api/board/game/${id}/claim-draw`, { method: 'POST' }); }
 

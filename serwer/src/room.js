@@ -4,6 +4,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { Chess } from '../../przy-szachownicy/chess.js';
 import { rateGame, DEFAULT, PROVISIONAL_RD } from './glicko.js';
 import { accountMethods } from './accounts.js';
+import { statsMethods } from './stats.js';
 
 const ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
 export const ROOM_CODE_RE = /^[abcdefghjkmnpqrstuvwxyz23456789]{12}$/;
@@ -113,6 +114,17 @@ export class Room extends DurableObject {
     for (const [c, type] of [['pass_hash', 'TEXT'], ['email', 'TEXT'], ['email_key', 'TEXT'], ['account_id', 'TEXT']]) {
       if (!cols.has(c)) this.sql.exec(`ALTER TABLE members ADD COLUMN ${c} ${type}`);
     }
+    // prośby o cofnięcie ruchu (partie sprzed tej funkcji nie mają kolumn)
+    const gcols = new Set(this.sql.exec("SELECT name FROM pragma_table_info('games')").toArray().map((r) => r.name));
+    for (const c of ['wtakeback', 'btakeback']) {
+      if (!gcols.has(c)) this.sql.exec(`ALTER TABLE games ADD COLUMN ${c} INTEGER NOT NULL DEFAULT 0`);
+    }
+    // statystyki (tylko w poczekalni ogólnej): dzienne liczniki i aktywność graczy (pseudonimowo: pokój + id)
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS stat_days (day TEXT NOT NULL, kind TEXT NOT NULL, n INTEGER NOT NULL, PRIMARY KEY (day, kind));
+      CREATE TABLE IF NOT EXISTS stat_players (
+        room TEXT NOT NULL, member TEXT NOT NULL, day TEXT NOT NULL, games INTEGER NOT NULL, PRIMARY KEY (room, member, day));
+    `);
     this.sql.exec(`
       CREATE UNIQUE INDEX IF NOT EXISTS members_email ON members (email_key) WHERE email_key IS NOT NULL;
       CREATE INDEX IF NOT EXISTS members_account ON members (account_id);
@@ -142,6 +154,12 @@ export class Room extends DurableObject {
     const a = await this.callPublic('acct-verify', { token });
     if (!a) fail('Sesja konta wygasła — zaloguj się ponownie.');
     return a;
+  }
+  // Statystyki zbiera poczekalnia ogólna; inne pokoje wysyłają jej zdarzenia (bez czekania na odpowiedź).
+  reportStat(ev) {
+    if (this.isPublic()) { this.statRecord(ev); return; }
+    const p = this.callPublic('acct-stat', ev).catch((e) => console.error('stat', e));
+    this.ctx.waitUntil?.(p);
   }
   async linkRoomToAccount(memberId, account) {
     this.sql.exec('UPDATE members SET account_id = ? WHERE id = ?', account.id, memberId);
@@ -201,9 +219,9 @@ export class Room extends DurableObject {
   }
   saveGame(g) {
     this.sql.exec(`UPDATE games SET status = ?, winner = ?, moves = ?, wtime = ?, btime = ?, last_move_at = ?,
-      wdraw = ?, bdraw = ?, diff_w = ?, diff_b = ?, ended_at = ? WHERE id = ?`,
+      wdraw = ?, bdraw = ?, wtakeback = ?, btakeback = ?, diff_w = ?, diff_b = ?, ended_at = ? WHERE id = ?`,
     g.status, g.winner, g.moves.join(' '), g.wtime, g.btime, g.last_move_at,
-    g.wdraw ? 1 : 0, g.bdraw ? 1 : 0, g.diff_w ?? null, g.diff_b ?? null, g.ended_at ?? null, g.id);
+    g.wdraw ? 1 : 0, g.bdraw ? 1 : 0, g.wtakeback ? 1 : 0, g.btakeback ? 1 : 0, g.diff_w ?? null, g.diff_b ?? null, g.ended_at ?? null, g.id);
   }
   runningGames() {
     return this.sql.exec("SELECT * FROM games WHERE status = 'started'").toArray().map((g) => {
@@ -241,6 +259,7 @@ export class Room extends DurableObject {
     return {
       moves: [...g.moves], wtime: t.wtime, btime: t.btime, winc: g.inc_ms, binc: g.inc_ms,
       status: g.status, winner: g.winner || null, wdraw: !!g.wdraw, bdraw: !!g.bdraw,
+      wtakeback: !!g.wtakeback, btakeback: !!g.btakeback,
     };
   }
   playerOf(id, rating, prov) {
@@ -351,6 +370,7 @@ export class Room extends DurableObject {
         this.kv('created_at', Date.now());
         const m = await this.addMember(nick, 'owner');
         this.kv('owner_id', m.memberId);
+        this.reportStat({ kind: 'room' });
         if (account) await this.linkRoomToAccount(m.memberId, account);
         return json({ name, ...m });
       }
@@ -381,6 +401,11 @@ export class Room extends DurableObject {
           return a ? json(a) : json({ error: 'Nieznany token.' }, 401);
         }
         if (action === 'acct-room-add') { this.acctAddRoom(body.accountId, body.code, body.name); return json({ ok: true }); }
+        if (action === 'acct-stat') { this.statRecord(body); return json({ ok: true }); }
+        if (action === 'acct-stats') {
+          const err = await this.statsAuth(req.headers.get('X-Stats-Key'), ip);
+          return err ? json({ error: err.msg }, err.status) : json(this.statsSummary());
+        }
         return json({ error: 'Nie znaleziono.' }, 404);
       }
       if (action === 'join') {
@@ -553,6 +578,7 @@ export class Room extends DurableObject {
         return {};
       case 'move': return this.cmdMove(me, msg);
       case 'draw': return this.cmdDraw(me, msg.gameId, !!msg.yes);
+      case 'takeback': return this.cmdTakeback(me, msg.gameId, !!msg.yes);
       case 'resign': return this.cmdResign(me, msg.gameId);
       case 'abort': return this.cmdAbort(me, msg.gameId);
       case 'claimVictory': return this.cmdClaim(me, msg.gameId, true);
@@ -660,6 +686,7 @@ export class Room extends DurableObject {
     gid, white, black, speed, timeMs, incMs, rated ? 1 : 0, timeMs, timeMs, now,
     Math.round(rw.rating), Math.round(rb.rating), rw.rd > PROVISIONAL_RD ? 1 : 0, rb.rd > PROVISIONAL_RD ? 1 : 0, now);
     const g = this.getGame(gid);
+    this.reportStat({ kind: 'game_start' });
     const seeks = this.sql.exec('SELECT id, member_id FROM seeks WHERE member_id IN (?, ?)', white, black).toArray();
     this.sql.exec('DELETE FROM seeks WHERE member_id IN (?, ?)', white, black);
     for (const pid of [white, black]) this.toMember(pid, { t: 'event', ev: { type: 'gameStart', game: this.gameInfo(g, pid) } });
@@ -784,7 +811,7 @@ export class Room extends DurableObject {
     }
     g.last_move_at = now;
     g.moves.push(uci);
-    g.wdraw = 0; g.bdraw = 0;
+    g.wdraw = 0; g.bdraw = 0; g.wtakeback = 0; g.btakeback = 0;
     if (chess.isCheckmate()) this.finish(g, 'mate', color, now);
     else if (chess.isStalemate()) this.finish(g, 'stalemate', null, now);
     else if (chess.isDraw()) this.finish(g, 'draw', null, now);
@@ -809,6 +836,31 @@ export class Room extends DurableObject {
       g[mine] = 1;
     } else {
       g[theirs] = 0;
+    }
+    this.saveGame(g);
+    this.broadcastState(g);
+    return {};
+  }
+  // Cofnięcie ruchu za zgodą rywala (pomyłka przy wpisywaniu). Proszący cofa swój ostatni ruch;
+  // jeśli rywal już odpowiedział, cofają się dwa półruchy. Czas się nie zwraca — zegar rusza od nowa.
+  cmdTakeback(me, id, yes) {
+    const { g, color } = this.running(me, id);
+    const mine = color === 'white' ? 'wtakeback' : 'btakeback';
+    const theirs = color === 'white' ? 'btakeback' : 'wtakeback';
+    if (!yes) {
+      g[theirs] = 0; g[mine] = 0; // odmowa albo wycofanie własnej prośby
+    } else if (g[theirs]) {
+      const asker = other(color);
+      const plies = this.turnOf(g) === asker ? 2 : 1;
+      if (g.moves.length < plies) fail('Nie ma czego cofnąć.');
+      g.moves.splice(g.moves.length - plies, plies);
+      g.wtakeback = 0; g.btakeback = 0; g.wdraw = 0; g.bdraw = 0;
+      g.last_move_at = Date.now();
+      this.chessCache.delete(g.id);
+    } else {
+      const myMoves = color === 'white' ? Math.ceil(g.moves.length / 2) : Math.floor(g.moves.length / 2);
+      if (myMoves < 1) fail('Nie zagrałeś jeszcze żadnego ruchu.');
+      g[mine] = 1;
     }
     this.saveGame(g);
     this.broadcastState(g);
@@ -847,7 +899,10 @@ export class Room extends DurableObject {
     g.status = status;
     g.winner = winner;
     g.ended_at = now;
-    g.wdraw = 0; g.bdraw = 0;
+    g.wdraw = 0; g.bdraw = 0; g.wtakeback = 0; g.btakeback = 0;
+    this.reportStat(ENDED_UNRATED.has(status)
+      ? { kind: 'game_aborted' }
+      : { kind: 'game', room: this.kv('code'), roomName: this.kv('name'), players: [g.white_id, g.black_id] });
     if (g.rated && !ENDED_UNRATED.has(status)) {
       const sp = ratingSpeed(g.speed);
       const w = this.rating(g.white_id, sp);
@@ -948,7 +1003,7 @@ export class Room extends DurableObject {
   }
 }
 
-Object.assign(Room.prototype, accountMethods);
+Object.assign(Room.prototype, accountMethods, statsMethods);
 
 function hasMatingMaterial(chess, c) {
   let minors = 0;

@@ -629,6 +629,7 @@ function onGameMsg(G, msg) {
       break;
     case 'state': {
       const prevPly = G.history.length;
+      const prevHistory = G.history;
       const wasOver = gameOver(G);
       G.state = msg.state;
       G.clockAt = performance.now();
@@ -643,7 +644,14 @@ function onGameMsg(G, msg) {
         resetEntry(); S.entryMsg = '';
         G.opponentGone = null;
       }
-      if (G.history.length < prevPly) { S.input = []; S.entryMsg = 'Cofnięto ruch.'; }
+      if (G.history.length < prevPly) {
+        // cofnięcie ruchu: powiedz, które ruchy zniknęły, żeby poprawić bierki na szachownicy
+        const undone = prevHistory.slice(G.history.length).map((m) => fmtSan(m.san)).join(', ');
+        resetEntry();
+        S.entryMsg = `Cofnięto: ${undone}. Ustaw bierki z powrotem na szachownicy.`;
+        speak(`Cofnięto ruch. Ustaw bierki z powrotem.`);
+        vibrate([60, 40, 60]);
+      }
       G.lastSeenPly = G.history.length;
       if (!wasOver && gameOver(G) && !G.announcedEnd) {
         G.announcedEnd = true;
@@ -1336,6 +1344,11 @@ function viewGame() {
   if (!G.conn) notices.push(`<div class="notice">Brak połączenia — łączę ponownie…</div>`);
   if (oppDraw) notices.push(`<div class="notice">Rywal proponuje remis. <span class="row-actions"><button class="btn small primary" data-action="draw-yes">Przyjmij</button><button class="btn small" data-action="draw-no">Odrzuć</button></span></div>`);
   if (myDraw) notices.push(`<div class="notice muted">Zaproponowałeś remis.</div>`);
+  const canTakeback = !!S.provider?.takeback;
+  const oppTb = canTakeback && G.state && !over && (G.myColor === 'white' ? G.state.btakeback : G.state.wtakeback);
+  const myTb = canTakeback && G.state && !over && (G.myColor === 'white' ? G.state.wtakeback : G.state.btakeback);
+  if (oppTb) notices.push(`<div class="notice">Rywal prosi o cofnięcie swojego ostatniego ruchu. <span class="row-actions"><button class="btn small primary" data-action="takeback-yes">Zgódź się</button><button class="btn small" data-action="takeback-no">Odmów</button></span></div>`);
+  if (myTb) notices.push(`<div class="notice muted">Poprosiłeś o cofnięcie ruchu — czekam na zgodę rywala. <button class="btn small" data-action="takeback-cancel">Wycofaj prośbę</button></div>`);
   if (G.opponentGone && !over) {
     const s = G.opponentGone.claimWinInSeconds;
     notices.push(s === 0
@@ -1346,6 +1359,7 @@ function viewGame() {
   const myMoves = G.history.filter((m) => m.color === G.myColor[0]).length;
   const actions = over ? '' : `
     <div class="g-actions">
+      ${canTakeback && myMoves > 0 && !myTb ? `<button class="btn small" data-action="takeback-ask">Cofnij mój ruch</button>` : ''}
       ${myDraw ? '' : `<button class="btn small" data-action="offer-draw" ${G.history.length < 2 ? 'disabled' : ''}>Zaproponuj remis</button>`}
       ${myMoves === 0 ? `<button class="btn small" data-action="abort">Przerwij</button>` : `<button class="btn small danger" data-action="resign">Poddaj</button>`}
     </div>`;
@@ -1828,6 +1842,17 @@ app.addEventListener('click', async (e) => {
       break;
     case 'draw-yes': try { await S.provider.draw(S.game.id, true); } catch (err) { toast(err.message); } break;
     case 'draw-no': try { await S.provider.draw(S.game.id, false); } catch (err) { toast(err.message); } break;
+    case 'takeback-ask':
+      confirmModal({
+        title: 'Poprosić o cofnięcie ruchu?',
+        text: 'Rywal musi się zgodzić. Jeśli już odpowiedział, cofną się oba ruchy: jego i Twój. Czas na zegarze się nie zwraca.',
+        okLabel: 'Poproś',
+        onOk: async () => { try { await S.provider.takeback(S.game.id, true); toast('Poproszono o cofnięcie ruchu.'); } catch (err) { toast(err.message); } },
+      });
+      break;
+    case 'takeback-yes': try { await S.provider.takeback(S.game.id, true); } catch (err) { toast(err.message); } break;
+    case 'takeback-no':
+    case 'takeback-cancel': try { await S.provider.takeback(S.game.id, false); } catch (err) { toast(err.message); } break;
     case 'resign':
       confirmModal({ title: 'Poddać partię?', okLabel: 'Poddaj', danger: true, onOk: async () => { try { await S.provider.resign(S.game.id); } catch (err) { toast(err.message); } } });
       break;

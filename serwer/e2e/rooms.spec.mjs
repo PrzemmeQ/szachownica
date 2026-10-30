@@ -457,3 +457,64 @@ test('wpisywanie notacją: podpowiedzi, ruch niejednoznaczny (Nbd2), polskie lit
   await expect(W.locator('.lm-san')).toHaveText('c5');
   await A.ctx.close(); await B.ctx.close();
 });
+
+test('cofnięcie ruchu za zgodą rywala; strona statystyk z kluczem', async ({ browser }) => {
+  const A = await phone(browser);
+  const B = await phone(browser);
+  await A.page.goto(FRONT + '/');
+  await A.page.getByRole('button', { name: /Pokój ze znajomymi/ }).click();
+  await A.page.locator('#room-name').fill('Klub cofania');
+  await A.page.locator('#room-nick').fill('Ala');
+  await A.page.getByRole('button', { name: 'Utwórz pokój' }).click();
+  const invite = await A.page.locator('#invite-link').inputValue();
+  await A.page.getByRole('button', { name: 'Gotowe' }).click();
+  await B.page.goto(invite);
+  await B.page.locator('#room-nick').fill('Olek');
+  await B.page.getByRole('button', { name: 'Dołącz' }).click();
+  await A.page.locator('button.tab[data-action="mode"][data-id="member"]').click();
+  await A.page.locator('button.chip[data-action="color"][data-id="white"]').click();
+  await A.page.getByRole('button', { name: 'Wyślij wyzwanie' }).click();
+  await B.page.getByRole('button', { name: 'Przyjmij' }).click();
+  const W = A.page; const Bl = B.page;
+
+  await play(W, 'e4');
+  await expect(Bl.locator('.lm-san')).toHaveText('e4');
+  await play(Bl, 'e5');
+  await expect(W.locator('.lm-san')).toHaveText('e5');
+  await play(W, 'Nc3'); // pomyłka: chciał Nf3
+  await expect(Bl.locator('.lm-san')).toHaveText('Nc3');
+
+  // prośba → rywal widzi i może odmówić
+  await W.getByRole('button', { name: 'Cofnij mój ruch' }).click();
+  await W.locator('.dialog').getByRole('button', { name: 'Poproś' }).click();
+  await expect(W.getByText('czekam na zgodę rywala')).toBeVisible();
+  await expect(Bl.getByText('Rywal prosi o cofnięcie')).toBeVisible();
+  await Bl.getByRole('button', { name: 'Odmów' }).click();
+  await expect(W.getByText('czekam na zgodę rywala')).toBeHidden();
+
+  // ponowna prośba → zgoda
+  await W.getByRole('button', { name: 'Cofnij mój ruch' }).click();
+  await W.locator('.dialog').getByRole('button', { name: 'Poproś' }).click();
+  await Bl.getByRole('button', { name: 'Zgódź się' }).click();
+  await expect(W.locator('.entry-msg')).toContainText('Cofnięto: Nc3');
+  await expect(Bl.locator('.entry-msg')).toContainText('Cofnięto: Nc3');
+  await expect(W.locator('.status')).toHaveText('Twój ruch');
+  await expect(Bl.locator('.lm-san')).toHaveText('e4');
+  await play(W, 'Nf3');
+  await expect(Bl.locator('.lm-san')).toHaveText('Nf3');
+
+  // koniec partii i statystyki
+  await Bl.getByRole('button', { name: 'Poddaj' }).click();
+  await Bl.locator('.dialog').getByRole('button', { name: 'Poddaj' }).click();
+  await expect(W.locator('.result-title')).toHaveText('Wygrana');
+  const S = await phone(browser);
+  await S.page.goto(FRONT + '/statystyki.html');
+  await S.page.locator('#key').fill('zly-klucz');
+  await S.page.getByRole('button', { name: 'Pokaż' }).click();
+  await expect(S.page.locator('#err')).toContainText('Zły klucz');
+  await S.page.locator('#key').fill('klucz-testowy-statystyk');
+  await S.page.getByRole('button', { name: 'Pokaż' }).click();
+  await expect(S.page.getByRole('heading', { name: 'Czy pomysł działa?' })).toBeVisible();
+  await expect(S.page.locator('table').first()).toContainText('Klub cofania');
+  await A.ctx.close(); await B.ctx.close(); await S.ctx.close();
+});

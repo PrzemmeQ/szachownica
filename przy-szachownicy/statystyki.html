@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Statystyki — Przy Szachownicy</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+  <style>
+    main { max-width: 760px; margin: 0 auto; padding: 20px 16px 40px; }
+    .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 12px 0; }
+    .tile { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; }
+    .tile .v { font-size: 1.8rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .tile .l { color: var(--muted); font-size: 0.86rem; }
+    .ok { color: var(--accent); }
+    table { width: 100%; border-collapse: collapse; font-size: 0.9rem; font-variant-numeric: tabular-nums; }
+    th, td { text-align: right; padding: 5px 6px; border-top: 1px solid var(--line); }
+    th:first-child, td:first-child { text-align: left; }
+    th { color: var(--muted); font-weight: 600; }
+    .bar { display: inline-block; height: 8px; background: var(--accent); border-radius: 4px; vertical-align: middle; }
+    .scroll { overflow-x: auto; }
+  </style>
+</head>
+<body>
+<main>
+  <p><a href="./">← Aplikacja</a></p>
+  <h1>Statystyki</h1>
+  <p class="muted small">Tylko liczby — bez nicków, e-maili i adresów. Partie z Lichess się tu nie liczą (idą przez Lichess, nie przez nasz serwer).</p>
+  <section class="card" id="login">
+    <label class="field">Klucz statystyk
+      <input id="key" type="password" autocomplete="current-password">
+    </label>
+    <label class="toggle"><input type="checkbox" id="remember"> Zapamiętaj na tym urządzeniu</label>
+    <div class="row-actions"><button class="btn primary" id="go">Pokaż</button></div>
+    <p class="error" id="err" hidden></p>
+  </section>
+  <div id="out"></div>
+</main>
+<script type="module">
+  import { CONFIG } from './config.js';
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const LS = 'ps_stats_key';
+  try { const k = localStorage.getItem(LS); if (k) { $('key').value = k; $('remember').checked = true; } } catch {}
+
+  async function load() {
+    const key = $('key').value.trim();
+    $('err').hidden = true;
+    try { if ($('remember').checked) localStorage.setItem(LS, key); else localStorage.removeItem(LS); } catch {}
+    let res;
+    try {
+      res = await fetch(String(CONFIG.ROOMS_API).replace(/\/+$/, '') + '/api/stats', { headers: { Authorization: 'Bearer ' + key } });
+    } catch { return fail('Brak połączenia z serwerem.'); }
+    const data = await res.json().catch(() => null);
+    if (!res.ok) return fail(data?.error || `Błąd (${res.status})`);
+    render(data);
+  }
+  function fail(msg) { $('err').textContent = msg; $('err').hidden = false; }
+
+  function tile(v, l, cls = '') { return `<div class="tile"><div class="v ${cls}">${esc(v)}</div><div class="l">${esc(l)}</div></div>`; }
+
+  function render(s) {
+    $('login').hidden = true;
+    const max = Math.max(1, ...s.days.map((d) => d.game));
+    $('out').innerHTML = `
+      <h2>Czy pomysł działa?</h2>
+      <div class="tiles">
+        ${tile(s.groups, 'grup: pokój z ≥4 osobami, które rozegrały ≥3 partie w 28 dni', s.successThreshold ? 'ok' : '')}
+        ${tile(s.regulars28, 'stałych graczy (≥3 partie w 28 dni)')}
+        ${tile(s.returning, 'wracających (grali w tym tygodniu i wcześniej)')}
+        ${tile(s.active.last7 + ' / ' + s.active.last30, 'aktywnych graczy: 7 dni / 30 dni')}
+      </div>
+      <p class="${s.successThreshold ? 'note' : 'muted'} small">${s.successThreshold
+        ? 'Próg sukcesu z planu osiągnięty: co najmniej jedna grupa gra regularnie. Czas zapytać klub o pilotaż.'
+        : 'Próg sukcesu z planu: co najmniej jedna grupa (≥4 osoby) gra regularnie przez miesiąc. Jeszcze nie.'}</p>
+
+      <h2>Od początku</h2>
+      <div class="tiles">
+        ${tile(s.totals.game, 'rozegranych partii')}
+        ${tile(s.totals.game_aborted, 'przerwanych / nierozpoczętych')}
+        ${tile(s.totals.room, 'utworzonych pokoi')}
+        ${tile(s.totals.accountsWithPassword, 'kont z hasłem')}
+      </div>
+
+      <h2>Pokoje (30 dni)</h2>
+      <div class="card scroll"><table>
+        <tr><th>Pokój</th><th>Gracze</th><th>Stali</th><th>Partie</th><th>Ostatnio</th></tr>
+        ${s.rooms.map((r) => `<tr><td>${esc(r.room)}</td><td>${r.players}</td><td>${r.regulars}</td><td>${Math.round(r.gameSlots / 2)}</td><td>${esc(r.last)}</td></tr>`).join('')
+          || '<tr><td colspan="5" class="muted">Jeszcze nikt nie zagrał.</td></tr>'}
+      </table></div>
+
+      <h2>Dzień po dniu (30 dni)</h2>
+      <div class="card scroll"><table>
+        <tr><th>Dzień</th><th>Partie</th><th></th><th>Gracze</th><th>Nowe konta</th><th>Nowe pokoje</th></tr>
+        ${s.days.slice().reverse().map((d) => `<tr><td>${esc(d.day)}</td><td>${d.game}</td>
+          <td style="width:30%"><span class="bar" style="width:${(d.game / max) * 100}%"></span></td>
+          <td>${d.players || 0}</td><td>${d.account}</td><td>${d.room}</td></tr>`).join('')}
+      </table></div>
+      <p class="muted small">Stan na ${esc(new Date(s.generatedAt).toLocaleString('pl-PL'))}. <button class="link" id="again">Odśwież</button></p>`;
+    $('again').onclick = load;
+  }
+  $('go').onclick = load;
+  $('key').addEventListener('keydown', (e) => { if (e.key === 'Enter') load(); });
+</script>
+</body>
+</html>

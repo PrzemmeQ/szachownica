@@ -209,6 +209,18 @@ export class DemoProvider {
       setTimeout(() => { g.wdraw = false; g.bdraw = false; if (g.status === 'started') this._emit(g); }, 1500);
     }
   }
+  // komputer demo zawsze zgadza się na cofnięcie: Twój ostatni ruch (i jego odpowiedź, jeśli już zagrał)
+  async takeback(id, yes) {
+    const g = this.games.get(id);
+    if (!g || !yes || g.status !== 'started') return;
+    const mine = g.myColor[0];
+    const plies = g.chess.turn() === mine ? 2 : 1;
+    const myMoves = g.uci.filter((_, i) => (i % 2 === 0 ? 'w' : 'b') === mine).length;
+    if (!myMoves || g.uci.length < plies) throw new Error('Nie ma czego cofnąć.');
+    for (let i = 0; i < plies; i++) { g.chess.undo(); g.uci.pop(); }
+    g.lastAt = Date.now();
+    this._emit(g);
+  }
   async claimVictory() {}
   async claimDraw() {}
   gameUrl() { return null; }
