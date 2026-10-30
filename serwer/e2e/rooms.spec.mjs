@@ -242,3 +242,40 @@ test('poczekalnia: dołączenie przyciskiem „Graj” przy czekającym', async 
   await expect(B.page.locator('.g-meta')).toContainText('30+0');
   await A.ctx.close(); await B.ctx.close();
 });
+
+test('Menu główne: z Lichess do poczekalni i z powrotem, bez wylogowania', async ({ browser }) => {
+  const { ctx, page } = await phone(browser);
+  // konto Lichess udawane (bez sieci do lichess.org)
+  await ctx.addInitScript(() => { if (!localStorage.getItem('ps_lichess_token')) localStorage.setItem('ps_lichess_token', 'lip_test'); });
+  await ctx.route('https://lichess.org/**', (route) => {
+    const u = route.request().url();
+    if (u.includes('/api/account/playing')) return route.fulfill({ json: { nowPlaying: [] } });
+    if (u.includes('/api/account')) return route.fulfill({ json: { id: 'tester', username: 'Tester', perfs: { rapid: { rating: 1600 } } } });
+    if (u.includes('/api/stream/event')) return route.fulfill({ status: 200, contentType: 'application/x-ndjson', body: '' });
+    return route.fulfill({ status: 404, body: '' });
+  });
+
+  // z tokenem i bez wcześniejszego wyboru: od razu Lichess (jak dotąd)
+  await page.goto(FRONT + '/');
+  await expect(page.locator('.who')).toHaveText('Tester');
+  await page.getByRole('button', { name: 'Menu' }).click();
+  await expect(page.getByRole('button', { name: 'Graj przez Lichess' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Graj z każdym (bez Lichess)' })).toBeVisible();
+
+  // po przeładowaniu zostaje menu (nie wraca samo do Lichess)
+  await page.reload();
+  await expect(page.getByRole('button', { name: 'Graj przez Lichess' })).toBeVisible();
+
+  // poczekalnia ogólna, potem Menu
+  await page.getByRole('button', { name: 'Graj z każdym (bez Lichess)' }).click();
+  await page.locator('#room-nick').fill('Lic' + Math.random().toString(36).slice(2, 6));
+  await page.getByRole('button', { name: 'Wejdź do poczekalni' }).click();
+  await expect(page.locator('.who')).toContainText('Poczekalnia ogólna');
+  await page.getByRole('button', { name: 'Menu' }).click();
+  await expect(page.getByRole('button', { name: /Poczekalnia ogólna \(Lic/ })).toBeVisible();
+
+  // z powrotem do Lichess bez ponownego logowania
+  await page.getByRole('button', { name: 'Graj przez Lichess' }).click();
+  await expect(page.locator('.who')).toHaveText('Tester');
+  await ctx.close();
+});

@@ -173,12 +173,16 @@ async function boot() {
   if (roomsEnabled() && await bootRoom()) return;
   const lichess = new LichessProvider();
   if (!CONFIG.DEMO_ONLY) {
+    let fromLogin = false;
     try {
-      await lichess.handleRedirect();
+      fromLogin = await lichess.handleRedirect();
     } catch (e) {
       S.startError = e.message;
     }
-    if (lichess.hasToken()) {
+    // Do Lichess wchodzimy od razu po zalogowaniu albo gdy ostatnio grano przez Lichess;
+    // po „Menu główne” zostajemy na ekranie startowym (token zostaje).
+    const last = lsGet('ps_last');
+    if (lichess.hasToken() && (fromLogin || !last || last === 'lichess')) {
       await enterWith(lichess);
       return;
     }
@@ -264,15 +268,24 @@ async function logout() {
   if (p) await p.logout();
 }
 
-// Pokój: wyjście do ekranu startowego bez zapominania pokoju (nick zostaje na tym urządzeniu).
-function leaveRoom() {
+// Menu główne: wyjście do ekranu startowego bez wylogowania. Token Lichess, pokój i nick
+// z poczekalni zostają na urządzeniu — wraca się jednym przyciskiem.
+function goMenu() {
+  const w = S.waiting;
+  S.waiting = null;
+  try { w?.cancel?.(); } catch {}
   closeGame();
   const p = S.provider;
   S.provider = null; S.user = null; S.ongoing = []; S.challenges.clear();
-  S.roomHistory = null; S.transfer = null;
-  lsSet('ps_last', '');
+  S.roomHistory = null; S.transfer = null; S.modal = null;
+  lsSet('ps_last', 'menu');
+  S.startError = '';
   S.view = 'start';
-  if (p) { p.stopEvents(); p.disconnect(); }
+  if (p) {
+    p.stopEvents();
+    p.disconnect?.();
+    if (p.isDemo) p.logout();
+  }
   render();
 }
 
@@ -703,7 +716,10 @@ function viewStart() {
   const err = S.startError ? `<p class="error">${esc(S.startError)}</p>` : '';
   const login = CONFIG.DEMO_ONLY
     ? `<p class="note">To jest podgląd. Logowanie przez Lichess zadziała, gdy aplikacja będzie wgrana pod własny adres (instrukcja w README).</p>`
-    : `<button class="btn primary big" data-action="login">Zaloguj przez Lichess</button>
+    : new LichessProvider().hasToken()
+      ? `<button class="btn primary big" data-action="lichess-resume">Graj przez Lichess</button>
+       <button class="link" data-action="lichess-logout">Wyloguj z Lichess</button>`
+      : `<button class="btn primary big" data-action="login">Zaloguj przez Lichess</button>
        <button class="link" data-action="token-login">Inny sposób: wklej token Lichess</button>`;
   return `
   <main class="start">
@@ -851,9 +867,10 @@ function viewLobby() {
       </div>
       <div class="topbar-actions">
         <span class="dot ${S.online ? 'on' : 'off'}" title="${S.online ? 'Połączono' : 'Łączenie…'}"></span>
-        ${rooms ? `<button class="icon-btn" data-action="room-menu" aria-label="Pokój">⌂</button>` : ''}
+        ${rooms ? `<button class="icon-btn" data-action="room-menu" aria-label="${S.provider.isPublic ? 'Twój nick' : 'Pokój'}">⌂</button>` : ''}
         <button class="icon-btn" data-action="settings" aria-label="Ustawienia">⚙︎</button>
-        <button class="icon-btn" data-action="logout" aria-label="${rooms ? 'Wyjdź z pokoju' : 'Wyloguj'}">⏻</button>
+        ${rooms ? '' : `<button class="icon-btn" data-action="logout" aria-label="Wyloguj">⏻</button>`}
+        <button class="btn small" data-action="to-menu">Menu</button>
       </div>
     </header>
 
@@ -1390,13 +1407,15 @@ app.addEventListener('click', async (e) => {
       break;
     }
     case 'demo': S.startError = ''; await enterWith(new DemoProvider()); break;
+    case 'to-menu': goMenu(); break;
+    case 'lichess-resume': S.startError = ''; await enterWith(new LichessProvider()); break;
+    case 'lichess-logout':
+      confirmModal({
+        title: 'Wylogować z Lichess?', text: 'Aplikacja straci dostęp do Twojego konta Lichess na tym urządzeniu.', okLabel: 'Wyloguj',
+        onOk: async () => { await new LichessProvider().logout(); render(); },
+      });
+      break;
     case 'logout':
-      if (S.provider?.features?.rooms) {
-        confirmModal(S.provider.isPublic
-          ? { title: 'Wyjść z poczekalni?', text: 'Twój nick zostanie zapamiętany na tym urządzeniu — wrócisz jednym przyciskiem.', okLabel: 'Wyjdź', onOk: leaveRoom }
-          : { title: 'Wyjść z pokoju?', text: 'Pokój zostanie zapamiętany na tym urządzeniu — wrócisz jednym przyciskiem.', okLabel: 'Wyjdź', onOk: leaveRoom });
-        break;
-      }
       confirmModal({ title: 'Wylogować?', text: S.provider?.isDemo ? 'Zakończysz tryb demo.' : 'Aplikacja straci dostęp do Twojego konta Lichess na tym urządzeniu.', okLabel: 'Wyloguj', onOk: logout });
       break;
     // --- wariant B: pokoje ---
