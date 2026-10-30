@@ -13,7 +13,6 @@ import { Room, ROOM_ID_RE, PUBLIC_CODE, randomCode } from './room.js';
 
 // Klasa obiektu nazywa się RoomV2: zmiana nazwy (migracja v2) wyczyściła dane testowe sprzed wspólnego rankingu.
 export { Room as RoomV2 };
-
 function allowedOrigin(env, origin) {
   if (!origin) return null;
   const list = String(env.ALLOWED_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean);
