@@ -79,6 +79,7 @@ code { font-family: var(--mono); font-size: 0.9em; }
 /* start */
 .start { padding-top: 6vh; }
 .brand { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; }
+.logo-img { width: 64px; height: 64px; border-radius: 15px; flex: none; display: block; }
 .logo {
   font-family: var(--mono); font-weight: 700; font-size: 1.05rem; letter-spacing: 0.02em;
   background: var(--ink); color: var(--bg); border-radius: 12px; padding: 12px 12px;
@@ -286,3 +287,16 @@ code { font-family: var(--mono); font-size: 0.9em; }
 .toggle.disabled { opacity: 0.55; cursor: not-allowed; }
 .danger-text { color: var(--danger); }
 .nowrap { white-space: nowrap; }
+
+/* --- ekran startowy, logowanie QR --- */
+.brand-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.brand-row .brand { margin-bottom: 0; }
+.start-others { margin-top: 28px; padding-top: 14px; border-top: 1px solid var(--line); text-align: center; line-height: 2; color: var(--muted); }
+.others-head { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; }
+.qr-box { background: #fff; padding: 10px; border-radius: 12px; width: min(280px, 100%); margin: 12px auto; }
+.qr-box svg { display: block; width: 100%; height: auto; }
+.qr-video { width: 100%; max-height: 50vh; border-radius: 12px; background: #000; object-fit: cover; }
+.club-code.inline { display: inline-block; font-size: 1.1rem; padding: 2px 8px; margin: 0 4px; }
+
+.chat-row { margin: 10px 0; display: grid; gap: 6px; }
+.chip.small { font-size: 0.82rem; padding: 6px 10px; }

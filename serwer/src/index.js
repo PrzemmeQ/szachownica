@@ -4,9 +4,9 @@
 // POST /api/rooms                 { name, nick?, accountToken? }    → { room, code, memberId, token }  (nowy klub)
 // POST /api/rooms/lookup          { code, accountToken?, deviceId } → { code, name, needsPassword }
 // POST /api/rooms/join            { code, password?, nick?, accountToken?, deviceId } → { room, code, memberId, nick, token }
-// POST /api/rooms/transfer-code   { code }  (6 cyfr)               → { room, memberId, nick, token }
+// POST /api/account/qr-start | qr-poll                              (logowanie komputera zalogowanym telefonem)
+// POST /api/account/passkey-options | passkey-login | passkey-reg-options | passkey-register  (Face ID / odcisk palca)
 // POST /api/rooms/:id/account-login { accountToken }              → { memberId, nick, token }
-// POST /api/rooms/:id/transfer    { code }  (link przeniesienia)
 // GET  /api/rooms/:id/ws          (WebSocket, pierwsza wiadomość: hello{token}); „publiczny” = poczekalnia ogólna
 // GET  /api/stats                 (Authorization: Bearer <STATS_KEY>)
 import { Room, ROOM_ID_RE, PUBLIC_CODE, randomCode } from './room.js';
@@ -75,8 +75,12 @@ async function route(req, env, url) {
     const key = (req.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
     return forward(env, PUBLIC_CODE, 'acct-stats', req, undefined, { 'X-Stats-Key': key });
   }
-  if (parts[1] === 'account' && post && ['register', 'login', 'reset-request', 'reset'].includes(parts[2]) && parts.length === 3) {
-    return forward(env, PUBLIC_CODE, 'acct-' + parts[2], req, await readJson(req));
+  const ACCOUNT = ['register', 'login', 'reset-request', 'reset', 'qr-start', 'qr-poll',
+    'passkey-options', 'passkey-login', 'passkey-reg-options', 'passkey-register'];
+  if (parts[1] === 'account' && post && ACCOUNT.includes(parts[2]) && parts.length === 3) {
+    // klucze dostępu są przypisane do adresu strony — przekazujemy sprawdzone źródło (Origin z listy dozwolonych)
+    const o = allowedOrigin(env, req.headers.get('Origin'));
+    return forward(env, PUBLIC_CODE, 'acct-' + parts[2], req, await readJson(req), o ? { 'X-Origin': o } : {});
   }
   if (parts[1] !== 'rooms') return json({ error: 'Nie znaleziono.' }, 404);
 
@@ -96,13 +100,11 @@ async function route(req, env, url) {
   }
   if (parts.length === 3 && post && parts[2] === 'lookup') return forward(env, PUBLIC_CODE, 'acct-club-lookup', req, await readJson(req));
   if (parts.length === 3 && post && parts[2] === 'join') return forward(env, PUBLIC_CODE, 'acct-club-join', req, await readJson(req));
-  if (parts.length === 3 && post && parts[2] === 'transfer-code') return forward(env, PUBLIC_CODE, 'acct-transfer-claim', req, await readJson(req));
 
   const id = (parts[2] || '').toLowerCase();
   if (!ROOM_ID_RE.test(id) && id !== PUBLIC_CODE) return json({ error: 'Nie ma takiego klubu.' }, 404);
   const action = parts[3] || '';
   if (action === 'account-login' && post && id !== PUBLIC_CODE) return forward(env, id, 'account-login', req, await readJson(req));
-  if (action === 'transfer' && post) return forward(env, id, 'transfer', req, await readJson(req));
   if (action === 'ws') {
     if (req.headers.get('Upgrade') !== 'websocket') return json({ error: 'Oczekiwano WebSocket.' }, 426);
     const h = new Headers();

@@ -70,7 +70,7 @@ export function cleanEmail(e) {
 // Limity zakładania (na godzinę): z jednego adresu i łącznie. Szkółka na jednym Wi-Fi zmieści grupę.
 const LIMITS = {
   register: { perIp: 10, total: 300 }, room: { perIp: 10, total: 300 }, statsfail: { perIp: 10, total: 1000 },
-  clubjoin: { perIp: 30, total: 100000 }, transferfail: { perIp: 10, total: 10000 },
+  clubjoin: { perIp: 30, total: 100000 }, qr: { perIp: 30, total: 100000 }, passkey: { perIp: 30, total: 100000 },
 };
 
 export const accountMethods = {
@@ -222,7 +222,7 @@ export const accountMethods = {
 
   accountInfo(memberId) {
     const m = this.member(memberId);
-    return { hasPassword: !!m?.pass_hash, email: m?.email || null };
+    return { hasPassword: !!m?.pass_hash, email: m?.email || null, passkeys: this.passkeyCount(memberId) };
   },
 
   // Ustawienie lub zmiana hasła (i e-maila) przez zalogowane urządzenie.

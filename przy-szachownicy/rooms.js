@@ -120,14 +120,70 @@ export async function joinClub(code, nick, password) {
   }
   return rememberClub(d.room, d);
 }
-// Przeniesienie na inne urządzenie: link (#przenies=pokój.kod) albo 6 cyfr.
-export async function claimTransfer(room, code) {
-  const d = await http('POST', `/api/rooms/${encodeURIComponent(room)}/transfer`, { code });
-  return room === PUBLIC_CODE ? rememberAccount(d, { secured: false }) : rememberClub(room, d);
+// --- logowanie komputera telefonem (QR) ---
+export async function qrStart() { return http('POST', '/api/account/qr-start', { ua: navigator.userAgent }); }
+// { status: waiting | expired } albo zalogowane konto ({ status: 'approved', saved })
+export async function qrPoll(id, secret) {
+  const d = await http('POST', '/api/account/qr-poll', { id, secret });
+  return d.status === 'approved' ? { status: 'approved', saved: rememberAccount(d) } : d;
 }
-export async function claimTransferCode(code6) {
-  const d = await http('POST', '/api/rooms/transfer-code', { code: code6 });
-  return d.room === PUBLIC_CODE ? rememberAccount(d, { secured: false }) : rememberClub(d.room, d);
+// Po „wyloguj wszystkie urządzenia” klucze klubów na tym urządzeniu też przestają działać — kluby wrócą z konta.
+export function forgetAllClubs() { lsSet(LS_CLUBS, null); }
+
+// --- klucze dostępu (Face ID, odcisk palca, Windows Hello) ---
+const b64u = {
+  enc(buf) { let s = ''; for (const b of new Uint8Array(buf)) s += String.fromCharCode(b); return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); },
+  dec(str) { const s = atob(String(str).replace(/-/g, '+').replace(/_/g, '/')); return Uint8Array.from(s, (c) => c.charCodeAt(0)); },
+};
+export function passkeySupported() { return typeof window !== 'undefined' && !!window.PublicKeyCredential && !!navigator.credentials; }
+// Czy urządzenie ma wbudowany czytnik (Face ID, odcisk palca, Windows Hello) — wtedy proponujemy klucz po zalogowaniu.
+export async function passkeyPlatform() {
+  try { return passkeySupported() && await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable(); } catch { return false; }
+}
+function credJson(c) {
+  const r = c.response;
+  const out = {
+    id: c.id, rawId: b64u.enc(c.rawId), type: c.type, clientExtensionResults: c.getClientExtensionResults?.() || {},
+    authenticatorAttachment: c.authenticatorAttachment || undefined, response: { clientDataJSON: b64u.enc(r.clientDataJSON) },
+  };
+  if (r.attestationObject) {
+    out.response.attestationObject = b64u.enc(r.attestationObject);
+    out.response.transports = r.getTransports?.() || [];
+  } else {
+    out.response.authenticatorData = b64u.enc(r.authenticatorData);
+    out.response.signature = b64u.enc(r.signature);
+    if (r.userHandle) out.response.userHandle = b64u.enc(r.userHandle);
+  }
+  return out;
+}
+function cancelled(e) { return e && (e.name === 'NotAllowedError' || e.name === 'AbortError'); }
+export async function passkeyRegister() {
+  const { options: o, challengeId } = await http('POST', '/api/account/passkey-reg-options', { accountToken: accountToken() });
+  let c;
+  try {
+    c = await navigator.credentials.create({
+      publicKey: {
+        ...o, challenge: b64u.dec(o.challenge), user: { ...o.user, id: b64u.dec(o.user.id) },
+        excludeCredentials: (o.excludeCredentials || []).map((x) => ({ ...x, id: b64u.dec(x.id) })),
+      },
+    });
+  } catch (e) {
+    if (e?.name === 'InvalidStateError') throw new Error('To urządzenie ma już klucz dostępu do tego konta.');
+    if (cancelled(e)) return null;
+    throw e;
+  }
+  return http('POST', '/api/account/passkey-register', { accountToken: accountToken(), challengeId, response: credJson(c) });
+}
+export async function passkeyLogin() {
+  const { options: o, challengeId } = await http('POST', '/api/account/passkey-options', {});
+  let c;
+  try {
+    c = await navigator.credentials.get({
+      publicKey: { ...o, challenge: b64u.dec(o.challenge), allowCredentials: (o.allowCredentials || []).map((x) => ({ ...x, id: b64u.dec(x.id) })) },
+    });
+  } catch (e) { if (cancelled(e)) return null; throw e; }
+  const d = await http('POST', '/api/account/passkey-login', { challengeId, response: credJson(c) });
+  return { saved: rememberAccount(d), rooms: d.rooms || [] };
 }
 
 // Link do strony aplikacji z parametrami (bez innych parametrów z bieżącego adresu).
@@ -522,17 +578,11 @@ export class RoomsProvider {
     this._save();
     return r;
   }
-  // Klub: przypięcie tego nicku do konta (żeby wrócić do klubu po zalogowaniu na innym urządzeniu).
-  async linkAccount() {
-    await this.req('linkAccount', { accountToken: accountToken() });
-    if (this.welcome) { this.welcome.me.linked = true; this.welcome.me.account = true; }
-  }
-
-  // Przeniesienie na inne urządzenie: link (kod po # — nie trafia do logów serwera stron) i 6 cyfr.
-  async transferLink() {
-    const r = await this.req('transferCreate');
-    return { url: `${appLink({})}#przenies=${this.roomId}.${r.code}`, code6: r.code6, expiresIn: r.expiresIn };
-  }
+  // Konto (poczekalnia): zatwierdzenie logowania komputera, wylogowanie wszędzie, klucze dostępu.
+  qrInfo(code) { return this.req('qrInfo', { code }); }
+  qrApprove(code) { return this.req('qrApprove', { code }); }
+  logoutAll() { return this.req('logoutAll'); }
+  async passkeysRemove() { await this.req('passkeysRemove'); if (this.welcome) this.welcome.me.passkeys = 0; }
 
   // --- zarządzanie klubem (założyciel; usuwanie także administratorzy) ---
   async changeCode() { const r = await this.req('changeCode'); if (this.welcome) this.welcome.room.code = r.code; this.s.code = r.code; this._save(); return r.code; }

@@ -1,9 +1,9 @@
 // Service worker: zapamiętuje pliki aplikacji, nie dotyka zapytań do Lichess.
-const VERSION = 'ps-v14';
+const VERSION = 'ps-v15';
 const SHELL = [
   './', './index.html', './style.css', './app.js', './config.js', './notation.js', './ndjson.js',
   './lichess.js', './demo.js', './rooms.js', './chess.js', './manifest.webmanifest', './prywatnosc.html',
-  './icon.svg', './icon-192.png', './icon-512.png', './apple-touch-icon.png',
+  './icon.svg', './logo.svg', './icon-192.png', './icon-512.png', './apple-touch-icon.png',
 ];
 
 self.addEventListener('install', (e) => {

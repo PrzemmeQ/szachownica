@@ -1,5 +1,5 @@
 // Kluby (prywatne pokoje) — część, którą prowadzi poczekalnia ogólna (jedno miejsce dla wszystkich):
-// katalog kodów klubów, dołączanie kodem z blokadą za błędne próby, krótkie kody przeniesienia.
+// katalog kodów klubów i dołączanie kodem z blokadą za błędne próby.
 //
 // Kod klubu: pierwsze 5 liter/cyfr nazwy + „-” + 5 losowych znaków, np. „KLUBH-7Q4MX”.
 // Pokój ma stały, wewnętrzny identyfikator (12 znaków) — kod można zmienić, pokój zostaje.
@@ -127,29 +127,6 @@ export const clubMethods = {
     const account = token ? await this.acctVerify(token) : null;
     if (!account) this.fail('Do klubu dołączasz z kontem — zaloguj się albo załóż konto.');
     return account;
-  },
-
-  // Krótki, 6-cyfrowy kod przeniesienia na inne urządzenie (łatwy do przepisania, np. na iPhonie).
-  clubTransferRegister(roomId, code12) {
-    const now = Date.now();
-    this.sql.exec('DELETE FROM transfer_codes WHERE expires_at < ?', now);
-    let code6;
-    do { code6 = String(100000 + (crypto.getRandomValues(new Uint32Array(1))[0] % 900000)); }
-    while (this.sql.exec('SELECT 1 FROM transfer_codes WHERE code6 = ?', code6).toArray().length);
-    this.sql.exec('INSERT INTO transfer_codes (code6, room_id, code12, expires_at) VALUES (?, ?, ?, ?)', code6, roomId, code12, now + 10 * 60000);
-    return code6;
-  },
-  async clubTransferClaim(body, ip) {
-    const limited = await this.takeLimit('transferfail', ip);
-    if (limited) this.fail('Zbyt wiele prób. Spróbuj za godzinę.');
-    const code6 = String(body.code || '').replace(/\D/g, '');
-    const row = this.sql.exec('SELECT * FROM transfer_codes WHERE code6 = ? AND expires_at > ?', code6, Date.now()).toArray()[0];
-    if (!row) this.fail('Kod przeniesienia jest zły albo wygasł (ważny 10 minut).');
-    this.sql.exec('DELETE FROM transfer_codes WHERE code6 = ?', code6);
-    const res = await this.callRoomRaw(row.room_id, 'transfer', { code: row.code12 });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) this.fail(data.error || 'Kod przeniesienia wygasł.');
-    return { room: row.room_id, ...data };
   },
 
   // --- wywołania pokoju (serwer–serwer) ---

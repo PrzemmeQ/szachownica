@@ -9,6 +9,7 @@ import { statsMethods } from './stats.js';
 import { clubMethods } from './clubs.js';
 import { socialMethods } from './social.js';
 import { memberMethods } from './members.js';
+import { loginMethods } from './login.js';
 
 const ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
 export const ROOM_ID_RE = /^[abcdefghjkmnpqrstuvwxyz23456789]{12}$/;
@@ -104,7 +105,7 @@ export class Room extends DurableObject {
       CREATE TABLE IF NOT EXISTS challenges (
         id TEXT PRIMARY KEY, from_id TEXT NOT NULL, to_id TEXT NOT NULL, time_ms INTEGER NOT NULL,
         inc_ms INTEGER NOT NULL, color TEXT NOT NULL, rated INTEGER NOT NULL, created_at INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS transfers (hash TEXT PRIMARY KEY, member_id TEXT NOT NULL, expires_at INTEGER NOT NULL);
+      DROP TABLE IF EXISTS transfers;
       CREATE TABLE IF NOT EXISTS seeks (
         id TEXT PRIMARY KEY, member_id TEXT NOT NULL, time_ms INTEGER NOT NULL, inc_ms INTEGER NOT NULL,
         rated INTEGER NOT NULL, created_at INTEGER NOT NULL);
@@ -120,7 +121,7 @@ export class Room extends DurableObject {
         room TEXT NOT NULL, member TEXT NOT NULL, day TEXT NOT NULL, games INTEGER NOT NULL, PRIMARY KEY (room, member, day));
       CREATE TABLE IF NOT EXISTS room_dir (room_id TEXT PRIMARY KEY, code TEXT NOT NULL UNIQUE, name TEXT, created_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS code_locks (key TEXT PRIMARY KEY, stage INTEGER NOT NULL, fails INTEGER NOT NULL, banned_until INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS transfer_codes (code6 TEXT PRIMARY KEY, room_id TEXT NOT NULL, code12 TEXT NOT NULL, expires_at INTEGER NOT NULL);
+      DROP TABLE IF EXISTS transfer_codes;
       CREATE TABLE IF NOT EXISTS pair_days (a TEXT NOT NULL, b TEXT NOT NULL, day TEXT NOT NULL, n INTEGER NOT NULL, PRIMARY KEY (a, b, day));
       CREATE TABLE IF NOT EXISTS friends (a TEXT NOT NULL, b TEXT NOT NULL, since INTEGER NOT NULL, PRIMARY KEY (a, b));
       CREATE TABLE IF NOT EXISTS friend_invites (from_id TEXT NOT NULL, to_id TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (from_id, to_id));
@@ -128,6 +129,7 @@ export class Room extends DurableObject {
       CREATE TABLE IF NOT EXISTS invite_log (from_id TEXT NOT NULL, at INTEGER NOT NULL);
     `);
     this.migrateMembers();
+    this.migrateLogin();
   }
 
   isPublic() { return this.kv('public') === '1'; }
@@ -453,20 +455,20 @@ export class Room extends DurableObject {
       // tylko z poczekalni ogólnej (sprawdzenie kodu i blokady jest tam)
       if (action === 'info' && internal) return json({ name: this.kv('name'), needsPassword: !!this.kv('pass_hash') });
       if (action === 'join' && internal) return await this.httpJoin(body);
+      if (action === 'revoke-account' && internal) { // wylogowanie wszystkich urządzeń konta
+        for (const m of this.sql.exec('SELECT id FROM members WHERE account_id = ?', String(body.accountId || '')).toArray()) {
+          this.sql.exec('DELETE FROM tokens WHERE member_id = ?', m.id);
+          for (const ws of this.openSockets()) {
+            if (this.att(ws).memberId === m.id) { this.send(ws, { t: 'authFailed', message: 'Wylogowano na wszystkich urządzeniach.' }); try { ws.close(4001, 'auth'); } catch {} }
+          }
+        }
+        return json({ ok: true });
+      }
       if (action === 'account-login') {
         const account = await this.accountFromToken(body.accountToken);
         if (!account) fail('Zaloguj się na konto.');
         const r = await this.accountEnter(account);
         return json(r.body, r.status);
-      }
-      if (action === 'transfer') {
-        const hash = await sha256(String(body.code ?? '').toLowerCase());
-        const t = this.sql.exec('SELECT * FROM transfers WHERE hash = ?', hash).toArray()[0];
-        this.sql.exec('DELETE FROM transfers WHERE hash = ? OR expires_at < ?', hash, Date.now());
-        if (!t || t.expires_at < Date.now()) return json({ error: 'Kod przeniesienia wygasł albo został już użyty.' }, 410);
-        const m = this.member(t.member_id);
-        if (!m || m.removed) return json({ error: 'Nie ma już takiego gracza w klubie.' }, 410);
-        return json({ name: this.kv('name'), code: this.kv('code'), memberId: m.id, nick: m.nick, token: await this.issueToken(m.id) });
       }
       return json({ error: 'Nie znaleziono.' }, 404);
     } catch (e) {
@@ -487,7 +489,12 @@ export class Room extends DurableObject {
       case 'acct-reset': return this.acctReset(body);
       case 'acct-club-lookup': return this.clubLookup(body, ip);
       case 'acct-club-join': return this.clubJoin(body, ip);
-      case 'acct-transfer-claim': return this.clubTransferClaim(body, ip);
+      case 'acct-qr-start': return this.qrStart(body, ip);
+      case 'acct-qr-poll': return this.qrPoll(body);
+      case 'acct-passkey-options': return this.passkeyLoginOptions(body, req.headers.get('X-Origin'), ip);
+      case 'acct-passkey-login': return this.passkeyLogin(body, req.headers.get('X-Origin'));
+      case 'acct-passkey-reg-options': return this.passkeyRegOptions(body, req.headers.get('X-Origin'));
+      case 'acct-passkey-register': return this.passkeyRegister(body, req.headers.get('X-Origin'));
       case 'acct-limit': {
         const limited = await this.takeLimit(body.kind === 'room' ? 'room' : 'register', ip);
         if (limited) fail(limited);
@@ -519,7 +526,6 @@ export class Room extends DurableObject {
       case 'acct-ratings': return this.acctRatings(body.ids);
       case 'acct-rate': return this.acctRate(body);
       case 'acct-stat': this.statRecord(body); return { ok: true };
-      case 'acct-transfer6': return { code6: this.clubTransferRegister(String(body.roomId), String(body.code12)) };
       default: fail('Nie znaleziono.');
     }
     return {};
@@ -658,15 +664,6 @@ export class Room extends DurableObject {
       case 'abort': return this.cmdAbort(me, msg.gameId);
       case 'claimVictory': return this.cmdClaim(me, msg.gameId, true);
       case 'claimDraw': return this.cmdClaim(me, msg.gameId, false);
-      case 'transferCreate': {
-        const code = randomCode(12);
-        const ttl = 10 * 60000;
-        this.sql.exec('DELETE FROM transfers WHERE member_id = ? OR expires_at < ?', me, Date.now());
-        this.sql.exec('INSERT INTO transfers (hash, member_id, expires_at) VALUES (?, ?, ?)', await sha256(code), me, Date.now() + ttl);
-        const roomId = this.kv('room_id');
-        const r6 = pub ? { code6: this.clubTransferRegister(roomId, code) } : await this.callPublic('acct-transfer6', { roomId, code12: code });
-        return { code, code6: r6?.code6 || null, expiresIn: ttl / 1000 };
-      }
       case 'logout':
         this.sql.exec('DELETE FROM tokens WHERE hash = ?', a.th);
         ws.serializeAttachment({ at: a.at });
@@ -678,6 +675,10 @@ export class Room extends DurableObject {
       switch (msg.t) {
         case 'setPassword': return this.acctSetPassword(me, msg, a.th);
         case 'accountInfo': return this.accountInfo(me);
+        case 'qrInfo': return this.cmdQrInfo(msg.code);
+        case 'qrApprove': return this.cmdQrApprove(me, msg.code);
+        case 'logoutAll': return this.cmdLogoutAll(me, a.th);
+        case 'passkeysRemove': return this.cmdPasskeysRemove(me);
         case 'myRooms': return { rooms: this.acctRooms(me) };
         case 'social': return { social: this.socialOf(me) };
         case 'friendInvite': return this.cmdFriendInvite(me, msg);
@@ -1260,7 +1261,7 @@ export class Room extends DurableObject {
   }
 }
 
-Object.assign(Room.prototype, accountMethods, statsMethods, clubMethods, socialMethods, memberMethods);
+Object.assign(Room.prototype, accountMethods, statsMethods, clubMethods, socialMethods, memberMethods, loginMethods);
 
 function hasMatingMaterial(chess, c) {
   let minors = 0;

@@ -4,7 +4,7 @@ import { LichessProvider } from './lichess.js';
 import { DemoProvider } from './demo.js';
 import {
   RoomsProvider, roomsEnabled, savedAccount, savedClubs, savedClub, myClubs, createRoom, lookupClub, joinClub,
-  claimTransfer, claimTransferCode, registerAccount, loginAccount, requestPasswordReset, resetPassword, restoreRoom,
+  qrStart, qrPoll, forgetAllClubs, passkeySupported, passkeyPlatform, passkeyRegister, passkeyLogin, registerAccount, loginAccount, requestPasswordReset, resetPassword, restoreRoom,
   setAccountRooms,
 } from './rooms.js';
 import {
@@ -15,7 +15,7 @@ import {
 // Ustawienia użytkownika
 // ---------------------------------------------------------------------------
 const SETTINGS_KEY = 'ps_settings';
-const DEFAULT_SETTINGS = { speech: true, vibrate: true, sound: true, autoSend: false, emergencyBoard: true, sanEntry: true, englishNotation: true, learnMode: false };
+const DEFAULT_SETTINGS = { speech: true, vibrate: true, sound: true, autoSend: false, emergencyBoard: true, sanEntry: true, englishNotation: true, learnMode: false, readChat: true };
 function loadSettings() {
   try {
     const s = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
@@ -73,12 +73,9 @@ const S = {
   startError: '',
   settings: loadSettings(),
   form: {
-    mode: 'seek', preset: 'r10_5', rated: true, friend: '', color: 'random', level: 3,
+    mode: 'seek', preset: 'r10_5', rated: true, friend: '', color: 'random', level: 3, near: true,
     ...(() => { try { return JSON.parse(lsGet('ps_form') || '{}'); } catch { return {}; } })(),
   },
-  bannerHidden: lsGet('ps_banner_hidden') === '1',
-  voted: lsGet('ps_vote') ? 'done' : null,
-  voteEmail: '',
   streamOpenedAt: 0,
   // wariant B: pokoje
   roomForm: { name: '', nick: lsGet('ps_room_nick') || '' },
@@ -196,10 +193,8 @@ async function boot() {
     } catch (e) {
       S.startError = e.message;
     }
-    // Do Lichess wchodzimy od razu po zalogowaniu albo gdy ostatnio grano przez Lichess;
-    // po „Menu główne” zostajemy na ekranie startowym (token zostaje).
-    const last = lsGet('ps_last');
-    if (lichess.hasToken() && (fromLogin || !last || last === 'lichess')) {
+    // Do Lichess wchodzimy od razu tylko po powrocie z logowania; poza tym zawsze ekran główny.
+    if (lichess.hasToken() && (fromLogin || (!roomsEnabled() && lsGet('ps_last') !== 'menu'))) {
       await enterWith(lichess);
       return;
     }
@@ -208,14 +203,14 @@ async function boot() {
   render();
 }
 
-// Wariant B: wejście z linku (?klub=KOD, #przenies=pokój.kod, #reset=…, #nowy-pokoj) albo do ostatnio otwartego miejsca.
+// Wariant B: wejście z linku (?klub=KOD, #qr=…, #reset=…, #nowy-pokoj). Bez linku zawsze ekran główny.
 // Zwraca true, jeśli zajął się startem.
 async function bootRoom() {
   const params = new URLSearchParams(location.search);
   const code = (params.get('klub') || params.get('pokoj') || '').trim();
-  // tokeny (przeniesienie, zmiana hasła) są po # — nie trafiają do logów serwera stron
+  // tokeny (logowanie QR, zmiana hasła) są po # — nie trafiają do logów serwera stron
   const hash = new URLSearchParams(location.hash.slice(1));
-  const transfer = (hash.get('przenies') || '').trim();
+  const qr = (hash.get('qr') || '').trim();
   const reset = (hash.get('reset') || '').trim();
   const clean = () => history.replaceState(null, '', location.pathname);
   if (location.hash === '#nowy-pokoj') { // ze strony dla klubów: od razu zakładanie klubu (najpierw konto)
@@ -232,15 +227,15 @@ async function bootRoom() {
     render();
     return true;
   }
-  if (transfer) {
+  if (qr) { // kod QR z komputera zeskanowany aparatem telefonu (otwiera się przeglądarka)
     clean();
-    S.view = 'loading'; render();
-    try {
-      const [room, tcode] = transfer.split('.');
-      await enterWith(new RoomsProvider(await claimTransfer(room, tcode)));
-    } catch (e) {
-      S.startError = e.message; S.view = 'start'; render();
+    if (!savedAccount()) {
+      S.startError = 'Żeby zalogować komputer, najpierw zaloguj się tutaj. Albo otwórz aplikację, w której jesteś zalogowany, i użyj „Zaloguj komputer”.';
+      S.view = 'start'; render();
+      return true;
     }
+    S.view = 'start'; render();
+    await qrConfirm(qr);
     return true;
   }
   if (code) {
@@ -249,12 +244,6 @@ async function bootRoom() {
     return true;
   }
   if (params.has('code') || params.has('error')) return false; // powrót z logowania Lichess
-  const last = lsGet('ps_last') || '';
-  if (last === 'public' && savedAccount()) { await enterWith(new RoomsProvider(savedAccount())); return true; }
-  if (last.startsWith('club:')) {
-    const c = savedClub(last.slice(5));
-    if (c) { await enterWith(new RoomsProvider(c)); return true; }
-  }
   // iPhone: aplikacja z ekranu głównego ma osobną pamięć od Safari — przy pierwszym uruchomieniu wyjaśnij
   if (isStandalone() && !savedAccount() && !savedClubs().length && !lsGet('ps_standalone_seen')) {
     lsSet('ps_standalone_seen', '1');
@@ -270,7 +259,7 @@ async function enterWith(provider) {
   S.provider = provider;
   S.view = 'loading';
   render();
-  lsSet('ps_last', provider.lastKey || provider.name);
+  lsSet('ps_last', provider.name);
   try {
     S.user = await provider.account();
     provider.userId = S.user.id;
@@ -298,7 +287,7 @@ async function logout() {
   closeGame();
   const p = S.provider;
   S.provider = null; S.user = null; S.ongoing = []; S.challenges.clear();
-  S.roomHistory = null; S.transfer = null;
+  S.roomHistory = null;
   S.view = 'start';
   render();
   if (p) await p.logout();
@@ -313,7 +302,7 @@ function goMenu() {
   closeGame();
   const p = S.provider;
   S.provider = null; S.user = null; S.ongoing = []; S.challenges.clear();
-  S.roomHistory = null; S.transfer = null; S.modal = null; S.coach = null;
+  S.roomHistory = null; S.modal = null; S.coach = null;
   lsSet('ps_last', 'menu');
   S.startError = '';
   S.view = 'start';
@@ -410,16 +399,142 @@ async function submitJoin() {
     S.waiting = null; j.error = e.message; render();
   }
 }
-// Kod przeniesienia (6 cyfr) z innego urządzenia.
-async function submitTransferCode() {
-  const code6 = (document.getElementById('transfer-code')?.value || '').replace(/\D/g, '');
-  if (code6.length !== 6) { toast('Kod przeniesienia ma 6 cyfr.'); return; }
-  S.waiting = { text: 'Przenoszę…', kind: 'pending' }; render();
+// --- logowanie komputera telefonem (QR) --------------------------------------------
+// Skrypty pomocnicze (generator i czytnik QR) wczytujemy dopiero, gdy są potrzebne.
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    if (document.querySelector(`script[data-src="${src}"]`)) { resolve(); return; }
+    const s = document.createElement('script');
+    s.src = src; s.dataset.src = src; s.onload = resolve; s.onerror = () => reject(new Error('Nie udało się wczytać ' + src));
+    document.head.appendChild(s);
+  });
+}
+function qrUrl(id) { return location.origin + location.pathname + '#qr=' + id; }
+function qrSvg(text) {
+  const q = window.qrcode(0, 'M');
+  q.addData(text); q.make();
+  return q.createSvgTag({ cellSize: 6, margin: 3, scalable: true });
+}
+// Komputer: kod QR i krótki kod; co 2 s pyta, czy telefon zatwierdził.
+async function startQrLogin() {
+  stopQrLogin();
+  S.view = 'qr-login'; S.qr = { loading: true }; render();
   try {
-    const saved = await claimTransferCode(code6);
-    S.waiting = null;
-    await enterWith(new RoomsProvider(saved));
-  } catch (e) { S.waiting = null; toast(e.message, 5000); render(); }
+    await loadScript('vendor/qrcode.js');
+    const q = await qrStart();
+    S.qr = { ...q, svg: qrSvg(qrUrl(q.id)), until: Date.now() + q.expiresIn * 1000 };
+    render();
+    S.qr.timer = setInterval(pollQrLogin, 2000);
+  } catch (e) { S.qr = { error: e.message }; render(); }
+}
+function stopQrLogin() { if (S.qr?.timer) clearInterval(S.qr.timer); }
+async function pollQrLogin() {
+  const q = S.qr;
+  if (!q?.id || S.view !== 'qr-login') { stopQrLogin(); return; }
+  try {
+    const r = await qrPoll(q.id, q.secret);
+    if (r.status === 'approved') {
+      stopQrLogin(); S.qr = null;
+      toast(`Zalogowano jako ${r.saved.nick}.`);
+      S.view = 'start'; render();
+      offerPasskey();
+    } else if (r.status === 'expired' || Date.now() > q.until) { stopQrLogin(); S.qr = { expired: true }; render(); }
+    else { const c = document.getElementById('qr-left'); if (c) c.textContent = fmtCountdown(Math.max(0, Math.ceil((q.until - Date.now()) / 1000))); }
+  } catch (e) { console.warn(e); }
+}
+// Telefon: zalogowane konto (połączenie z poczekalnią ogólną) — potrzebne do zatwierdzenia.
+async function accountProvider() {
+  if (S.provider?.isPublic) return S.provider;
+  const acct = savedAccount();
+  if (!acct) { openAccount('login', 'start'); return null; }
+  await enterWith(new RoomsProvider(acct));
+  return S.provider?.isPublic ? S.provider : null;
+}
+// Pytanie „Zalogować komputer jako …?” po zeskanowaniu albo wpisaniu kodu.
+async function qrConfirm(code) {
+  const p = await accountProvider();
+  if (!p) return;
+  let info;
+  try { info = await p.qrInfo(code); } catch (e) { toast(e.message, 6000); return; }
+  confirmModal({
+    title: `Zalogować ${info.device} jako ${S.user?.name || ''}?`,
+    text: 'Zatwierdzaj tylko kod z ekranu, który masz teraz przed sobą. Jeśli ktoś przysłał Ci ten kod albo pokazuje go na swoim urządzeniu — odrzuć: dostałby dostęp do Twojego konta.',
+    okLabel: 'Tak, zaloguj', cancelLabel: 'Nie',
+    onOk: async () => { try { await p.qrApprove(code); toast(`Zalogowano: ${info.device}.`, 5000); } catch (e) { toast(e.message, 6000); } },
+  });
+}
+// Skaner QR w aplikacji (działa też w aplikacji z ekranu głównego iPhone'a).
+async function openQrScanner() {
+  if (!(await accountProvider())) return;
+  S.modal = { kind: 'qr-scan' }; render();
+  const video = document.getElementById('qr-video');
+  if (!navigator.mediaDevices?.getUserMedia || !video) { S.scanError = 'Aparat niedostępny — wpisz kod z ekranu komputera.'; render(); return; }
+  try {
+    S.scanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+    video.srcObject = S.scanStream; await video.play();
+  } catch { S.scanError = 'Brak dostępu do aparatu — wpisz kod z ekranu komputera.'; render(); return; }
+  let detector = null;
+  if ('BarcodeDetector' in window) { try { detector = new window.BarcodeDetector({ formats: ['qr_code'] }); } catch {} }
+  if (!detector) { try { await loadScript('vendor/jsQR.js'); } catch {} }
+  const canvas = document.createElement('canvas');
+  const tick = async () => {
+    if (S.modal?.kind !== 'qr-scan' || !S.scanStream) return;
+    let text = null;
+    try {
+      const video = document.getElementById('qr-video'); // po każdym render() to nowy element
+      if (!video) { setTimeout(tick, 250); return; }
+      if (detector) text = (await detector.detect(video))[0]?.rawValue || null;
+      else if (window.jsQR && video.videoWidth) {
+        canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        ctx.drawImage(video, 0, 0);
+        text = window.jsQR(ctx.getImageData(0, 0, canvas.width, canvas.height).data, canvas.width, canvas.height)?.data || null;
+      }
+    } catch {}
+    const m = text && text.match(/#qr=([A-Za-z0-9]+)/);
+    if (m) { closeScanner(); await qrConfirm(m[1]); return; }
+    setTimeout(tick, 250);
+  };
+  tick();
+}
+function closeScanner() {
+  try { S.scanStream?.getTracks().forEach((t) => t.stop()); } catch {}
+  S.scanStream = null; S.scanError = '';
+  if (S.modal?.kind === 'qr-scan') S.modal = null;
+}
+
+// --- klucze dostępu (Face ID / odcisk palca / Windows Hello) --------------------------
+const PASSKEY_NAME = 'Face ID / odcisk palca';
+// Po zalogowaniu na urządzeniu z czytnikiem: jedno pytanie na urządzenie.
+async function offerPasskey() {
+  if (lsGet('ps_passkey_asked') || !savedAccount() || !(await passkeyPlatform())) return;
+  lsSet('ps_passkey_asked', '1');
+  confirmModal({
+    title: 'Włączyć logowanie Face ID / odciskiem palca?',
+    text: 'Następnym razem zalogujesz się jednym dotknięciem, bez wpisywania hasła. Hasło zostaje jako zapas. Klucz synchronizuje się przez iCloud albo konto Google.',
+    okLabel: 'Włącz', cancelLabel: 'Nie teraz',
+    onOk: addPasskey,
+  });
+}
+async function addPasskey() {
+  try {
+    const r = await passkeyRegister();
+    if (!r) return; // anulowane
+    if (S.provider?.me) S.provider.me.passkeys = r.passkeys;
+    toast(`Włączono logowanie: ${PASSKEY_NAME}.`, 5000);
+    render();
+  } catch (e) { toast(e.message, 6000); }
+}
+async function loginWithPasskey() {
+  try {
+    const r = await passkeyLogin();
+    if (!r) return;
+    toast(`Zalogowano jako ${r.saved.nick}.`);
+    const f = S.accountForm;
+    if (f.next === 'club-join') { const code = S.pendingClubCode || ''; S.pendingClubCode = ''; await openClubJoin(code); return; }
+    if (f.next === 'room-new') { S.view = 'room-new'; render(); return; }
+    S.view = 'start'; render();
+  } catch (e) { toast(e.message, 6000); }
 }
 
 // --- konto ---------------------------------------------------------------------------
@@ -461,6 +576,7 @@ async function submitAccount(kind) {
     // kluby przypięte do konta pojawią się w „Moje kluby” (otworzą się jednym kliknięciem)
     S.waiting = null;
     S.roomForm.nick = r.saved.nick;
+    offerPasskey(); // jedno pytanie o Face ID na urządzenie
     if (f.next === 'public') { await enterWith(new RoomsProvider(r.saved)); return; }
     if (f.next === 'room-new') { S.view = 'room-new'; render(); return; }
     if (f.next === 'club-join') { const code = S.pendingClubCode || ''; S.pendingClubCode = ''; await openClubJoin(code); return; }
@@ -555,7 +671,17 @@ function onProviderEvent(ev) {
       } else if (S.view === 'lobby') render();
       break;
     }
-    case 'gameFinish':
+    case 'gameFinish': {
+      // Lichess podaje zmianę rankingu po partii — pokaż ją na ekranie wyniku
+      const G = S.game;
+      if (G && G.id === ev.game.id && ev.game.ratingDiff != null && !G.spectator) {
+        const d = ev.game.ratingDiff;
+        G.ratingResult = { counted: true, diffW: G.myColor === 'white' ? d : null, diffB: G.myColor === 'black' ? d : null };
+        if (S.view === 'game') render();
+      }
+    }
+    // fallthrough
+    case 'gameFinishList':
       S.ongoing = S.ongoing.filter((x) => x.id !== ev.game.id);
       if (S.roomHistory) loadRoomHistory();
       if (S.view === 'lobby') render();
@@ -604,6 +730,11 @@ async function startNewGame() {
   const f = S.form;
   const p = presetById(f.preset);
   const opts = { time: p.time, increment: p.increment, days: p.days, rated: f.rated && !ratedBlockReason(), color: f.color };
+  // Lichess: szukanie tylko wśród rywali ±100 od mojego rankingu w tym tempie
+  if (S.provider?.name === 'lichess' && f.mode === 'seek' && f.near) {
+    const r = S.user?.ratings?.[p.days ? 'correspondence' : p.group === 'Rapid' ? 'rapid' : 'classical'];
+    if (r) opts.ratingRange = `${r - 100}-${r + 100}`;
+  }
   try {
     if (f.mode === 'seek') {
       S.waiting = { text: 'Łączenie…', kind: 'pending' }; render();
@@ -699,7 +830,7 @@ function openGame(id, colorHint) {
     colorHint: colorHint || info?.color || null,
     myColor: colorHint || info?.color || 'white',
     full: null, state: null, chess: null, history: [],
-    lastSeenPly: null, conn: true, opponentGone: null, error: '',
+    lastSeenPly: null, conn: true, opponentGone: null, error: '', openedAt: Date.now(),
     clockAt: performance.now(), stream: null, announcedEnd: false,
   };
   S.game = G;
@@ -820,6 +951,17 @@ function onGameMsg(G, msg) {
       G.ratingResult = msg.result;
       render();
       break;
+    case 'chat': { // Lichess: wiadomość rywala (bez komunikatów systemowych i własnych)
+      const from = String(msg.user || '');
+      if (msg.room !== 'player' || !from || from.toLowerCase() === 'lichess' || from.toLowerCase() === String(S.user?.name || '').toLowerCase()) break;
+      G.lastChat = { user: from, text: String(msg.text || '').slice(0, 140) };
+      if (Date.now() - (G.openedAt || 0) > 3000) { // bez odtwarzania starych wiadomości po otwarciu partii
+        toast(`${from}: ${G.lastChat.text}`, 6000);
+        if (S.settings.readChat !== false) speak('Rywal pisze: ' + G.lastChat.text);
+      }
+      render();
+      break;
+    }
     case 'connection':
       G.conn = msg.ok;
       render();
@@ -1007,6 +1149,7 @@ function render() {
   else if (S.view === 'start') html = viewStart();
   else if (S.view === 'room-new') html = viewRoomNew();
   else if (S.view === 'club-join') html = viewClubJoin();
+  else if (S.view === 'qr-login') html = viewQrLogin();
   else if (S.view === 'account') html = viewAccount();
   else if (S.view === 'lobby') html = viewLobby();
   else if (S.view === 'game') html = viewGame();
@@ -1014,6 +1157,10 @@ function render() {
   html += viewWaiting() + viewModal();
   app.innerHTML = html;
 
+  if (S.scanStream && S.modal?.kind !== 'qr-scan') closeScanner(); // okno zamknięte (Esc, kliknięcie obok) — wyłącz aparat
+  // skaner QR: nowy element <video> po render() — podłącz ten sam obraz z aparatu
+  const v = S.scanStream && document.getElementById('qr-video');
+  if (v) { v.srcObject = S.scanStream; v.play().catch(() => {}); }
   if (focusId) {
     const el = document.getElementById(focusId);
     if (el) { el.focus(); if (selStart != null && el.setSelectionRange) { try { el.setSelectionRange(selStart, selStart); } catch {} } }
@@ -1041,7 +1188,7 @@ function viewStart() {
   const err = S.startError ? `<p class="error">${esc(S.startError)}</p>` : '';
   const brand = `
     <div class="brand">
-      <div class="logo" aria-hidden="true">e2·e4</div>
+      <img class="logo-img" src="logo.svg" alt="" width="64" height="64">
       <h1>${esc(CONFIG.APP_NAME)}</h1>
     </div>`;
   if (!roomsEnabled()) {
@@ -1061,55 +1208,85 @@ function viewStart() {
   </main>`;
   }
   const acct = savedAccount();
-  const clubs = myClubs();
-  const who = acct
-    ? `<p class="account-line">Grasz jako <strong>${esc(acct.nick)}</strong>${acct.secured ? '' : ' · <span class="warn">konto bez hasła</span>'}
-         <button class="link small" data-action="account-menu">Konto</button></p>`
-    : `<p class="account-line muted small">Konto trzyma ranking, znajomych i kluby na każdym urządzeniu. <button class="link small" data-action="account-login">Mam konto — zaloguj się</button></p>`;
+  const clubs = acct ? myClubs() : [];
   const hint = S.standaloneHint ? `
     <div class="notice">Aplikacja z ekranu głównego ma osobną pamięć od przeglądarki. Zaloguj się tu raz — zapamięta Cię.
-      Klub z innego urządzenia przeniesiesz 6-cyfrowym kodem (niżej). <button class="link small" data-action="hide-standalone">OK</button></div>` : '';
-  const clubsCard = clubs.length ? `
+      <button class="link small" data-action="hide-standalone">OK</button></div>` : '';
+  const others = `
+    <div class="start-others">
+      <div class="others-head">${acct ? 'Inne' : 'Bez konta'}</div>
+      ${CONFIG.DEMO_ONLY ? '' : new LichessProvider().hasToken()
+    ? `<button class="link small" data-action="lichess-resume">Graj przez Lichess</button> · <button class="link small" data-action="lichess-logout">Wyloguj z Lichess</button>`
+    : `<button class="link small" data-action="login">Zaloguj przez Lichess</button> · <button class="link small" data-action="token-login">token Lichess</button>`}
+      <br><button class="link small" data-action="demo">Wypróbuj z komputerem (demo)</button> · <a class="small" href="kluby.html">Dla klubów i trenerów</a> · ${PRIVACY_LINK}
+    </div>`;
+  if (!acct) {
+    // bez konta: zachęta do konta na górze, reszta drobnym drukiem
+    return `
+  <main class="start">
+    ${brand}
+    <p class="lead">Grasz na prawdziwej szachownicy. Tu tylko wpisujesz swój ruch i słyszysz ruch rywala.</p>
+    ${err}
+    ${hint}
+    <div class="stack">
+      <button class="btn primary big" data-action="account-register">Załóż konto</button>
+      <button class="btn big" data-action="account-login">Zaloguj się</button>
+    </div>
+    <p class="muted small center-text">Tylko nick i hasło, bez e-maila. Ranking, znajomi, kluby i szybka gra — na każdym urządzeniu.</p>
+    <p class="small center-text"><button class="link" data-action="qr-login">Logujesz się na komputerze? Zaloguj telefonem (QR)</button></p>
+    ${others}
+  </main>`;
+  }
+  const clubsCard = `
     <section class="card mode-card">
       <h2>Moje kluby</h2>
+      ${clubs.length ? '' : '<p class="muted small">Masz kod klubu od trenera albo znajomych? Dołącz. Możesz też założyć własny klub.</p>'}
       <div class="stack">${clubs.map((c) => `
         <button class="btn big mode-btn ${c.status === 'invited' ? 'primary' : ''}" data-action="open-club" data-id="${esc(c.room)}">${c.status === 'pending' ? '⏳' : c.status === 'invited' ? '✉️' : '👥'} ${esc(c.name)}<span class="mode-sub">${
   c.status === 'pending' ? 'czeka na zatwierdzenie przez założyciela lub admina'
     : c.status === 'invited' ? 'zaproszenie — kliknij, żeby wejść'
       : c.here ? `jako ${esc(c.nick)}` : 'zapisany na koncie — otwórz'}</span></button>`).join('')}
       </div>
-      <p class="small"><button class="link" data-action="club-join-open">Dołącz do innego klubu</button> · <button class="link" data-action="room-new">Załóż klub</button></p>
-    </section>` : '';
+      <div class="row-actions"><button class="btn small" data-action="club-join-open">+ Dołącz do klubu</button> <button class="btn small" data-action="room-new">+ Załóż klub</button></div>
+    </section>`;
   return `
   <main class="start">
-    ${brand}
-    <p class="lead">Grasz na prawdziwej szachownicy. Tu tylko wpisujesz swój ruch i słyszysz ruch rywala.</p>
+    <div class="brand-row">${brand}
+      <button class="btn small" data-action="account-menu" aria-label="Konto">${esc(acct.nick)} ▾</button></div>
     ${err}
     ${hint}
-    <section class="card mode-card">
-      <h2>Bez konta Lichess</h2>
-      ${who}
-      <div class="stack">
-        <button class="btn primary big mode-btn" data-action="quick-play">⚡ Szybka gra<span class="mode-sub">dobór rywala online, znajomi, ranking ogólny</span></button>
-        ${clubs.length ? '' : `<button class="btn big mode-btn" data-action="club-join-open">🔑 Dołącz do klubu<span class="mode-sub">masz kod klubu, np. HETMA-7Q4MX</span></button>
-        <button class="link small" data-action="room-new">Załóż klub (dla znajomych, klubu, szkółki)</button>`}
-      </div>
-    </section>
+    <div class="stack">
+      <button class="btn primary big mode-btn" data-action="quick-play">⚡ Szybka gra<span class="mode-sub">dobór rywala online, znajomi, ranking ogólny</span></button>
+    </div>
     ${clubsCard}
-    <details class="card transfer-card" ${S.transferOpen ? 'open' : ''}>
-      <summary>Mam kod przeniesienia z innego urządzenia</summary>
-      <form data-form="transfer" class="inline-form" autocomplete="off">
-        <input id="transfer-code" type="text" inputmode="numeric" maxlength="7" pattern="[0-9 ]*" placeholder="6 cyfr" aria-label="Kod przeniesienia">
-        <button type="submit" class="btn small primary">Przenieś</button>
-      </form>
-      <p class="muted small">Kod ważny 10 minut. Utworzysz go na starym urządzeniu: Konto albo Klub → Inne urządzenie.</p>
-    </details>
-    <section class="card mode-card">
-      <h2>Przez Lichess</h2>
-      <p class="muted small">Partie i ranking na Twoim koncie Lichess. Losowi rywale: rapid i dłużej.</p>
-      <div class="stack">${viewLichessLogin(false)}</div>
-    </section>
-    <p class="center-text small"><button class="link" data-action="demo">Wypróbuj z komputerem (demo)</button> · <a href="kluby.html">Dla klubów i trenerów</a></p>
+    <p class="small center-text"><button class="link" data-action="qr-scan">📷 Zaloguj komputer (skanuj kod QR)</button></p>
+    ${others}
+  </main>`;
+}
+
+// Komputer: kod QR do zeskanowania zalogowanym telefonem.
+function viewQrLogin() {
+  const q = S.qr || {};
+  const back = `<header class="g-top"><button class="btn small" data-action="qr-cancel">← Wróć</button></header>`;
+  let body;
+  if (q.loading) body = '<p class="muted">Przygotowuję kod…</p>';
+  else if (q.error) body = `<p class="error">${esc(q.error)}</p><div class="stack"><button class="btn primary" data-action="qr-login">Spróbuj ponownie</button></div>`;
+  else if (q.expired) body = `<p class="note">Kod wygasł.</p><div class="stack"><button class="btn primary" data-action="qr-login">Pokaż nowy kod</button></div>`;
+  else {
+    body = `
+    <div class="qr-box">${q.svg}</div>
+    <ol class="small">
+      <li>Na telefonie otwórz aplikację, w której jesteś zalogowany.</li>
+      <li>Ekran główny → <strong>„📷 Zaloguj komputer”</strong> i zeskanuj ten kod.</li>
+      <li>Potwierdź na telefonie — ten ekran zaloguje się sam.</li>
+    </ol>
+    <p class="small">Aparat nie działa? Na telefonie wpisz kod: <span class="club-code inline" id="qr-short">${esc(q.short)}</span></p>
+    <p class="muted small">Kod ważny jeszcze <b id="qr-left">${fmtCountdown(Math.max(0, Math.ceil((q.until - Date.now()) / 1000)))}</b>, działa raz.</p>`;
+  }
+  return `
+  <main class="start">${back}
+    <h1>Zaloguj telefonem</h1>
+    ${body}
   </main>`;
 }
 
@@ -1158,6 +1335,10 @@ function viewAccount() {
     <label class="field">Nick ${NICK_INPUT(f.nick, '')}</label>
     ${pass('acct-pass', 'Hasło', 'current-password')}
     <div class="stack"><button type="submit" class="btn primary big">Zaloguj się</button></div>`)}
+    <div class="stack">
+      ${passkeySupported() ? `<button class="btn big" data-action="passkey-login">Zaloguj Face ID / odciskiem palca</button>` : ''}
+      <button class="btn" data-action="qr-login">Zaloguj telefonem (kod QR)</button>
+    </div>
     <p class="small"><button class="link" data-action="acct-mode" data-id="forgot">Nie pamiętam hasła</button></p>
     <p class="small">Nie masz konta? <button class="link" data-action="acct-mode" data-id="register">Załóż konto</button></p>
   </main>`;
@@ -1509,6 +1690,10 @@ function viewNewGame() {
   const rated = f.mode !== 'ai' ? `
     <label class="toggle ${ratedBlock ? 'disabled' : ''}"><input type="checkbox" data-action="rated" ${f.rated && !ratedBlock ? 'checked' : ''} ${ratedBlock ? 'disabled' : ''}> Partia rankingowa</label>
     ${ratedBlock ? `<p class="muted small">${esc(ratedBlock)}</p>` : f.rated ? '' : `<p class="muted small">Towarzyska: bez rankingu. W ustawieniach możesz włączyć „Tryb nauki” z podpowiedziami.</p>`}` : '';
+  const lichessSeek = S.provider?.name === 'lichess' && f.mode === 'seek';
+  const near = lichessSeek ? `
+    <label class="toggle"><input type="checkbox" data-action="near" ${f.near ? 'checked' : ''}> Tylko rywale ±100 od mojego rankingu</label>
+    <p class="muted small">Ustaw bierki przed szukaniem — Lichess przerywa partię, gdy pierwszy ruch nie pada szybko.</p>` : '';
   const label = f.mode === 'seek' ? 'Szukaj rywala' : f.mode === 'friend' || f.mode === 'member' ? 'Wyślij wyzwanie' : 'Zagraj z komputerem';
 
   return `
@@ -1521,71 +1706,16 @@ function viewNewGame() {
     ${presetsHtml}
     ${level}
     ${color}
+    ${near}
     ${rated}
     <button class="btn primary big" data-action="start-game">${label}</button>
   </section>`;
 }
 
-// --- głosowanie 👍/👎: „czy grałbyś z rankingiem bez konta Lichess?” ---------
-function parseFeedbackLink(link) {
-  try {
-    const u = new URL(link);
-    if (!/docs\.google\.com$/.test(u.hostname)) return null;
-    const action = u.origin + u.pathname.replace(/\/viewform$/, '/formResponse');
-    const map = {};
-    for (const [k, v] of u.searchParams) {
-      if (!k.startsWith('entry.')) continue;
-      const t = v.trim().toUpperCase();
-      if (t === 'GLOS' || t === 'GŁOS') map.vote = k;
-      else if (t === 'EMAIL') map.email = k;
-      else if (t === 'TRYB') map.mode = k;
-    }
-    return map.vote ? { action, ...map } : null;
-  } catch { return null; }
-}
-
-async function sendFeedback(vote, email) {
-  const f = parseFeedbackLink(CONFIG.FEEDBACK_FORM_LINK);
-  if (!f) { toast('Głosowanie nie jest jeszcze podpięte (config.js).'); return false; }
-  const body = new URLSearchParams();
-  body.set(f.vote, vote);
-  if (f.email && email) body.set(f.email, email);
-  if (f.mode) body.set(f.mode, S.provider ? (S.provider.isDemo ? 'demo' : 'lichess') : 'niezalogowany');
-  try {
-    await fetch(f.action, { method: 'POST', mode: 'no-cors', body });
-    return true;
-  } catch {
-    toast('Nie udało się wysłać — sprawdź internet i spróbuj ponownie.');
-    return false;
-  }
-}
-
+// Lobby Lichess: krótka informacja o własnych klubach i rankingu (gdy serwer klubów jest włączony).
 function viewBanner() {
-  if (S.voted === 'done' || S.bannerHidden) return '';
-  const head = `<p><strong>Grałbyś z rankingiem bez konta Lichess?</strong> Na przykład we własnych pokojach z klubem albo znajomymi. Takiej wersji jeszcze nie ma — sprawdzamy, czy jest potrzebna.</p>`;
-  if (S.voted === 'up-pending') {
-    return `
-    <aside class="banner">
-      ${head}
-      <label class="field">Chcesz wiadomość, gdy powstanie? Zostaw e-mail (nieobowiązkowe)
-        <input id="vote-email" type="email" autocomplete="email" inputmode="email" placeholder="adres@e-mail.pl" value="${esc(S.voteEmail || '')}">
-      </label>
-      <p class="muted small">E-mail posłuży tylko do tej jednej wiadomości.</p>
-      <div class="row-actions">
-        <button class="btn small primary" data-action="vote-send">Wyślij</button>
-        <button class="btn small" data-action="vote-skip">Pomiń e-mail</button>
-      </div>
-    </aside>`;
-  }
-  return `
-  <aside class="banner">
-    ${head}
-    <div class="vote">
-      <button class="btn vote-btn" data-action="vote-up" aria-label="Tak">👍 Tak</button>
-      <button class="btn vote-btn" data-action="vote-down" aria-label="Nie">👎 Nie</button>
-    </div>
-    <button class="link small" data-action="hide-banner">Nie pokazuj</button>
-  </aside>`;
+  if (!roomsEnabled() || savedAccount()) return '';
+  return `<p class="note small">Własne kluby, znajomi i ranking bez konta Lichess: <button class="link small" data-action="to-menu">Menu</button> → „Załóż konto”.</p>`;
 }
 
 function viewGame() {
@@ -1675,9 +1805,21 @@ function viewGame() {
     <section id="entry">${over ? viewResult(G) : spec ? `<div class="spectate">${boardHtml()}</div>` : viewEntry()}</section>
 
     ${actions}
+    ${viewChat(G)}
 
     ${viewHistory(G)}
   </main>`;
+}
+
+// Czat Lichess: ostatnia wiadomość rywala i gotowe odpowiedzi jednym kliknięciem.
+const QUICK_REPLIES = ['Powodzenia!', 'Dzięki za grę!', 'Gram na prawdziwej szachownicy — ruch zajmuje mi chwilę.'];
+function viewChat(G) {
+  if (!S.provider?.chat || G.spectator) return '';
+  return `
+    <div class="chat-row">
+      ${G.lastChat ? `<div class="small"><span class="muted">${esc(G.lastChat.user)}:</span> ${esc(G.lastChat.text)}</div>` : ''}
+      <div class="chips">${QUICK_REPLIES.map((q, i) => `<button class="chip small" data-action="chat-send" data-id="${i}">${esc(q)}</button>`).join('')}</div>
+    </div>`;
 }
 
 function viewEntry() {
@@ -1839,6 +1981,7 @@ async function rematch() {
   const opts = f.clock ? { time: f.clock.initial / 60000, increment: f.clock.increment / 1000 } : { days: f.daysPerTurn };
   opts.rated = !!f.rated;
   opts.color = color;
+  opts.rematchOf = G.id; // Lichess: prawdziwy rewanż (u rywala zwykły przycisk „Rewanż”)
   closeGame();
   S.view = 'lobby';
   S.waiting = { text: 'Wysyłanie propozycji rewanżu…', kind: 'pending' };
@@ -2056,6 +2199,7 @@ function viewModal() {
       ${t('autoSend', 'Wysyłaj ruch od razu po wpisaniu', 'Bez przycisku „Wyślij”. Szybciej, ale łatwiej o pomyłkę.')}
       ${t('emergencyBoard', 'Awaryjny podgląd pozycji w menu partii', 'Na wypadek pomyłki przy przestawianiu bierek.')}
       ${t('learnMode', 'Tryb nauki: podpowiedzi przy wpisywaniu ruchu', 'Tylko w partiach towarzyskich: pokazuje pasujące ruchy i opis. W rankingowych podpowiedzi nie ma nigdy.')}
+      ${S.provider?.chat ? t('readChat', 'Czytaj na głos wiadomości rywala (czat Lichess)') : ''}
       <div class="row-actions end"><button class="btn primary" data-action="modal-close">Gotowe</button></div>`;
   } else if (m.kind === 'game-menu') {
     body = `
@@ -2087,10 +2231,8 @@ function viewModal() {
   } else if (m.kind === 'room') {
     const p = S.provider;
     const link = p.inviteLink();
-    const t = S.transfer;
     const me = p.me || {};
     const room = p.room || {};
-    const acct = savedAccount();
     const owner = me.role === 'owner';
     const accountPart = p.isPublic
       ? `<p class="small">Konto: <strong>${esc(S.user?.name || '')}</strong>${me.hasPassword ? ' · zabezpieczone hasłem' : ' · <span class="warn">bez hasła</span>'}${me.email ? `<br><span class="muted">E-mail: ${esc(me.email)}</span>` : ''}</p>
@@ -2117,21 +2259,36 @@ function viewModal() {
         : `<button class="btn small danger" data-action="room-forget">Usuń konto z tego urządzenia</button>`)
       : `${owner ? '' : `<button class="btn small danger" data-action="club-leave">Opuść klub</button>`}
          <button class="btn small" data-action="room-forget">Usuń z tego urządzenia</button>`;
+    const devices = p.isPublic ? `
+      <h3>${PASSKEY_NAME}</h3>
+      ${me.passkeys ? `<p class="small">Włączone (${me.passkeys} ${me.passkeys === 1 ? 'klucz' : 'klucze'}). Logujesz się jednym dotknięciem; hasło zostaje jako zapas.</p>
+        <div class="row-actions">${passkeySupported() ? '<button class="btn small" data-action="passkey-add">Dodaj na tym urządzeniu</button>' : ''}<button class="btn small" data-action="passkeys-remove">Usuń klucze</button></div>`
+    : passkeySupported() ? `<p class="small">Logowanie Face ID, odciskiem palca albo PIN-em urządzenia — bez wpisywania hasła.</p>
+        <div class="row-actions"><button class="btn small primary" data-action="passkey-add">Włącz na tym urządzeniu</button></div>`
+      : '<p class="muted small">Ta przeglądarka nie obsługuje kluczy dostępu.</p>'}
+      <h3>Inne urządzenia</h3>
+      <p class="small">Na innym urządzeniu zaloguj się nickiem i hasłem — kluby i ranking wrócą same. Na komputerze możesz też kliknąć „Zaloguj telefonem” i zeskanować kod tutaj.</p>
+      <div class="row-actions"><button class="btn small" data-action="qr-scan">📷 Zaloguj komputer</button>
+        <button class="btn small" data-action="logout-all">Wyloguj wszystkie urządzenia</button></div>`
+      : `<h3>Inne urządzenie</h3><p class="small">Zaloguj się tam na swoje konto — klub będzie w „Moich klubach”.</p>`;
     body = `
       <h2>${p.isPublic ? 'Twoje konto' : `Klub „${esc(p.roomName)}”`}</h2>
       ${accountPart}
-      <h3>Inne urządzenie</h3>
-      <p class="small">${p.isPublic && me.hasPassword ? 'Na innym urządzeniu po prostu zaloguj się nickiem i hasłem. Możesz też użyć' : 'Chcesz grać na drugim telefonie lub komputerze pod tym samym nickiem? Użyj tam'} jednorazowego linku albo 6-cyfrowego kodu (ważne 10 minut).</p>
-      ${t ? `<div class="club-code">${esc(String(t.code6 || '').replace(/(\d{3})(\d{3})/, '$1 $2'))}</div>
-        <p class="muted small">Na drugim urządzeniu: ekran startowy → „Mam kod przeniesienia”. Albo otwórz tam link:</p>
-        <input class="link-box" type="text" readonly value="${esc(t.url)}">
-        <div class="row-actions"><button class="btn small" data-action="share-transfer">Udostępnij link przeniesienia</button></div>
-        <p class="muted small">Nie podawaj kodu ani linku nikomu innemu — kto ich użyje, gra jako Ty.</p>`
-    : `<div class="row-actions"><button class="btn small" data-action="make-transfer">Utwórz kod przeniesienia</button></div>`}
+      ${devices}
       <div class="row-actions end">
         ${forget}
         <button class="btn primary" data-action="modal-close">Gotowe</button>
       </div>`;
+  } else if (m.kind === 'qr-scan') {
+    body = `
+      <h2>Zaloguj komputer</h2>
+      <p class="small">Na komputerze kliknij „Zaloguj telefonem” i skieruj aparat na kod QR.</p>
+      ${S.scanError ? `<p class="note small">${esc(S.scanError)}</p>` : '<video id="qr-video" class="qr-video" playsinline muted></video>'}
+      <form data-form="qr-code" class="inline-form" autocomplete="off">
+        <input id="qr-code" type="text" maxlength="8" autocapitalize="characters" spellcheck="false" placeholder="albo wpisz kod, np. K7M2QX" aria-label="Kod z ekranu komputera">
+        <button type="submit" class="btn small">Dalej</button>
+      </form>
+      <div class="row-actions end"><button class="btn" data-action="qr-scan-close">Zamknij</button></div>`;
   } else if (m.kind === 'secure') {
     const me = S.provider?.me || {};
     body = `
@@ -2225,7 +2382,7 @@ app.addEventListener('click', async (e) => {
   const a = el.dataset.action;
   const id = el.dataset.id;
   if (a === 'overlay') { if (e.target === el) { S.modal = null; render(); } return; }
-  if (a === 'history-toggle' || a === 'room-history' || a === 'rated' || a === 'setting' || a === 'approval') return; // obsługiwane przez 'change'/'toggle'
+  if (a === 'history-toggle' || a === 'room-history' || a === 'rated' || a === 'setting' || a === 'approval' || a === 'near') return; // obsługiwane przez 'change'/'toggle'
   switch (a) {
     case 'login':
       try { await new LichessProvider().login(); } catch (err) { S.startError = 'Nie udało się rozpocząć logowania: ' + err.message; render(); }
@@ -2272,6 +2429,27 @@ app.addEventListener('click', async (e) => {
     case 'club-code-change': S.joinRoom = { code: '', checked: false, error: '' }; render(); document.getElementById('club-code')?.focus(); break;
     case 'hide-standalone': S.standaloneHint = false; render(); break;
     case 'account-login': openAccount('login', 'start'); break;
+    case 'account-register': openAccount('register', 'start'); break;
+    case 'qr-login': await startQrLogin(); break;
+    case 'qr-cancel': stopQrLogin(); S.qr = null; S.view = 'start'; render(); break;
+    case 'qr-scan': S.modal = null; await openQrScanner(); break;
+    case 'qr-scan-close': closeScanner(); render(); break;
+    case 'passkey-login': await loginWithPasskey(); break;
+    case 'passkey-add': await addPasskey(); break;
+    case 'passkeys-remove':
+      confirmModal({
+        title: 'Usunąć klucze dostępu?', text: 'Logowanie Face ID / odciskiem palca przestanie działać na wszystkich urządzeniach. Zostaje hasło.',
+        okLabel: 'Usuń', danger: true,
+        onOk: async () => { try { await S.provider.passkeysRemove(); toast('Usunięto klucze dostępu.'); render(); } catch (err) { toast(err.message); } },
+      });
+      break;
+    case 'logout-all':
+      confirmModal({
+        title: 'Wylogować wszystkie urządzenia?', text: 'Wszystkie inne telefony i komputery zostaną wylogowane z konta i klubów. To urządzenie zostaje zalogowane, a kluby otworzysz ponownie jednym kliknięciem.',
+        okLabel: 'Wyloguj wszystkie', danger: true,
+        onOk: async () => { try { await S.provider.logoutAll(); forgetAllClubs(); toast('Wylogowano wszystkie inne urządzenia.', 5000); } catch (err) { toast(err.message); } },
+      });
+      break;
     case 'account-menu': {
       const acct = savedAccount();
       if (!acct) break;
@@ -2361,21 +2539,14 @@ app.addEventListener('click', async (e) => {
         okLabel: 'Wyloguj', onOk: logout,
       });
       break;
-    case 'link-account':
-      try { await S.provider.linkAccount(); toast('Klub zapisany na koncie.'); render(); } catch (err) { toast(err.message, 5000); }
-      break;
     case 'seek-accept':
       unlockMedia();
       S.waiting = { text: 'Łączę z rywalem…', kind: 'pending' }; render();
       try { await S.provider.seekAccept(id); } catch (err) { toast(err.message); }
       if (S.waiting?.kind === 'pending') { S.waiting = null; render(); }
       break;
-    case 'room-menu': S.transfer = null; S.modal = { kind: 'room' }; render(); break;
+    case 'room-menu': S.modal = { kind: 'room' }; render(); break;
     case 'share-invite': await shareLink(S.provider.inviteLink(), `Klub „${S.provider.roomName}” (kod ${S.provider.roomCode}) — ${CONFIG.APP_NAME}`); break;
-    case 'make-transfer':
-      try { S.transfer = await S.provider.transferLink(); render(); } catch (err) { toast(err.message); }
-      break;
-    case 'share-transfer': if (S.transfer) await shareLink(S.transfer.url, CONFIG.APP_NAME); break;
     case 'room-forget':
       confirmModal({
         title: S.provider?.isPublic ? 'Usunąć konto z tego urządzenia?' : 'Usunąć klub z tego urządzenia?',
@@ -2465,6 +2636,11 @@ app.addEventListener('click', async (e) => {
     case 'claim-win': try { await S.provider.claimVictory(S.game.id); } catch (err) { toast(err.message); } break;
     case 'claim-draw': try { await S.provider.claimDraw(S.game.id); } catch (err) { toast(err.message); } break;
     case 'game-menu': S.modal = { kind: 'game-menu' }; render(); break;
+    case 'chat-send': {
+      const text = QUICK_REPLIES[Number(id)];
+      try { await S.provider.chat(S.game.id, text); toast(`Wysłano: ${text}`); } catch (err) { toast(err.message); }
+      break;
+    }
     case 'show-board':
       confirmModal({
         title: 'Pokazać pozycję?',
@@ -2473,20 +2649,6 @@ app.addEventListener('click', async (e) => {
         onOk: () => { S.modal = { kind: 'board' }; render(); },
       });
       break;
-    case 'vote-up': S.voted = 'up-pending'; render(); break;
-    case 'vote-down':
-    case 'vote-skip':
-    case 'vote-send': {
-      const vote = a === 'vote-down' ? 'nie' : 'tak';
-      const email = a === 'vote-send' ? (S.voteEmail || '').trim() : '';
-      if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { toast('Sprawdź adres e-mail.'); break; }
-      el.disabled = true;
-      if (await sendFeedback(vote, email)) {
-        S.voted = 'done'; lsSet('ps_vote', vote); toast('Dzięki! Głos zapisany.'); render();
-      } else { el.disabled = false; }
-      break;
-    }
-    case 'hide-banner': S.bannerHidden = true; lsSet('ps_banner_hidden', '1'); render(); break;
     default: break;
   }
 });
@@ -2494,6 +2656,7 @@ app.addEventListener('click', async (e) => {
 app.addEventListener('change', (e) => {
   const el = e.target;
   if (el.dataset.action === 'rated') { S.form.rated = el.checked; saveForm(); }
+  if (el.dataset.action === 'near') { S.form.near = el.checked; saveForm(); }
   if (el.dataset.action === 'approval') {
     S.provider.setApproval(el.checked)
       .then((on) => { toast(on ? 'Nowi członkowie będą czekać na zatwierdzenie.' : 'Nowi członkowie wchodzą od razu po kodzie.'); loadCoach(); })
@@ -2514,13 +2677,19 @@ app.addEventListener('submit', async (e) => {
     case 'account': await submitAccount(f.dataset.mode); break;
     case 'room-new': await submitRoom(); break;
     case 'club-join': await submitJoin(); break;
-    case 'transfer': await submitTransferCode(); break;
     case 'friend-add': {
       const nick = (document.getElementById('friend-nick')?.value || '').trim();
       if (!nick) { toast('Wpisz nick gracza.'); break; }
       if (await social(() => S.provider.friendInvite(nick), `Wysłano zaproszenie do ${nick}.`)) {
         const i = document.getElementById('friend-nick'); if (i) i.value = '';
       }
+      break;
+    }
+    case 'qr-code': {
+      const code = (document.getElementById('qr-code')?.value || '').trim();
+      if (code.length < 6) { toast('Kod ma 6 znaków — przepisz go z ekranu komputera.'); break; }
+      closeScanner(); render();
+      await qrConfirm(code);
       break;
     }
     case 'invite-nick': {
@@ -2550,7 +2719,6 @@ async function social(fn, okText) {
 }
 app.addEventListener('input', (e) => {
   if (e.target.id === 'friend-input') { S.form.friend = e.target.value; saveForm(); }
-  if (e.target.id === 'vote-email') S.voteEmail = e.target.value;
   if (e.target.id === 'room-name') S.roomForm.name = e.target.value;
   if (e.target.id === 'room-nick') {
     if (S.view === 'account') S.accountForm.nick = e.target.value; else S.roomForm.nick = e.target.value;
@@ -2565,7 +2733,6 @@ app.addEventListener('toggle', (e) => {
     return;
   }
   if (e.target.classList?.contains('history')) S.historyOpen = e.target.open;
-  if (e.target.classList?.contains('transfer-card')) S.transferOpen = e.target.open;
 }, true);
 
 document.addEventListener('keydown', (e) => {

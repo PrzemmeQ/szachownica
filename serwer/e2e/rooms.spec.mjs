@@ -26,6 +26,8 @@ const uniq = (p) => p + Math.random().toString(36).slice(2, 6);
 async function phone(browser) {
   const ctx = await browser.newContext();
   await ctx.addInitScript(() => {
+    // pytanie o Face ID / Windows Hello po zalogowaniu sprawdza osobny test
+    try { localStorage.setItem('ps_passkey_asked', '1'); } catch {}
     window.__spoken = [];
     if ('speechSynthesis' in window) {
       speechSynthesis.speak = (u) => { window.__spoken.push(u.text); };
@@ -70,14 +72,16 @@ async function expectClocksAgree(pa, pb) {
   expect(Math.abs(clockMs(aOpp) - clockMs(bMe))).toBeLessThanOrEqual(1000);
 }
 
-// Konto przez „Szybka gra” → poczekalnia ogólna.
+// Konto z ekranu głównego („Załóż konto”), potem „Szybka gra” → poczekalnia ogólna.
 async function register(page, nick, email) {
   await page.goto(FRONT + '/');
-  await page.getByRole('button', { name: /Szybka gra/ }).click();
+  await page.getByRole('button', { name: 'Załóż konto' }).click();
   await page.locator('#room-nick').fill(nick);
   await page.locator('#acct-pass').fill(PASS);
   if (email) await page.locator('#acct-email').fill(email);
   await page.getByRole('button', { name: 'Załóż konto' }).click();
+  await expect(page.locator('button[data-action="account-menu"]')).toContainText(nick);
+  await page.getByRole('button', { name: /Szybka gra/ }).click();
   await expect(page.locator('.who')).toContainText(nick);
 }
 // Zakłada klub z ekranu startowego; zwraca { code, link }.
@@ -210,12 +214,12 @@ test('klub z kodem: błędny kod, prośba i zatwierdzenie, partia rankingowa 10+
   await A.page.getByRole('button', { name: /Szybka gra/ }).click();
   await expect(A.page.locator('.rank-row', { hasText: nickA }).locator('.rank-r')).toHaveText(`${clubRating}?`);
 
-  // 7. po przeładowaniu B wraca do klubu; w menu „Moje kluby”
+  // 7. po ponownym otwarciu zawsze ekran główny z „Moimi klubami”
   await B.page.goto(FRONT + '/');
-  await expect(B.page.locator('.who')).toContainText('Klub Hetman');
-  await B.page.getByRole('button', { name: 'Menu' }).click();
   await expect(B.page.getByRole('heading', { name: 'Moje kluby' })).toBeVisible();
-  await expect(B.page.locator('button[data-action="open-club"]')).toContainText('Klub Hetman');
+  await expect(B.page.locator('.logo-img')).toBeVisible();
+  await B.page.locator('button[data-action="open-club"]', { hasText: 'Klub Hetman' }).click();
+  await expect(B.page.locator('.who')).toContainText('Klub Hetman');
   await A.ctx.close(); await B.ctx.close();
 });
 
@@ -224,7 +228,7 @@ test('wariant A bez ROOMS_API: ekran startowy bez zmian, demo działa', async ({
   await page.goto(FRONT_A + '/');
   await expect(page.getByRole('button', { name: 'Zaloguj przez Lichess' })).toBeVisible();
   await expect(page.getByRole('button', { name: /Dołącz do klubu/ })).toHaveCount(0);
-  await expect(page.getByText('Grałbyś z rankingiem bez konta Lichess?')).toBeVisible();
+  await expect(page.getByText('Grałbyś z rankingiem bez konta Lichess?')).toHaveCount(0); // ankieta usunięta
   await page.getByRole('button', { name: 'Wypróbuj bez logowania' }).click();
   await expect(page.locator('.tabs .tab.sel')).toHaveText('Komputer');
   await page.locator('button.chip[data-action="color"][data-id="white"]').click();
@@ -333,35 +337,47 @@ test('znajomi: zaproszenie i akceptacja, wyzwanie znajomego, rewanż z potwierdz
   await A.ctx.close(); await B.ctx.close();
 });
 
-test('Menu główne: z Lichess do poczekalni i z powrotem, bez wylogowania', async ({ browser }) => {
+test('Lichess: z ekranu głównego i z powrotem bez wylogowania; szukanie ±100 z uwagą; informacja o kontach', async ({ browser }) => {
   const { ctx, page } = await phone(browser);
   // konto Lichess udawane (bez sieci do lichess.org)
   await ctx.addInitScript(() => { if (!localStorage.getItem('ps_lichess_token')) localStorage.setItem('ps_lichess_token', 'lip_test'); });
+  const seeks = [];
   await ctx.route('https://lichess.org/**', (route) => {
     const u = route.request().url();
     if (u.includes('/api/account/playing')) return route.fulfill({ json: { nowPlaying: [] } });
     if (u.includes('/api/account')) return route.fulfill({ json: { id: 'tester', username: 'Tester', perfs: { rapid: { rating: 1600 } } } });
     if (u.includes('/api/stream/event')) return route.fulfill({ status: 200, contentType: 'application/x-ndjson', body: '' });
+    if (u.includes('/api/board/seek')) { seeks.push(route.request().postData()); return route.fulfill({ status: 200, contentType: 'application/x-ndjson', body: '' }); }
     return route.fulfill({ status: 404, body: '' });
   });
 
+  // z tokenem Lichess i tak start na ekranie głównym
   await page.goto(FRONT + '/');
+  await expect(page.getByRole('button', { name: 'Załóż konto' })).toBeVisible();
+  await page.getByRole('button', { name: 'Graj przez Lichess' }).click();
   await expect(page.locator('.who')).toHaveText('Tester');
-  await page.getByRole('button', { name: 'Menu' }).click();
-  await expect(page.getByRole('button', { name: 'Graj przez Lichess' })).toBeVisible();
+  await expect(page.locator('.note')).toContainText('Własne kluby, znajomi i ranking bez konta Lichess');
+  await expect(page.getByText('Grałbyś z rankingiem')).toHaveCount(0);
+  await expect(page.getByText('Ustaw bierki przed szukaniem')).toBeVisible();
+  await expect(page.locator('input[data-action="near"]')).toBeChecked();
+  await page.locator('button.chip[data-action="preset"][data-id="r15_10"]').click();
+  await page.getByRole('button', { name: 'Szukaj rywala' }).click();
+  await expect.poll(() => seeks.length).toBe(1);
+  expect(seeks[0]).toContain('ratingRange=1500-1700');
+  await page.getByRole('button', { name: 'Anuluj' }).click().catch(() => {});
+
+  await page.locator('header button[data-action="to-menu"]').click();
   await page.reload();
   await expect(page.getByRole('button', { name: 'Graj przez Lichess' })).toBeVisible();
-
   const nick = uniq('Lic');
-  await page.getByRole('button', { name: /Szybka gra/ }).click();
+  await page.getByRole('button', { name: 'Załóż konto' }).click();
   await page.locator('#room-nick').fill(nick);
   await page.locator('#acct-pass').fill(PASS);
   await page.getByRole('button', { name: 'Załóż konto' }).click();
-  await expect(page.locator('.who')).toContainText('Poczekalnia ogólna');
-  await page.getByRole('button', { name: 'Menu' }).click();
-  await expect(page.locator('.account-line')).toContainText('Grasz jako ' + nick);
+  await expect(page.locator('button[data-action="account-menu"]')).toContainText(nick);
   await page.getByRole('button', { name: 'Graj przez Lichess' }).click();
   await expect(page.locator('.who')).toHaveText('Tester');
+  await expect(page.locator('.note', { hasText: 'Własne kluby' })).toHaveCount(0); // ma już konto
   await ctx.close();
 });
 
@@ -395,12 +411,16 @@ test('aktualizacja: po ponownym otwarciu nowa wersja mimo pamięci jak na GitHub
   }
 });
 
-test('konto: formularz z zapisem hasła, klub na koncie, logowanie na nowym telefonie, 6-cyfrowy kod przeniesienia', async ({ browser }) => {
+test('konto: ekran główny, formularz z zapisem hasła, logowanie komputera telefonem (QR), wyloguj wszystkie urządzenia, logowanie na nowym telefonie', async ({ browser }) => {
   const nick = uniq('Kon');
   const A = await phone(browser);
   await A.page.goto(FRONT + '/');
-  await expect(A.page.getByRole('heading', { name: 'Bez konta Lichess' })).toBeVisible();
-  await A.page.getByRole('button', { name: /Szybka gra/ }).click();
+  // bez konta: na górze „Załóż konto” i „Zaloguj się”, reszta drobnym drukiem
+  await expect(A.page.locator('.logo-img')).toBeVisible();
+  await expect(A.page.getByRole('button', { name: /Szybka gra/ })).toHaveCount(0);
+  await expect(A.page.locator('.start-others')).toContainText('Bez konta');
+  await expect(A.page.getByText('Mam kod przeniesienia')).toHaveCount(0);
+  await A.page.getByRole('button', { name: 'Załóż konto' }).click();
   await expect(A.page.getByRole('heading', { name: 'Załóż konto' })).toBeVisible();
   // prawdziwy <form> z polami username/password (Pęk kluczy na iPhonie)
   await expect(A.page.locator('form[data-form="account"] input[autocomplete="username"]')).toHaveCount(1);
@@ -412,64 +432,102 @@ test('konto: formularz z zapisem hasła, klub na koncie, logowanie na nowym tele
   await A.page.locator('#acct-pass').fill('moje-haslo-123');
   await A.page.locator('#acct-email').fill(nick + '@example.com');
   await A.page.getByRole('button', { name: 'Załóż konto' }).click();
-  await expect(A.page.locator('.who')).toContainText(nick);
-
-  // klub na koncie
+  // zalogowany: konto w rogu, Szybka gra, Moje kluby
+  await expect(A.page.locator('button[data-action="account-menu"]')).toContainText(nick);
+  await expect(A.page.getByRole('heading', { name: 'Moje kluby' })).toBeVisible();
+  const { code } = await createClub(A.page, 'Klub konta');
+  expect(code).toMatch(/^KLUBK-/);
   await A.page.getByRole('button', { name: 'Menu' }).click();
-  await expect(A.page.locator('.account-line')).toContainText('Grasz jako ' + nick);
-  await A.page.locator('button[data-action="room-new"]').first().click();
-  await expect(A.page.locator('#room-nick')).toHaveValue(nick);
-  await A.page.locator('#room-name').fill('Klub konta');
-  await A.page.getByRole('button', { name: 'Załóż klub' }).click();
-  await expect(A.page.getByRole('heading', { name: 'Klub „Klub konta”' })).toBeVisible();
 
-  // kod przeniesienia (6 cyfr) → telefon bez konta
-  await A.page.getByRole('button', { name: 'Utwórz kod przeniesienia' }).click();
-  await expect(A.page.locator('.dialog .club-code')).toHaveCount(2); // kod klubu + kod przeniesienia
-  const code6 = (await A.page.locator('.dialog .club-code').last().textContent()).replace(/\D/g, '');
-  expect(code6).toMatch(/^\d{6}$/);
-  const D = await phone(browser);
-  await D.page.goto(FRONT + '/');
-  await D.page.getByText('Mam kod przeniesienia').click();
-  await D.page.locator('#transfer-code').fill('000000');
-  await D.page.getByRole('button', { name: 'Przenieś' }).click();
-  await expect(D.page.locator('#toast')).toContainText('Kod przeniesienia jest zły');
-  await D.page.locator('#transfer-code').fill(code6.slice(0, 3) + ' ' + code6.slice(3));
-  await D.page.getByRole('button', { name: 'Przenieś' }).click();
-  await expect(D.page.locator('.who')).toContainText(nick);
-  await expect(D.page.locator('.who')).toContainText('Klub konta');
-  await A.ctx.close(); await D.ctx.close();
+  // komputer bez konta: „Zaloguj telefonem” → QR i krótki kod; telefon zatwierdza
+  const PC = await phone(browser);
+  await PC.page.goto(FRONT + '/');
+  await PC.page.getByRole('button', { name: /Zaloguj telefonem/ }).click();
+  await expect(PC.page.locator('.qr-box svg')).toBeVisible();
+  const short = (await PC.page.locator('#qr-short').textContent()).trim();
+  expect(short).toMatch(/^[A-Z0-9]{6}$/);
+  await A.page.getByRole('button', { name: /Zaloguj komputer/ }).click();
+  await expect(A.page.getByRole('heading', { name: 'Zaloguj komputer' })).toBeVisible();
+  await A.page.locator('#qr-code').fill(short.toLowerCase());
+  await A.page.getByRole('button', { name: 'Dalej' }).click();
+  await expect(A.page.locator('.dialog h2')).toContainText(`jako ${nick}`);
+  await expect(A.page.locator('.dialog')).toContainText('Zatwierdzaj tylko kod z ekranu');
+  await A.page.getByRole('button', { name: 'Tak, zaloguj' }).click();
+  await expect(PC.page.locator('button[data-action="account-menu"]')).toContainText(nick, { timeout: 10000 });
+  await expect(PC.page.locator('button[data-action="open-club"]', { hasText: 'Klub konta' })).toBeVisible();
 
-  // nowy telefon: logowanie → „Moje kluby” z klubem z konta
+  // wyloguj wszystkie urządzenia: komputer traci dostęp, telefon zostaje
+  await A.page.locator('button[aria-label="Konto"]').click();
+  await expect(A.page.getByRole('heading', { name: 'Twoje konto' })).toBeVisible();
+  await expect(A.page.locator('.dialog')).toContainText(nick + '@example.com');
+  await A.page.getByRole('button', { name: 'Wyloguj wszystkie urządzenia' }).click();
+  await A.page.locator('.dialog').getByRole('button', { name: 'Wyloguj wszystkie' }).click();
+  await expect(A.page.locator('#toast')).toContainText('Wylogowano wszystkie inne urządzenia');
+  await PC.page.getByRole('button', { name: /Szybka gra/ }).click();
+  await expect(PC.page.getByRole('button', { name: 'Załóż konto' })).toBeVisible({ timeout: 10000 });
+  await expect(A.page.locator('.who')).toContainText(nick); // telefon nadal zalogowany
+  await A.ctx.close(); await PC.ctx.close();
+
+  // nowy telefon: logowanie hasłem → „Moje kluby” z klubem z konta
   const C = await phone(browser);
   await C.page.goto(FRONT + '/');
-  await C.page.getByRole('button', { name: 'Mam konto — zaloguj się' }).click();
+  await C.page.getByRole('button', { name: 'Zaloguj się' }).click();
   await C.page.locator('#room-nick').fill(nick.toLowerCase());
   await C.page.locator('#acct-pass').fill('zle-haslo-000');
-  await C.page.getByRole('button', { name: 'Zaloguj się' }).click();
+  await C.page.locator('form[data-form="account"]').getByRole('button', { name: 'Zaloguj się' }).click();
   await expect(C.page.locator('#toast')).toContainText('Nieprawidłowy nick lub hasło');
   await C.page.locator('#acct-pass').fill('moje-haslo-123');
-  await C.page.getByRole('button', { name: 'Zaloguj się' }).click();
-  await expect(C.page.locator('.account-line')).toContainText('Grasz jako ' + nick);
+  await C.page.locator('form[data-form="account"]').getByRole('button', { name: 'Zaloguj się' }).click();
   const club = C.page.locator('button[data-action="open-club"]', { hasText: 'Klub konta' });
   await expect(club).toContainText('zapisany na koncie');
   await club.click();
   await expect(C.page.locator('.who')).toContainText('Klub konta');
 
-  // konto: wylogowanie i „nie pamiętam hasła”
+  // wylogowanie z urządzenia i „nie pamiętam hasła”
   await C.page.getByRole('button', { name: 'Menu' }).click();
   await C.page.getByRole('button', { name: /Szybka gra/ }).click();
   await C.page.locator('button[aria-label="Konto"]').click();
-  await expect(C.page.getByRole('heading', { name: 'Twoje konto' })).toBeVisible();
-  await expect(C.page.locator('.dialog')).toContainText(nick + '@example.com');
   await C.page.getByRole('button', { name: 'Wyloguj z tego urządzenia' }).click();
   await C.page.locator('.dialog').getByRole('button', { name: 'Wyloguj' }).click();
-  await C.page.getByRole('button', { name: 'Mam konto — zaloguj się' }).click();
+  await C.page.getByRole('button', { name: 'Zaloguj się' }).click();
   await C.page.getByRole('button', { name: 'Nie pamiętam hasła' }).click();
   await C.page.locator('#acct-login').fill(nick);
   await C.page.getByRole('button', { name: 'Wyślij link' }).click();
   await expect(C.page.locator('.note')).toContainText('nie jest jeszcze włączone');
   await C.ctx.close();
+});
+
+test('Face ID / odcisk palca: propozycja po zalogowaniu, logowanie kluczem dostępu (wirtualny czytnik)', async ({ browser }) => {
+  // klucze dostępu wymagają nazwy domeny (nie adresu IP) — strona z localhost
+  const FRONT_LH = 'http://localhost:8080';
+  const nick = uniq('Fid');
+  const ctx = await browser.newContext();
+  const page = await ctx.newPage();
+  const cdp = await ctx.newCDPSession(page);
+  await cdp.send('WebAuthn.enable');
+  await cdp.send('WebAuthn.addVirtualAuthenticator', {
+    options: { protocol: 'ctap2', transport: 'internal', hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true },
+  });
+  await page.goto(FRONT_LH + '/');
+  await page.getByRole('button', { name: 'Załóż konto' }).click();
+  await page.locator('#room-nick').fill(nick);
+  await page.locator('#acct-pass').fill(PASS);
+  await page.getByRole('button', { name: 'Załóż konto' }).click();
+  // jedno pytanie po zalogowaniu
+  await expect(page.getByRole('heading', { name: /Włączyć logowanie Face ID/ })).toBeVisible();
+  await page.getByRole('button', { name: 'Włącz' }).click();
+  await expect(page.locator('#toast')).toContainText('Włączono logowanie');
+  // wylogowanie i logowanie jednym dotknięciem
+  await page.getByRole('button', { name: /Szybka gra/ }).click();
+  await page.locator('button[aria-label="Konto"]').click();
+  await expect(page.locator('.dialog')).toContainText('Włączone (1 klucz)');
+  await page.getByRole('button', { name: 'Wyloguj z tego urządzenia' }).click();
+  await page.locator('.dialog').getByRole('button', { name: 'Wyloguj' }).click();
+  await page.getByRole('button', { name: 'Zaloguj się' }).click();
+  await page.getByRole('button', { name: /Zaloguj Face ID/ }).click();
+  await expect(page.locator('button[data-action="account-menu"]')).toContainText(nick);
+  await expect(page.getByRole('heading', { name: /Włączyć logowanie Face ID/ })).toHaveCount(0); // pytanie tylko raz
+  await ctx.close();
 });
 
 test('wpisywanie notacją: bez podpowiedzi domyślnie, tryb nauki w towarzyskiej, Nbd2, polskie litery, „skąd → dokąd”', async ({ browser }) => {

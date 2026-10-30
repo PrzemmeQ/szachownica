@@ -5,5 +5,5 @@ export default defineConfig({
   timeout: 120000,
   workers: 1,
   reporter: 'list',
-  use: { ...devices['Pixel 7'], trace: 'retain-on-failure' },
+  use: { ...devices['Pixel 7'], trace: 'retain-on-failure', actionTimeout: 15000 },
 });

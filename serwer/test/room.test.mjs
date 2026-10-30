@@ -392,20 +392,41 @@ test('konto: popularne hasła, obce litery, zmiana hasła wylogowuje inne urząd
   P.close();
 });
 
-test('Moje kluby przy koncie, wejście na nowym urządzeniu; przeniesienie kodem 6-cyfrowym', async () => {
+test('Moje kluby przy koncie; logowanie komputera telefonem (QR i krótki kod); wyloguj wszystkie urządzenia', async () => {
   const a = await register('Mk');
   const c = await createClub('Klub konta', undefined, a);
   const P = await connect('publiczny', a.token);
   assert.deepEqual(P.welcome.me.rooms.map((x) => x.room), [c.room]);
+  assert.equal(P.welcome.me.passkeys, 0);
   assert.equal((await api(srv.base, 'POST', `/api/rooms/${c.room}/account-login`, { accountToken: a.token })).data.memberId, c.memberId);
+  assert.equal((await api(srv.base, 'POST', '/api/rooms/transfer-code', { code: '123456' })).status, 404); // przeniesienia już nie ma
+
+  // komputer: kod QR; telefon: podgląd urządzenia i zatwierdzenie; komputer dostaje konto jeden raz
+  const UA = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36' };
+  const q = (await api(srv.base, 'POST', '/api/account/qr-start', { ua: UA['User-Agent'] })).data;
+  assert.match(q.short, /^[A-Z0-9]{6}$/);
+  assert.equal((await api(srv.base, 'POST', '/api/account/qr-poll', { id: q.id, secret: q.secret })).data.status, 'waiting');
+  assert.equal((await api(srv.base, 'POST', '/api/account/qr-poll', { id: q.id, secret: 'zly' })).data.status, 'expired');
+  assert.match((await P.req('qrInfo', { code: 'ZZZZZZ' })).error, /zły albo wygasł/);
+  assert.equal((await P.req('qrInfo', { code: q.id })).device, 'Windows · Chrome');
+  assert.ok((await P.req('qrApprove', { code: q.short.toLowerCase() })).ok);
+  const done = (await api(srv.base, 'POST', '/api/account/qr-poll', { id: q.id, secret: q.secret })).data;
+  assert.equal(done.status, 'approved');
+  assert.equal(done.nick, a.nick);
+  assert.deepEqual(done.rooms.map((x) => x.room), [c.room]);
+  assert.equal((await api(srv.base, 'POST', '/api/account/qr-poll', { id: q.id, secret: q.secret })).data.status, 'expired');
+  const PC = await connect('publiczny', done.token);
+
+  // wyloguj wszystkie urządzenia: komputer i klucz klubu tracą dostęp, telefon (bieżący) zostaje
   const T = await connect(c.room, c.token);
-  const t = await T.req('transferCreate');
-  assert.match(t.code6, /^\d{6}$/);
-  const claim6 = await api(srv.base, 'POST', '/api/rooms/transfer-code', { code: t.code6 });
-  assert.equal(claim6.status, 200, JSON.stringify(claim6.data));
-  assert.equal(claim6.data.room, c.room);
-  assert.equal((await api(srv.base, 'POST', '/api/rooms/transfer-code', { code: t.code6 })).status, 400);
-  P.close(); T.close();
+  let markPC = PC.mark(), markT = T.mark();
+  assert.ok((await P.req('logoutAll')).ok);
+  await PC.wait((m) => m.t === 'authFailed', 5000, markPC);
+  await T.wait((m) => m.t === 'authFailed', 5000, markT);
+  assert.equal((await new Client(srv.base, 'publiczny', done.token).connect()).t, 'authFailed');
+  assert.equal((await new Client(srv.base, c.room, c.token).connect()).t, 'authFailed');
+  assert.ok((await P.req('accountInfo')).ok);
+  P.close();
 });
 
 test('limity zakładania; ochrona: zalewanie, wewnętrzne akcje niedostępne', async () => {

@@ -253,16 +253,18 @@ export class LichessProvider {
   // --- tworzenie partii ---------------------------------------------------
   // Zwraca { cancel(), done: Promise } dla szukania w czasie rzeczywistym
   // albo { correspondence: true } dla ogłoszenia korespondencyjnego.
-  async seek({ time, increment, days, rated }) {
+  // ratingRange: np. '1400-1600' (tylko rywale z tego przedziału)
+  async seek({ time, increment, days, rated, ratingRange }) {
+    const range = ratingRange ? { ratingRange } : {};
     if (days) {
-      await this.apiJson('/api/board/seek', { method: 'POST', body: { rated: String(!!rated), days: String(days) } });
+      await this.apiJson('/api/board/seek', { method: 'POST', body: { rated: String(!!rated), days: String(days), ...range } });
       return { correspondence: true };
     }
     const ctl = new AbortController();
     const done = (async () => {
       const res = await this.api('/api/board/seek', {
         method: 'POST', signal: ctl.signal,
-        body: { rated: String(!!rated), time: String(time), increment: String(increment) },
+        body: { rated: String(!!rated), time: String(time), increment: String(increment), ...range },
       });
       if (!res.ok) {
         let d = null; try { d = await res.json(); } catch {}
@@ -273,8 +275,10 @@ export class LichessProvider {
     return { cancel: () => ctl.abort(), done };
   }
 
-  async challenge(username, { time, increment, days, rated, color }) {
+  // rematchOf: identyfikator poprzedniej partii — rywal widzi u siebie zwykły „Rewanż”
+  async challenge(username, { time, increment, days, rated, color, rematchOf }) {
     const body = { rated: String(!!rated), color: color || 'random' };
+    if (rematchOf) body.rematchOf = rematchOf;
     if (days) {
       body.days = String(days);
       const d = await this.apiJson('/api/challenge/' + encodeURIComponent(username), { method: 'POST', body });
@@ -368,6 +372,7 @@ export class LichessProvider {
   async takeback(id, yes) { await this.apiJson(`/api/board/game/${id}/takeback/${yes ? 'yes' : 'no'}`, { method: 'POST' }); }
   async claimVictory(id) { await this.apiJson(`/api/board/game/${id}/claim-victory`, { method: 'POST' }); }
   async claimDraw(id) { await this.apiJson(`/api/board/game/${id}/claim-draw`, { method: 'POST' }); }
+  async chat(id, text) { await this.apiJson(`/api/board/game/${id}/chat`, { method: 'POST', body: { room: 'player', text } }); }
 
   gameUrl(id) { return `${HOST}/${id}`; }
   tokenCreateUrl() {
