@@ -60,7 +60,7 @@ test('B1: pokój z linku, wyzwanie 10+5, partia, zerwanie sieci na 20 s, ranking
 
   // 1. A tworzy pokój
   await A.page.goto(FRONT + '/');
-  await A.page.getByRole('button', { name: 'Graj w pokoju (bez Lichess)' }).click();
+  await A.page.getByRole('button', { name: /Pokój ze znajomymi/ }).click();
   await A.page.locator('#room-name').fill('Klub Hetman');
   await A.page.locator('#room-nick').fill('Ania');
   await A.page.getByRole('button', { name: 'Utwórz pokój' }).click();
@@ -165,7 +165,7 @@ test('demo działa też, gdy pokoje są włączone', async ({ browser }) => {
   const { ctx, page } = await phone(browser);
   await page.goto(FRONT + '/');
   await expect(page.getByRole('button', { name: 'Zaloguj przez Lichess' })).toBeVisible();
-  await page.getByRole('button', { name: 'Wypróbuj bez logowania' }).click();
+  await page.getByRole('button', { name: 'Wypróbuj z komputerem (demo)' }).click();
   await page.getByRole('button', { name: 'Zagraj z komputerem' }).click();
   await expect(page.locator('.g-meta')).toBeVisible();
   await ctx.close();
@@ -179,9 +179,10 @@ test('poczekalnia ogólna: lista czekających i automatyczne parowanie (blitz 5+
 
   for (const [P, nick] of [[A, nickA], [B, nickB]]) {
     await P.page.goto(FRONT + '/');
-    await P.page.getByRole('button', { name: 'Graj z każdym (bez Lichess)' }).click();
+    await P.page.getByRole('button', { name: /Szybka gra/ }).click();
     await P.page.locator('#room-nick').fill(nick);
-    await P.page.getByRole('button', { name: 'Wejdź do poczekalni' }).click();
+    await P.page.locator('#acct-pass').fill('haslo-testowe-1');
+    await P.page.getByRole('button', { name: 'Załóż konto' }).click();
     await expect(P.page.locator('.who')).toContainText(nick);
     await expect(P.page.locator('.who')).toContainText('Poczekalnia ogólna');
     await expect(P.page.locator('.tabs .tab.sel').first()).toHaveText('Poczekalnia');
@@ -231,9 +232,10 @@ test('poczekalnia: dołączenie przyciskiem „Graj” przy czekającym', async 
   const nickA = 'Jan' + Math.random().toString(36).slice(2, 6);
   for (const [P, nick] of [[A, nickA], [B, 'Iza' + Math.random().toString(36).slice(2, 6)]]) {
     await P.page.goto(FRONT + '/');
-    await P.page.getByRole('button', { name: 'Graj z każdym (bez Lichess)' }).click();
+    await P.page.getByRole('button', { name: /Szybka gra/ }).click();
     await P.page.locator('#room-nick').fill(nick);
-    await P.page.getByRole('button', { name: 'Wejdź do poczekalni' }).click();
+    await P.page.locator('#acct-pass').fill('haslo-testowe-1');
+    await P.page.getByRole('button', { name: 'Załóż konto' }).click();
   }
   await A.page.locator('button.chip[data-action="preset"][data-id="c30_0"]').click();
   await A.page.getByRole('button', { name: 'Szukaj rywala' }).click();
@@ -260,19 +262,20 @@ test('Menu główne: z Lichess do poczekalni i z powrotem, bez wylogowania', asy
   await expect(page.locator('.who')).toHaveText('Tester');
   await page.getByRole('button', { name: 'Menu' }).click();
   await expect(page.getByRole('button', { name: 'Graj przez Lichess' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Graj z każdym (bez Lichess)' })).toBeVisible();
+  await expect(page.getByRole('button', { name: /Szybka gra/ })).toBeVisible();
 
   // po przeładowaniu zostaje menu (nie wraca samo do Lichess)
   await page.reload();
   await expect(page.getByRole('button', { name: 'Graj przez Lichess' })).toBeVisible();
 
   // poczekalnia ogólna, potem Menu
-  await page.getByRole('button', { name: 'Graj z każdym (bez Lichess)' }).click();
+  await page.getByRole('button', { name: /Szybka gra/ }).click();
   await page.locator('#room-nick').fill('Lic' + Math.random().toString(36).slice(2, 6));
-  await page.getByRole('button', { name: 'Wejdź do poczekalni' }).click();
+  await page.locator('#acct-pass').fill('haslo-testowe-1');
+  await page.getByRole('button', { name: 'Załóż konto' }).click();
   await expect(page.locator('.who')).toContainText('Poczekalnia ogólna');
   await page.getByRole('button', { name: 'Menu' }).click();
-  await expect(page.getByRole('button', { name: /Poczekalnia ogólna \(Lic/ })).toBeVisible();
+  await expect(page.locator('.account-line')).toContainText('Grasz jako Lic');
 
   // z powrotem do Lichess bez ponownego logowania
   await page.getByRole('button', { name: 'Graj przez Lichess' }).click();
@@ -310,4 +313,68 @@ test('aktualizacja: po ponownym otwarciu nowa wersja mimo pamięci jak na GitHub
   } finally {
     pages.close();
   }
+});
+
+test('konto: rejestracja, pokój na koncie, logowanie na nowym telefonie przywraca pokój i poczekalnię', async ({ browser }) => {
+  const nick = 'Kon' + Math.random().toString(36).slice(2, 6);
+  const A = await phone(browser);
+  await A.page.goto(FRONT + '/');
+  await expect(A.page.getByRole('heading', { name: 'Bez konta Lichess' })).toBeVisible();
+  await expect(A.page.getByRole('heading', { name: 'Przez Lichess' })).toBeVisible();
+
+  // rejestracja przy pierwszej szybkiej grze
+  await A.page.getByRole('button', { name: /Szybka gra/ }).click();
+  await expect(A.page.getByRole('heading', { name: 'Załóż konto' })).toBeVisible();
+  await A.page.locator('#room-nick').fill(nick);
+  await A.page.locator('#acct-pass').fill('krotkie');
+  await A.page.getByRole('button', { name: 'Załóż konto' }).click();
+  await expect(A.page.locator('#toast')).toContainText('co najmniej 8');
+  await A.page.locator('#acct-pass').fill('moje-haslo-123');
+  await A.page.locator('#acct-email').fill(nick + '@example.com');
+  await A.page.getByRole('button', { name: 'Załóż konto' }).click();
+  await expect(A.page.locator('.who')).toContainText(nick);
+  await expect(A.page.getByText('Konto bez hasła')).toHaveCount(0);
+
+  // menu → pokój ze znajomymi: nick z konta, pokój zapisany na koncie
+  await A.page.getByRole('button', { name: 'Menu' }).click();
+  await expect(A.page.locator('.account-line')).toContainText('Grasz jako ' + nick);
+  await A.page.getByRole('button', { name: /Pokój ze znajomymi/ }).click();
+  await expect(A.page.locator('#room-nick')).toHaveValue(nick);
+  await A.page.locator('#room-name').fill('Pokój konta');
+  await A.page.getByRole('button', { name: 'Utwórz pokój' }).click();
+  await expect(A.page.getByRole('heading', { name: 'Pokój „Pokój konta”' })).toBeVisible();
+  await A.ctx.close();
+
+  // nowy telefon: logowanie
+  const C = await phone(browser);
+  await C.page.goto(FRONT + '/');
+  await C.page.getByRole('button', { name: 'Mam konto — zaloguj się' }).click();
+  await C.page.locator('#room-nick').fill(nick.toLowerCase());
+  await C.page.locator('#acct-pass').fill('zle-haslo-000');
+  await C.page.getByRole('button', { name: 'Zaloguj się' }).click();
+  await expect(C.page.locator('#toast')).toContainText('Nieprawidłowy nick lub hasło');
+  await C.page.locator('#acct-pass').fill('moje-haslo-123');
+  await C.page.getByRole('button', { name: 'Zaloguj się' }).click();
+  await expect(C.page.locator('.account-line')).toContainText('Grasz jako ' + nick);
+  await expect(C.page.getByRole('button', { name: /Pokój ze znajomymi/ })).toContainText('„Pokój konta”');
+  await C.page.getByRole('button', { name: /Pokój ze znajomymi/ }).click();
+  await expect(C.page.locator('.who')).toContainText(nick);
+  await expect(C.page.locator('.who')).toContainText('Pokój konta');
+  await C.page.getByRole('button', { name: 'Menu' }).click();
+  await C.page.getByRole('button', { name: /Szybka gra/ }).click();
+  await expect(C.page.locator('.who')).toContainText('Poczekalnia ogólna');
+
+  // konto: wylogowanie z urządzenia i „nie pamiętam hasła”
+  await C.page.locator('button[aria-label="Konto"]').click();
+  await expect(C.page.getByRole('heading', { name: 'Twoje konto' })).toBeVisible();
+  await expect(C.page.locator('.dialog')).toContainText(nick + '@example.com');
+  await C.page.getByRole('button', { name: 'Wyloguj z tego urządzenia' }).click();
+  await C.page.locator('.dialog').getByRole('button', { name: 'Wyloguj' }).click();
+  await expect(C.page.getByRole('button', { name: 'Mam konto — zaloguj się' })).toBeVisible();
+  await C.page.getByRole('button', { name: 'Mam konto — zaloguj się' }).click();
+  await C.page.getByRole('button', { name: 'Nie pamiętam hasła' }).click();
+  await C.page.locator('#acct-login').fill(nick);
+  await C.page.getByRole('button', { name: 'Wyślij link' }).click();
+  await expect(C.page.locator('.note')).toContainText('nie jest jeszcze włączone');
+  await C.ctx.close();
 });

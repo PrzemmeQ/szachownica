@@ -238,3 +238,10 @@ code { font-family: var(--mono); font-size: 0.9em; }
 .seek-list li > .small { grid-column: 1; }
 .seek-list li > .btn { grid-column: 2; grid-row: 1 / span 2; }
 .seek-who { font-weight: 600; }
+/* ekran startowy: dwie sekcje */
+.mode-card h2 { margin: 0 0 6px; font-size: 1.05rem; }
+.mode-card .stack { margin-top: 10px; }
+.mode-btn { display: flex; flex-direction: column; align-items: center; gap: 2px; line-height: 1.25; }
+.mode-sub { font-size: 0.84rem; font-weight: 400; opacity: 0.8; }
+.account-line { margin: 4px 0 0; font-size: 0.95rem; }
+.account-line .link { margin-left: 6px; }

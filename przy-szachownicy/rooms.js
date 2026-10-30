@@ -37,18 +37,42 @@ async function http(method, path, body) {
 
 function remember(room, d) {
   const s = { api: apiBase(), room, name: d.name, memberId: d.memberId, nick: d.nick, token: d.token };
+  if (d.secured) s.secured = true;
   lsSet(keyFor(room), s);
   return s;
 }
 export async function joinPublic(nick) { return joinRoom(PUBLIC_CODE, nick); }
 
+// --- konto (nick + hasło). Konto = tożsamość w poczekalni ogólnej; pokoje są do niego przypinane. ---
+function accountToken() { return savedPublic()?.token || undefined; }
+export async function registerAccount(nick, password, email) {
+  const d = await http('POST', '/api/account/register', { nick, password, email: email || undefined });
+  return { saved: remember(PUBLIC_CODE, { ...d, secured: true }), rooms: [] };
+}
+export async function loginAccount(nick, password) {
+  const d = await http('POST', '/api/account/login', { nick, password });
+  return { saved: remember(PUBLIC_CODE, { ...d, secured: true }), rooms: d.rooms || [] };
+}
+export async function requestPasswordReset(login) { return http('POST', '/api/account/reset-request', { login }); }
+export async function resetPassword(token, password) {
+  const d = await http('POST', '/api/account/reset', { token, password });
+  return { saved: remember(PUBLIC_CODE, { ...d, secured: true }), rooms: d.rooms || [] };
+}
+// Pokój przypięty do konta, otwierany na nowym urządzeniu.
+export async function restoreRoom(code) {
+  const d = await http('POST', `/api/rooms/${encodeURIComponent(code)}/account-login`, { accountToken: accountToken() });
+  return remember(code, d);
+}
+
 export async function roomInfo(code) { return http('GET', `/api/rooms/${encodeURIComponent(code)}`); }
 export async function createRoom(name, nick) {
-  const d = await http('POST', '/api/rooms', { name, nick });
+  const d = await http('POST', '/api/rooms', { name, nick, accountToken: accountToken() });
   return remember(d.room, d);
 }
 export async function joinRoom(code, nick) {
-  const d = await http('POST', `/api/rooms/${encodeURIComponent(code)}/join`, { nick });
+  const body = { nick };
+  if (code !== PUBLIC_CODE) body.accountToken = accountToken();
+  const d = await http('POST', `/api/rooms/${encodeURIComponent(code)}/join`, body);
   return remember(code, d);
 }
 export async function claimTransfer(code, transferCode) {
@@ -219,8 +243,9 @@ export class RoomsProvider {
         this.welcome = m;
         this.attempt = 0;
         this.members = m.members || [];
-        if (this.s.name !== m.room.name || this.s.nick !== m.me.name) {
-          this.s = { ...this.s, name: m.room.name, nick: m.me.name };
+        const secured = this.isPublic ? !!m.me.hasPassword : this.s.secured;
+        if (this.s.name !== m.room.name || this.s.nick !== m.me.name || !!this.s.secured !== !!secured) {
+          this.s = { ...this.s, name: m.room.name, nick: m.me.name, secured: !!secured };
           lsSet(keyFor(this.s.room), this.s);
         }
         this.seeks = m.seeks || [];
@@ -395,6 +420,20 @@ export class RoomsProvider {
   async draw(id, yes) { await this.req('draw', { gameId: id, yes: !!yes }); }
   async claimVictory(id) { await this.req('claimVictory', { gameId: id }); }
   async claimDraw(id) { await this.req('claimDraw', { gameId: id }); }
+
+  // Konto (tylko poczekalnia ogólna): ustawienie / zmiana hasła i e-maila.
+  async setPassword({ password, oldPassword, email }) {
+    const r = await this.req('setPassword', { password, oldPassword, email });
+    if (this.welcome) Object.assign(this.welcome.me, { hasPassword: r.hasPassword, email: r.email });
+    this.s = { ...this.s, secured: !!r.hasPassword };
+    lsSet(keyFor(this.s.room), this.s);
+    return r;
+  }
+  // Prywatny pokój: przypięcie tego nicku do konta (żeby wrócić do pokoju po zalogowaniu na innym urządzeniu).
+  async linkAccount() {
+    await this.req('linkAccount', { accountToken: accountToken() });
+    if (this.welcome) this.welcome.me.linked = true;
+  }
 
   async transferLink() {
     const r = await this.req('transferCreate');

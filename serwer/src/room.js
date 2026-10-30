@@ -3,6 +3,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { Chess } from '../../przy-szachownicy/chess.js';
 import { rateGame, DEFAULT, PROVISIONAL_RD } from './glicko.js';
+import { accountMethods } from './accounts.js';
 
 const ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
 export const ROOM_CODE_RE = /^[abcdefghjkmnpqrstuvwxyz23456789]{12}$/;
@@ -95,9 +96,49 @@ export class Room extends DurableObject {
         id TEXT PRIMARY KEY, member_id TEXT NOT NULL, time_ms INTEGER NOT NULL, inc_ms INTEGER NOT NULL,
         rated INTEGER NOT NULL, created_at INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS ratings_top ON ratings (speed, rating);
+      CREATE TABLE IF NOT EXISTS resets (hash TEXT PRIMARY KEY, member_id TEXT NOT NULL, expires_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS login_fails (nick_key TEXT PRIMARY KEY, count INTEGER NOT NULL, until INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS account_rooms (
+        member_id TEXT NOT NULL, code TEXT NOT NULL, name TEXT, joined_at INTEGER NOT NULL, PRIMARY KEY (member_id, code));
+    `);
+    // konta: nowe kolumny (pokoje utworzone przed kontami ich nie mają)
+    const cols = new Set(this.sql.exec("SELECT name FROM pragma_table_info('members')").toArray().map((r) => r.name));
+    for (const [c, type] of [['pass_hash', 'TEXT'], ['email', 'TEXT'], ['email_key', 'TEXT'], ['account_id', 'TEXT']]) {
+      if (!cols.has(c)) this.sql.exec(`ALTER TABLE members ADD COLUMN ${c} ${type}`);
+    }
+    this.sql.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS members_email ON members (email_key) WHERE email_key IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS members_account ON members (account_id);
     `);
   }
   isPublic() { return this.kv('public') === '1'; }
+  // pomocnicze dla accounts.js
+  fail(msg) { fail(msg); }
+  nickKey(s) { return nickKey(s); }
+  sha256(s) { return sha256(s); }
+  randomCode(n) { return randomCode(n); }
+
+  // --- konto: pytanie poczekalni ogólnej (serwer–serwer) -------------------------
+  publicStub() {
+    const ns = this.env.JURISDICTION ? this.env.ROOMS.jurisdiction(this.env.JURISDICTION) : this.env.ROOMS;
+    return ns.get(ns.idFromName(PUBLIC_CODE));
+  }
+  async callPublic(action, body) {
+    const res = await this.publicStub().fetch('https://pokoj/' + action, {
+      method: 'POST', headers: { 'X-Room': PUBLIC_CODE, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    return res.ok ? res.json() : null;
+  }
+  async accountFromToken(token) {
+    if (!token) return null;
+    const a = await this.callPublic('acct-verify', { token });
+    if (!a) fail('Sesja konta wygasła — zaloguj się ponownie.');
+    return a;
+  }
+  async linkRoomToAccount(memberId, account) {
+    this.sql.exec('UPDATE members SET account_id = ? WHERE id = ?', account.id, memberId);
+    await this.callPublic('acct-room-add', { accountId: account.id, code: this.kv('code'), name: this.kv('name') });
+  }
 
   // --- pomocnicze: dane --------------------------------------------------
   kv(k, v) {
@@ -294,12 +335,15 @@ export class Room extends DurableObject {
         if (this.roomExists()) return json({ error: 'exists' }, 409);
         const name = String(body.name ?? '').trim().replace(/\s+/g, ' ');
         if (name.length < 1 || name.length > 40) fail('Nazwa pokoju: 1–40 znaków.');
-        if (!NICK_RE.test(cleanNick(body.nick))) fail('Nick: 2–20 znaków, litery, cyfry, spacja, _ . -');
+        const account = await this.accountFromToken(body.accountToken);
+        const nick = body.nick || account?.nick;
+        if (!NICK_RE.test(cleanNick(nick))) fail('Nick: 2–20 znaków, litery, cyfry, spacja, _ . -');
         this.kv('name', name);
         this.kv('code', req.headers.get('X-Room') || '');
         this.kv('created_at', Date.now());
-        const m = await this.addMember(body.nick, 'owner');
+        const m = await this.addMember(nick, 'owner');
         this.kv('owner_id', m.memberId);
+        if (account) await this.linkRoomToAccount(m.memberId, account);
         return json({ name, ...m });
       }
       if (!this.roomExists() && req.headers.get('X-Room') === PUBLIC_CODE) {
@@ -312,10 +356,39 @@ export class Room extends DurableObject {
       if (action === 'info') {
         return json({ name: this.kv('name'), members: this.sql.exec('SELECT COUNT(*) AS c FROM members').one().c, public: this.isPublic() });
       }
+      // --- konta (tylko poczekalnia ogólna); acct-verify i acct-room-add wołają inne pokoje, nie przeglądarka
+      if (action.startsWith('acct-')) {
+        if (!this.isPublic()) return json({ error: 'Nie znaleziono.' }, 404);
+        if (action === 'acct-register') return json(await this.acctRegister(body));
+        if (action === 'acct-login') return json(await this.acctLogin(body));
+        if (action === 'acct-reset-request') return json(await this.acctResetRequest(body));
+        if (action === 'acct-reset') return json(await this.acctReset(body));
+        if (action === 'acct-verify') {
+          const a = await this.acctVerify(body.token);
+          return a ? json(a) : json({ error: 'Nieznany token.' }, 401);
+        }
+        if (action === 'acct-room-add') { this.acctAddRoom(body.accountId, body.code, body.name); return json({ ok: true }); }
+        return json({ error: 'Nie znaleziono.' }, 404);
+      }
       if (action === 'join') {
-        const m = await this.addMember(body.nick, 'member');
+        const account = this.isPublic() ? null : await this.accountFromToken(body.accountToken);
+        if (account) {
+          // to konto już jest w pokoju — zwróć ten sam nick (np. drugie urządzenie)
+          const had = this.sql.exec('SELECT * FROM members WHERE account_id = ?', account.id).toArray()[0];
+          if (had) return json({ name: this.kv('name'), memberId: had.id, nick: had.nick, token: await this.issueToken(had.id) });
+        }
+        const m = await this.addMember(body.nick || account?.nick, 'member');
+        if (account) await this.linkRoomToAccount(m.memberId, account);
         if (!this.isPublic()) this.broadcastMembers();
         return json({ name: this.kv('name'), ...m });
+      }
+      // wejście do pokoju na nowym urządzeniu po zalogowaniu na konto
+      if (action === 'account-login') {
+        const account = await this.accountFromToken(body.accountToken);
+        if (!account) fail('Zaloguj się na konto.');
+        const m = this.sql.exec('SELECT * FROM members WHERE account_id = ?', account.id).toArray()[0];
+        if (!m) return json({ error: 'Twoje konto nie należy do tego pokoju.' }, 404);
+        return json({ name: this.kv('name'), memberId: m.id, nick: m.nick, token: await this.issueToken(m.id) });
       }
       if (action === 'transfer') {
         const hash = await sha256(String(body.code ?? '').toLowerCase());
@@ -392,7 +465,10 @@ export class Room extends DurableObject {
     }
     this.send(ws, {
       t: 'welcome',
-      me: { id: m.id, name: m.nick, role: m.role, ratings: this.ratingsOf(m.id) },
+      me: {
+        id: m.id, name: m.nick, role: m.role, ratings: this.ratingsOf(m.id),
+        linked: !!m.account_id, ...(this.isPublic() ? this.accountInfo(m.id) : {}),
+      },
       room: { code: this.kv('code'), name: this.kv('name'), public: this.isPublic() },
       members: this.membersList(),
       seeks: this.seeksList(),
@@ -421,6 +497,21 @@ export class Room extends DurableObject {
       case 'ongoing':
         return { games: this.runningGames().filter((g) => this.colorOf(g, me)).map((g) => this.gameInfo(g, me)) };
       case 'history': return { games: this.history(this.isPublic() ? me : null) };
+      case 'setPassword':
+        if (!this.isPublic()) fail('Konto ustawiasz w poczekalni ogólnej.');
+        return this.acctSetPassword(me, msg);
+      case 'accountInfo':
+        if (!this.isPublic()) fail('Konto ustawiasz w poczekalni ogólnej.');
+        return this.accountInfo(me);
+      case 'linkAccount': {
+        if (this.isPublic()) fail('To jest konto.');
+        const account = await this.accountFromToken(msg.accountToken);
+        if (!account) fail('Zaloguj się na konto.');
+        const other = this.sql.exec('SELECT id FROM members WHERE account_id = ? AND id != ?', account.id, me).toArray()[0];
+        if (other) fail('To konto ma już inny nick w tym pokoju.');
+        await this.linkRoomToAccount(me, account);
+        return { linked: true };
+      }
       case 'seek': return this.cmdSeek(me, msg);
       case 'seekCancel': return this.cmdSeekCancel(me, msg.id);
       case 'seekAccept': return this.cmdSeekAccept(me, msg.id);
@@ -826,6 +917,8 @@ export class Room extends DurableObject {
     this.ctx.storage.setAlarm(Math.max(now + 50, Math.min(...times)));
   }
 }
+
+Object.assign(Room.prototype, accountMethods);
 
 function hasMatingMaterial(chess, c) {
   let minors = 0;

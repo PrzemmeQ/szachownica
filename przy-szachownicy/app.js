@@ -3,7 +3,8 @@ import { Chess } from './chess.js';
 import { LichessProvider } from './lichess.js';
 import { DemoProvider } from './demo.js';
 import {
-  RoomsProvider, roomsEnabled, savedRoom, savedPublic, roomInfo, createRoom, joinRoom, joinPublic, claimTransfer,
+  RoomsProvider, roomsEnabled, savedRoom, savedPublic, roomInfo, createRoom, joinRoom, claimTransfer,
+  registerAccount, loginAccount, requestPasswordReset, resetPassword, restoreRoom,
 } from './rooms.js';
 import {
   sanToPl, describeMove, speechForMove, statusPl, SPEED_PL, formatMs, PROMO_PIECES,
@@ -46,7 +47,7 @@ const RANKS = ['1', '2', '3', '4', '5', '6', '7', '8'];
 const S = {
   provider: null,
   user: null,
-  view: 'loading', // loading | start | room-new | room-join | public-join | lobby | game
+  view: 'loading', // loading | start | room-new | room-join | account | lobby | game
   online: true,
   ongoing: [],
   challenges: new Map(),
@@ -70,6 +71,8 @@ const S = {
   streamOpenedAt: 0,
   // wariant B: pokoje
   roomForm: { name: '', nick: lsGet('ps_room_nick') || '' },
+  // konto: mode = register | login | forgot | reset; next = dokąd po zalogowaniu (public | room-new | start)
+  accountForm: { mode: 'register', nick: lsGet('ps_room_nick') || '', email: '', info: '', token: '', next: 'start' },
   joinRoom: null, // { code, name, error }
   rankSpeed: 'rapid',
   roomHistory: null,
@@ -197,7 +200,15 @@ async function bootRoom() {
   const params = new URLSearchParams(location.search);
   const code = (params.get('pokoj') || '').trim().toLowerCase();
   const transfer = (params.get('przenies') || '').trim().toLowerCase();
+  const reset = (params.get('reset') || '').trim();
   const clean = () => history.replaceState(null, '', location.pathname + location.hash);
+  if (reset) {
+    clean();
+    S.accountForm = { ...S.accountForm, mode: 'reset', token: reset, next: 'public' };
+    S.view = 'account';
+    render();
+    return true;
+  }
   if (code && transfer) {
     clean();
     S.view = 'loading'; render();
@@ -266,6 +277,7 @@ async function logout() {
   S.view = 'start';
   render();
   if (p) await p.logout();
+  if (S.view === 'start') render(); // konto/pokój zniknęły z urządzenia — odśwież ekran startowy
 }
 
 // Menu główne: wyjście do ekranu startowego bez wylogowania. Token Lichess, pokój i nick
@@ -298,12 +310,60 @@ async function submitRoom(kind) {
   lsSet('ps_room_nick', nick);
   S.waiting = { text: kind === 'new' ? 'Tworzę pokój…' : 'Dołączam…', kind: 'pending' }; render();
   try {
-    const saved = kind === 'new' ? await createRoom(f.name.trim(), nick)
-      : kind === 'public' ? await joinPublic(nick)
-        : await joinRoom(S.joinRoom.code, nick);
+    const saved = kind === 'new' ? await createRoom(f.name.trim(), nick) : await joinRoom(S.joinRoom.code, nick);
     S.waiting = null; S.joinRoom = null; S.startError = '';
     await enterWith(new RoomsProvider(saved));
     if (kind === 'new' && S.provider) S.modal = { kind: 'room' };
+    render();
+  } catch (e) {
+    S.waiting = null; toast(e.message, 5000); render();
+  }
+}
+
+// --- konto ---------------------------------------------------------------------------
+function openAccount(mode, next) {
+  S.accountForm = { ...S.accountForm, mode, next: next || 'start', info: '' };
+  S.startError = '';
+  S.view = 'account';
+  render();
+}
+
+async function submitAccount(kind) {
+  unlockMedia();
+  const f = S.accountForm;
+  const val = (id) => (document.getElementById(id)?.value || '');
+  const password = val('acct-pass');
+  try {
+    let r;
+    if (kind === 'forgot') {
+      const login = val('acct-login').trim();
+      if (!login) { toast('Wpisz nick albo e-mail.'); return; }
+      S.waiting = { text: 'Wysyłam…', kind: 'pending' }; render();
+      const d = await requestPasswordReset(login);
+      S.waiting = null;
+      f.info = d.mailEnabled
+        ? 'Jeśli to konto ma podany e-mail, wysłaliśmy na niego link do zmiany hasła (ważny 1 godzinę). Sprawdź też spam.'
+        : 'Odzyskiwanie hasła e-mailem nie jest jeszcze włączone. Jeśli grasz jeszcze na innym urządzeniu, zmień hasło tam (menu Konto).';
+      render();
+      return;
+    }
+    if (password.length < 8 && kind !== 'login') { toast('Hasło musi mieć co najmniej 8 znaków.'); return; }
+    const nick = f.nick.trim();
+    if (kind !== 'reset' && !nick) { toast('Wpisz nick.'); return; }
+    if (kind === 'register' && !/^[\p{L}\p{N}][\p{L}\p{N} _.-]{1,19}$/u.test(nick)) { toast('Nick: 2–20 znaków — litery, cyfry, spacja, _ . -'); return; }
+    S.waiting = { text: kind === 'register' ? 'Zakładam konto…' : 'Loguję…', kind: 'pending' }; render();
+    if (kind === 'register') r = await registerAccount(nick, password, val('acct-email').trim());
+    else if (kind === 'login') r = await loginAccount(nick, password);
+    else r = await resetPassword(f.token, password);
+    lsSet('ps_room_nick', r.saved.nick);
+    // pokój przypięty do konta wraca na tym urządzeniu (jeśli żadnego tu nie ma)
+    if (r.rooms.length && !savedRoom()) { try { await restoreRoom(r.rooms[0].code); } catch {} }
+    S.waiting = null;
+    S.roomForm.nick = r.saved.nick;
+    if (f.next === 'public') { await enterWith(new RoomsProvider(r.saved)); return; }
+    if (f.next === 'room-new') { S.view = 'room-new'; render(); return; }
+    S.view = 'start';
+    toast(kind === 'register' ? `Konto ${r.saved.nick} założone.` : `Zalogowano jako ${r.saved.nick}.`);
     render();
   } catch (e) {
     S.waiting = null; toast(e.message, 5000); render();
@@ -695,7 +755,7 @@ function render() {
   else if (S.view === 'start') html = viewStart();
   else if (S.view === 'room-new') html = viewRoomNew();
   else if (S.view === 'room-join') html = viewRoomJoin();
-  else if (S.view === 'public-join') html = viewPublicJoin();
+  else if (S.view === 'account') html = viewAccount();
   else if (S.view === 'lobby') html = viewLobby();
   else if (S.view === 'game') html = viewGame();
   html += viewWaiting() + viewModal();
@@ -712,74 +772,143 @@ function viewLoading() {
   return `<main class="center"><p class="muted">Łączenie…</p></main>`;
 }
 
+function viewLichessLogin(primary) {
+  const cls = primary ? 'btn primary big' : 'btn big';
+  if (CONFIG.DEMO_ONLY) {
+    return `<p class="note">To jest podgląd. Logowanie przez Lichess zadziała, gdy aplikacja będzie wgrana pod własny adres (instrukcja w README).</p>`;
+  }
+  return new LichessProvider().hasToken()
+    ? `<button class="${cls}" data-action="lichess-resume">Graj przez Lichess</button>
+       <button class="link" data-action="lichess-logout">Wyloguj z Lichess</button>`
+    : `<button class="${cls}" data-action="login">Zaloguj przez Lichess</button>
+       <button class="link" data-action="token-login">Inny sposób: wklej token Lichess</button>`;
+}
+
 function viewStart() {
   const err = S.startError ? `<p class="error">${esc(S.startError)}</p>` : '';
-  const login = CONFIG.DEMO_ONLY
-    ? `<p class="note">To jest podgląd. Logowanie przez Lichess zadziała, gdy aplikacja będzie wgrana pod własny adres (instrukcja w README).</p>`
-    : new LichessProvider().hasToken()
-      ? `<button class="btn primary big" data-action="lichess-resume">Graj przez Lichess</button>
-       <button class="link" data-action="lichess-logout">Wyloguj z Lichess</button>`
-      : `<button class="btn primary big" data-action="login">Zaloguj przez Lichess</button>
-       <button class="link" data-action="token-login">Inny sposób: wklej token Lichess</button>`;
-  return `
-  <main class="start">
+  const brand = `
     <div class="brand">
       <div class="logo" aria-hidden="true">e2·e4</div>
       <h1>${esc(CONFIG.APP_NAME)}</h1>
-    </div>
+    </div>`;
+  if (!roomsEnabled()) {
+    // wariant A: bez serwera pokoi
+    return `
+  <main class="start">
+    ${brand}
     <p class="lead">Grasz na prawdziwej szachownicy. Tutaj tylko wpisujesz swój ruch i odczytujesz ruch rywala — bez szachownicy na ekranie.</p>
     <p class="muted small">Partie i ranking są na Twoim koncie Lichess.</p>
     ${err}
     <div class="stack">
-      ${login}
+      ${viewLichessLogin(true)}
       <button class="btn big" data-action="demo">Wypróbuj bez logowania</button>
-      ${roomsEnabled() ? viewRoomButtons() : ''}
     </div>
     <p class="muted small">Przez Lichess: losowi rywale w tempie rapid, klasycznym i korespondencyjnym. Blitz tylko ze znajomym lub z komputerem.</p>
-    ${roomsEnabled() ? '' : viewBanner()}
+    ${viewBanner()}
   </main>`;
-}
-
-function viewRoomButtons() {
-  const saved = savedRoom();
+  }
   const pub = savedPublic();
-  return `
-      <button class="btn big" data-action="public-enter">${pub ? `Poczekalnia ogólna (${esc(pub.nick)})` : 'Graj z każdym (bez Lichess)'}</button>
-      ${saved ? `<button class="btn big" data-action="room-resume">Wróć do pokoju „${esc(saved.name)}”</button>` : ''}
-      <button class="btn big" data-action="room-new">Graj w pokoju (bez Lichess)</button>`;
-}
-
-function viewPublicJoin() {
-  const f = S.roomForm;
+  const room = savedRoom();
+  const who = pub
+    ? `<p class="account-line">Grasz jako <strong>${esc(pub.nick)}</strong>${pub.secured ? '' : ' · <span class="warn">konto bez hasła</span>'}
+         <button class="link small" data-action="account-menu">Konto</button></p>`
+    : `<p class="account-line muted small">Własne konto i ranking w tej aplikacji. <button class="link small" data-action="account-login">Mam konto — zaloguj się</button></p>`;
   return `
   <main class="start">
-    <header class="g-top"><button class="btn small" data-action="to-start">← Wróć</button></header>
-    <h1>Poczekalnia ogólna</h1>
-    <p class="lead">Graj z każdym, kto jest teraz online — bez konta Lichess i bez hasła. Wybierasz tempo, a aplikacja sama dobiera rywala o podobnym rankingu.</p>
-    <label class="field">Twój nick (widoczny dla wszystkich)
-      <input id="room-nick" type="text" maxlength="20" autocomplete="nickname" autocapitalize="off" spellcheck="false" value="${esc(f.nick)}" placeholder="np. Ania_K">
-    </label>
-    <div class="stack"><button class="btn primary big" data-action="public-join">Wejdź do poczekalni</button></div>
-    <p class="note small">Grasz z nieznajomymi. Nie da się sprawdzić, czy ktoś gra przy szachownicy, czy z programem — ranking ogólny traktuj z przymrużeniem oka. Z kimś, komu ufasz, zagrasz w zamkniętym pokoju.</p>
-    <p class="muted small">Zapisujemy tylko nick, partie i ranking. ${PRIVACY_LINK}</p>
+    ${brand}
+    <p class="lead">Grasz na prawdziwej szachownicy. Tu tylko wpisujesz swój ruch i słyszysz ruch rywala.</p>
+    ${err}
+    <section class="card mode-card">
+      <h2>Bez konta Lichess</h2>
+      ${who}
+      <div class="stack">
+        <button class="btn primary big mode-btn" data-action="quick-play">⚡ Szybka gra<span class="mode-sub">dobór rywala, który jest teraz online</span></button>
+        <button class="btn big mode-btn" data-action="room-play">👥 Pokój ze znajomymi<span class="mode-sub">${room ? `wróć do „${esc(room.name)}”` : 'zamknięty pokój, zaproszenie linkiem'}</span></button>
+        ${room ? `<button class="link small" data-action="room-new">Utwórz nowy pokój</button>` : ''}
+      </div>
+    </section>
+    <section class="card mode-card">
+      <h2>Przez Lichess</h2>
+      <p class="muted small">Partie i ranking na Twoim koncie Lichess. Losowi rywale: rapid i dłużej.</p>
+      <div class="stack">${viewLichessLogin(false)}</div>
+    </section>
+    <p class="center-text small"><button class="link" data-action="demo">Wypróbuj z komputerem (demo)</button></p>
   </main>`;
 }
 
 const PRIVACY_LINK = `<a href="prywatnosc.html" target="_blank" rel="noopener">Prywatność</a>`;
+const NICK_INPUT = (value, placeholder) => `<input id="room-nick" type="text" maxlength="20" autocomplete="username" autocapitalize="off" spellcheck="false" value="${esc(value)}" placeholder="${placeholder}">`;
+
+// Konto: rejestracja / logowanie / nie pamiętam hasła / nowe hasło z linku.
+function viewAccount() {
+  const f = S.accountForm;
+  const back = `<header class="g-top"><button class="btn small" data-action="to-start">← Wróć</button></header>`;
+  const pass = (id, label, auto) => `
+    <label class="field">${label}
+      <input id="${id}" type="password" autocomplete="${auto}" value="">
+    </label>`;
+  if (f.mode === 'forgot') {
+    return `
+  <main class="start">${back}
+    <h1>Nie pamiętam hasła</h1>
+    <p class="lead">Wyślemy link do ustawienia nowego hasła na e-mail podany przy koncie.</p>
+    <label class="field">Nick albo e-mail
+      <input id="acct-login" type="text" autocomplete="username" autocapitalize="off" spellcheck="false" value="${esc(f.nick)}">
+    </label>
+    ${f.info ? `<p class="note small">${esc(f.info)}</p>` : ''}
+    <div class="stack"><button class="btn primary big" data-action="acct-forgot">Wyślij link</button></div>
+    <p class="small"><button class="link" data-action="acct-mode" data-id="login">← Wróć do logowania</button></p>
+  </main>`;
+  }
+  if (f.mode === 'reset') {
+    return `
+  <main class="start">${back}
+    <h1>Nowe hasło</h1>
+    ${pass('acct-pass', 'Nowe hasło (min. 8 znaków)', 'new-password')}
+    <div class="stack"><button class="btn primary big" data-action="acct-reset">Ustaw hasło i zaloguj</button></div>
+  </main>`;
+  }
+  if (f.mode === 'login') {
+    return `
+  <main class="start">${back}
+    <h1>Zaloguj się</h1>
+    <p class="lead">Twój ranking i pokoje wrócą na tym urządzeniu.</p>
+    <label class="field">Nick ${NICK_INPUT(f.nick, '')}</label>
+    ${pass('acct-pass', 'Hasło', 'current-password')}
+    <div class="stack"><button class="btn primary big" data-action="acct-login">Zaloguj się</button></div>
+    <p class="small"><button class="link" data-action="acct-mode" data-id="forgot">Nie pamiętam hasła</button></p>
+    <p class="small">Nie masz konta? <button class="link" data-action="acct-mode" data-id="register">Załóż konto</button></p>
+  </main>`;
+  }
+  return `
+  <main class="start">${back}
+    <h1>Załóż konto</h1>
+    <p class="lead">Konto trzyma Twój ranking i pokoje — zalogujesz się na każdym urządzeniu. Bez konta Lichess.</p>
+    <label class="field">Nick (widoczny dla innych graczy) ${NICK_INPUT(f.nick, 'np. Ania_K')}</label>
+    ${pass('acct-pass', 'Hasło (min. 8 znaków)', 'new-password')}
+    <label class="field">E-mail <span class="muted">(nieobowiązkowy — tylko do odzyskania hasła)</span>
+      <input id="acct-email" type="email" autocomplete="email" inputmode="email" value="${esc(f.email)}" placeholder="adres@e-mail.pl">
+    </label>
+    <div class="stack"><button class="btn primary big" data-action="acct-register">Załóż konto</button></div>
+    <p class="small">Masz już konto? <button class="link" data-action="acct-mode" data-id="login">Zaloguj się</button></p>
+    <p class="note small">W szybkiej grze grasz z nieznajomymi. Nie da się sprawdzić, czy ktoś gra przy szachownicy, czy z programem — z kimś, komu ufasz, zagrasz w zamkniętym pokoju.</p>
+    <p class="muted small">Zapisujemy nick, skrót hasła (nie samo hasło), e-mail tylko jeśli go podasz, partie i ranking. ${PRIVACY_LINK}</p>
+  </main>`;
+}
 
 function viewRoomNew() {
   const f = S.roomForm;
+  const pub = savedPublic();
   return `
   <main class="start">
     <header class="g-top"><button class="btn small" data-action="to-start">← Wróć</button></header>
     <h1>Nowy pokój</h1>
-    <p class="lead">Zamknięty pokój dla znajomych, klubu albo szkółki. Ranking liczy się tylko w pokoju. Bez konta i bez hasła.</p>
+    <p class="lead">Zamknięty pokój dla znajomych, klubu albo szkółki. Ranking liczy się tylko w pokoju.</p>
     <label class="field">Nazwa pokoju
       <input id="room-name" type="text" maxlength="40" autocomplete="off" value="${esc(f.name)}" placeholder="np. Klub Hetman — środy">
     </label>
-    <label class="field">Twój nick w pokoju
-      <input id="room-nick" type="text" maxlength="20" autocomplete="nickname" autocapitalize="off" spellcheck="false" value="${esc(f.nick)}" placeholder="np. Ania">
-    </label>
+    <label class="field">Twój nick w pokoju ${NICK_INPUT(f.nick || pub?.nick || '', 'np. Ania')}</label>
+    ${pub ? `<p class="muted small">Pokój zapisze się na koncie ${esc(pub.nick)} — wrócisz do niego po zalogowaniu na innym urządzeniu.</p>` : ''}
     <div class="stack">
       <button class="btn primary big" data-action="room-create">Utwórz pokój</button>
     </div>
@@ -792,15 +921,15 @@ function viewRoomJoin() {
   const j = S.joinRoom || {};
   const f = S.roomForm;
   const saved = savedRoom();
+  const pub = savedPublic();
   const body = j.error
     ? `<p class="error">${esc(j.error)}</p>`
     : `<p class="lead">${j.name ? `Zaproszenie do pokoju <strong>${esc(j.name)}</strong>.` : 'Sprawdzam zaproszenie…'}</p>
-       <label class="field">Twój nick w pokoju
-         <input id="room-nick" type="text" maxlength="20" autocomplete="nickname" autocapitalize="off" spellcheck="false" value="${esc(f.nick)}" placeholder="np. Bartek">
-       </label>
-       ${saved ? `<p class="note small">Na tym urządzeniu jesteś w pokoju „${esc(saved.name)}”. Po dołączeniu tutaj tamten pokój zniknie z tego urządzenia.</p>` : ''}
+       <label class="field">Twój nick w pokoju ${NICK_INPUT(f.nick || pub?.nick || '', 'np. Bartek')}</label>
+       ${pub ? `<p class="muted small">Pokój zapisze się na koncie ${esc(pub.nick)}.</p>` : ''}
+       ${saved ? `<p class="note small">Na tym urządzeniu jesteś w pokoju „${esc(saved.name)}”. Po dołączeniu tutaj tamten pokój zniknie z tego urządzenia${pub ? ' (zostanie na koncie)' : ''}.</p>` : ''}
        <div class="stack"><button class="btn primary big" data-action="room-join" ${j.name ? '' : 'disabled'}>Dołącz</button></div>
-       <p class="muted small">Bez konta i bez hasła — urządzenie zapamięta Cię w pokoju. ${PRIVACY_LINK}</p>`;
+       <p class="muted small">${pub ? '' : 'Bez hasła — urządzenie zapamięta Cię w pokoju. '}${PRIVACY_LINK}</p>`;
   return `
   <main class="start">
     <header class="g-top"><button class="btn small" data-action="to-start">← Wróć</button></header>
@@ -867,7 +996,7 @@ function viewLobby() {
       </div>
       <div class="topbar-actions">
         <span class="dot ${S.online ? 'on' : 'off'}" title="${S.online ? 'Połączono' : 'Łączenie…'}"></span>
-        ${rooms ? `<button class="icon-btn" data-action="room-menu" aria-label="${S.provider.isPublic ? 'Twój nick' : 'Pokój'}">⌂</button>` : ''}
+        ${rooms ? `<button class="icon-btn" data-action="room-menu" aria-label="${S.provider.isPublic ? 'Konto' : 'Pokój'}">⌂</button>` : ''}
         <button class="icon-btn" data-action="settings" aria-label="Ustawienia">⚙︎</button>
         ${rooms ? '' : `<button class="icon-btn" data-action="logout" aria-label="Wyloguj">⏻</button>`}
         <button class="btn small" data-action="to-menu">Menu</button>
@@ -875,6 +1004,8 @@ function viewLobby() {
     </header>
 
     ${!S.online && rooms ? `<div class="notice">Brak połączenia z pokojem — łączę ponownie…</div>` : ''}
+    ${rooms && S.provider.isPublic && S.provider.me && !S.provider.me.hasPassword
+    ? `<div class="notice">Konto bez hasła — ranking jest tylko na tym urządzeniu. <button class="btn small primary" data-action="secure-open">Ustaw hasło</button></div>` : ''}
 
     ${challenges}
 
@@ -1304,24 +1435,48 @@ function viewModal() {
     const p = S.provider;
     const link = p.inviteLink();
     const t = S.transfer;
-    body = `
-      <h2>${p.isPublic ? esc(p.roomName) : `Pokój „${esc(p.roomName)}”`}</h2>
-      ${link ? `<p class="small">Wyślij ten link osobom, z którymi chcesz grać. Dołączają samym nickiem — bez konta i hasła.</p>
+    const me = p.me || {};
+    const acct = savedPublic();
+    const accountPart = p.isPublic
+      ? `<p class="small">Konto: <strong>${esc(S.user?.name || '')}</strong>${me.hasPassword ? ' · zabezpieczone hasłem' : ' · <span class="warn">bez hasła</span>'}${me.email ? `<br><span class="muted">E-mail: ${esc(me.email)}</span>` : ''}</p>
+         ${me.hasPassword ? '' : `<p class="note small">Bez hasła konto i ranking są tylko na tym urządzeniu. Ustaw hasło, żeby logować się na każdym urządzeniu.</p>`}
+         <div class="row-actions"><button class="btn small ${me.hasPassword ? '' : 'primary'}" data-action="secure-open">${me.hasPassword ? 'Zmień hasło lub e-mail' : 'Ustaw hasło'}</button></div>`
+      : `<p class="small">Wyślij ten link osobom, z którymi chcesz grać. Dołączają samym nickiem.</p>
       <input class="link-box" id="invite-link" type="text" readonly value="${esc(link)}">
       <div class="row-actions">
         <button class="btn small primary" data-action="share-invite">Udostępnij link</button>
       </div>
-      <p class="muted small">Link otwiera pokój każdemu, kto go ma — wysyłaj go tylko swoim.</p>`
-    : `<p class="small">Grasz jako <strong>${esc(S.user?.name || '')}</strong>. Chcesz grać tylko ze znajomymi? Utwórz zamknięty pokój na ekranie startowym.</p>`}
+      <p class="muted small">Link otwiera pokój każdemu, kto go ma — wysyłaj go tylko swoim.</p>
+      ${acct && !me.linked ? `<h3>Konto</h3><p class="small">Zapisz ten pokój na koncie ${esc(acct.nick)} — wrócisz do niego po zalogowaniu na innym urządzeniu.</p>
+        <div class="row-actions"><button class="btn small" data-action="link-account">Zapisz pokój na koncie</button></div>` : ''}`;
+    const forget = p.isPublic && me.hasPassword
+      ? `<button class="btn small" data-action="account-logout">Wyloguj z tego urządzenia</button>`
+      : `<button class="btn small danger" data-action="room-forget">${p.isPublic ? 'Usuń nick z tego urządzenia' : 'Usuń pokój z tego urządzenia'}</button>`;
+    body = `
+      <h2>${p.isPublic ? 'Twoje konto' : `Pokój „${esc(p.roomName)}”`}</h2>
+      ${accountPart}
       <h3>Inne urządzenie</h3>
-      <p class="small">Chcesz grać na drugim telefonie lub komputerze pod tym samym nickiem? Otwórz tam jednorazowy link (ważny 10 minut).</p>
+      <p class="small">${p.isPublic && me.hasPassword ? 'Na innym urządzeniu po prostu zaloguj się nickiem i hasłem. Możesz też użyć' : 'Chcesz grać na drugim telefonie lub komputerze pod tym samym nickiem? Otwórz tam'} jednorazowy link (ważny 10 minut).</p>
       ${t ? `<input class="link-box" type="text" readonly value="${esc(t.url)}">
         <div class="row-actions"><button class="btn small" data-action="share-transfer">Udostępnij link przeniesienia</button></div>
         <p class="muted small">Nie wysyłaj go nikomu innemu — kto go otworzy, gra jako Ty.</p>`
     : `<div class="row-actions"><button class="btn small" data-action="make-transfer">Utwórz link przeniesienia</button></div>`}
       <div class="row-actions end">
-        <button class="btn small danger" data-action="room-forget">${p.isPublic ? 'Usuń nick z tego urządzenia' : 'Usuń pokój z tego urządzenia'}</button>
+        ${forget}
         <button class="btn primary" data-action="modal-close">Gotowe</button>
+      </div>`;
+  } else if (m.kind === 'secure') {
+    const me = S.provider?.me || {};
+    body = `
+      <h2>${me.hasPassword ? 'Zmień hasło lub e-mail' : 'Zabezpiecz konto'}</h2>
+      <p class="small">Logujesz się nickiem <strong>${esc(S.user?.name || '')}</strong> i hasłem. Ranking zostaje.</p>
+      ${me.hasPassword ? `<label class="field">Obecne hasło <span class="muted">(tylko przy zmianie hasła)</span><input id="sec-old" type="password" autocomplete="current-password"></label>` : ''}
+      <label class="field">${me.hasPassword ? 'Nowe hasło (puste = bez zmiany)' : 'Hasło (min. 8 znaków)'}<input id="sec-pass" type="password" autocomplete="new-password"></label>
+      <label class="field">E-mail <span class="muted">(nieobowiązkowy — do odzyskania hasła)</span>
+        <input id="sec-email" type="email" autocomplete="email" inputmode="email" value="${esc(me.email || '')}" placeholder="adres@e-mail.pl"></label>
+      <div class="row-actions end">
+        <button class="btn" data-action="modal-close">Anuluj</button>
+        <button class="btn primary" data-action="secure-save">Zapisz</button>
       </div>`;
   }
   return `<div class="overlay" data-action="overlay"><div class="dialog wide" role="dialog" aria-modal="true">${body}</div></div>`;
@@ -1421,14 +1576,55 @@ app.addEventListener('click', async (e) => {
     // --- wariant B: pokoje ---
     case 'room-new': S.startError = ''; S.view = 'room-new'; render(); break;
     case 'to-start': S.joinRoom = null; S.view = 'start'; render(); break;
-    case 'public-enter': {
+    // szybka gra = poczekalnia ogólna; bez konta najpierw rejestracja
+    case 'quick-play': {
       S.startError = '';
       const pub = savedPublic();
       if (pub) await enterWith(new RoomsProvider(pub));
-      else { S.view = 'public-join'; render(); }
+      else openAccount('register', 'public');
       break;
     }
-    case 'public-join': await submitRoom('public'); break;
+    case 'room-play': {
+      S.startError = '';
+      const saved = savedRoom();
+      if (saved) await enterWith(new RoomsProvider(saved));
+      else { S.view = 'room-new'; render(); }
+      break;
+    }
+    case 'account-login': openAccount('login', 'start'); break;
+    case 'account-menu': {
+      const pub = savedPublic();
+      if (!pub) break;
+      await enterWith(new RoomsProvider(pub));
+      if (S.provider) { S.modal = { kind: 'room' }; render(); }
+      break;
+    }
+    case 'acct-mode': S.accountForm.mode = id; S.accountForm.info = ''; render(); break;
+    case 'acct-register': await submitAccount('register'); break;
+    case 'acct-login': await submitAccount('login'); break;
+    case 'acct-forgot': await submitAccount('forgot'); break;
+    case 'acct-reset': await submitAccount('reset'); break;
+    case 'secure-open': S.modal = { kind: 'secure' }; render(); break;
+    case 'account-logout':
+      confirmModal({
+        title: 'Wylogować z tego urządzenia?', text: 'Zalogujesz się ponownie nickiem i hasłem. Ranking i pokoje zostają na koncie.',
+        okLabel: 'Wyloguj', onOk: logout,
+      });
+      break;
+    case 'secure-save': {
+      const v = (k) => document.getElementById(k)?.value ?? '';
+      const password = v('sec-pass');
+      if (password && password.length < 8) { toast('Hasło musi mieć co najmniej 8 znaków.'); break; }
+      el.disabled = true;
+      try {
+        await S.provider.setPassword({ password: password || undefined, oldPassword: v('sec-old') || undefined, email: v('sec-email').trim() });
+        S.modal = null; toast('Zapisano. Możesz logować się nickiem i hasłem na każdym urządzeniu.', 5000); render();
+      } catch (err) { el.disabled = false; toast(err.message, 5000); }
+      break;
+    }
+    case 'link-account':
+      try { await S.provider.linkAccount(); toast('Pokój zapisany na koncie.'); render(); } catch (err) { toast(err.message, 5000); }
+      break;
     case 'seek-accept':
       unlockMedia();
       S.waiting = { text: 'Łączę z rywalem…', kind: 'pending' }; render();
@@ -1536,7 +1732,11 @@ app.addEventListener('input', (e) => {
   if (e.target.id === 'friend-input') { S.form.friend = e.target.value; saveForm(); }
   if (e.target.id === 'vote-email') S.voteEmail = e.target.value;
   if (e.target.id === 'room-name') S.roomForm.name = e.target.value;
-  if (e.target.id === 'room-nick') S.roomForm.nick = e.target.value;
+  if (e.target.id === 'room-nick') {
+    if (S.view === 'account') S.accountForm.nick = e.target.value; else S.roomForm.nick = e.target.value;
+  }
+  if (e.target.id === 'acct-email') S.accountForm.email = e.target.value;
+  if (e.target.id === 'acct-login') S.accountForm.nick = e.target.value;
 });
 app.addEventListener('toggle', (e) => {
   if (e.target.dataset?.action === 'room-history') {
@@ -1549,9 +1749,14 @@ app.addEventListener('toggle', (e) => {
 
 document.addEventListener('keydown', (e) => {
   if (S.modal) { if (e.key === 'Escape') { S.modal = null; render(); } return; }
+  if (e.key === 'Enter' && S.view === 'account' && e.target.tagName === 'INPUT') {
+    e.preventDefault();
+    submitAccount(S.accountForm.mode);
+    return;
+  }
   if (e.key === 'Enter' && (e.target.id === 'room-nick' || e.target.id === 'room-name')) {
     e.preventDefault();
-    submitRoom(S.view === 'room-join' ? 'join' : S.view === 'public-join' ? 'public' : 'new');
+    submitRoom(S.view === 'room-join' ? 'join' : 'new');
     return;
   }
   if (S.view !== 'game' || !S.game) return;

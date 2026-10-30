@@ -326,3 +326,108 @@ test('parowanie działa też w prywatnym pokoju', async () => {
   assert.ok(m.matched);
   ctx.A.close(); ctx.B.close();
 });
+
+// --- konta ---------------------------------------------------------------------------
+test('konto: rejestracja, logowanie na innym urządzeniu, blokada po błędnych hasłach', async () => {
+  const nick = 'K' + uniq();
+  const r = await api(srv.base, 'POST', '/api/account/register', { nick, password: 'tajne-haslo-1', email: nick + '@example.com' });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  const short = await api(srv.base, 'POST', '/api/account/register', { nick: 'X' + uniq(), password: 'krotkie' });
+  assert.equal(short.status, 400);
+  const dupMail = await api(srv.base, 'POST', '/api/account/register', { nick: 'Y' + uniq(), password: 'tajne-haslo-1', email: nick.toUpperCase() + '@example.com' });
+  assert.match(dupMail.data.error, /e-mail/);
+
+  const bad = await api(srv.base, 'POST', '/api/account/login', { nick, password: 'zle-haslo-xx' });
+  assert.equal(bad.status, 400);
+  const ok = await api(srv.base, 'POST', '/api/account/login', { nick: nick.toLowerCase(), password: 'tajne-haslo-1' });
+  assert.equal(ok.status, 200, JSON.stringify(ok.data));
+  assert.equal(ok.data.memberId, r.data.memberId);
+  const C = new Client(srv.base, 'publiczny', ok.data.token);
+  const w = await C.connect();
+  assert.equal(w.me.hasPassword, true);
+  assert.equal(w.me.email, nick + '@example.com');
+  C.close();
+
+  // 3 błędne próby (tryb testowy) → blokada, także dla dobrego hasła; po 3 s znów działa
+  for (let i = 0; i < 3; i++) await api(srv.base, 'POST', '/api/account/login', { nick, password: 'zle-haslo-xx' });
+  const locked = await api(srv.base, 'POST', '/api/account/login', { nick, password: 'tajne-haslo-1' });
+  assert.match(locked.data.error, /Za dużo/);
+  await sleep(3200);
+  const again = await api(srv.base, 'POST', '/api/account/login', { nick, password: 'tajne-haslo-1' });
+  assert.equal(again.status, 200, JSON.stringify(again.data));
+});
+
+test('konto: zabezpieczenie istniejącego nicku hasłem bez utraty rankingu, zmiana hasła', async () => {
+  const P = await publicPlayer('Z' + uniq());
+  const nick = P.c.welcome.me.name;
+  assert.equal(P.c.welcome.me.hasPassword, false);
+  const noPass = await api(srv.base, 'POST', '/api/account/login', { nick, password: 'cokolwiek1' });
+  assert.match(noPass.data.error, /nie ma jeszcze hasła/);
+  let r = await P.c.req('setPassword', { password: 'pierwsze-haslo', email: '' });
+  assert.ok(r.ok && r.hasPassword, r.error);
+  r = await P.c.req('setPassword', { password: 'drugie-haslo-x', oldPassword: 'zle' });
+  assert.equal(r.ok, false);
+  r = await P.c.req('setPassword', { password: 'drugie-haslo-x', oldPassword: 'pierwsze-haslo' });
+  assert.ok(r.ok, r.error);
+  const login = await api(srv.base, 'POST', '/api/account/login', { nick, password: 'drugie-haslo-x' });
+  assert.equal(login.data.memberId, P.id); // to samo konto = ten sam ranking
+  P.c.close();
+});
+
+test('konto: odzyskiwanie hasła linkiem (e-mail wyłączony lokalnie, token testowy)', async () => {
+  const nick = 'R' + uniq();
+  await api(srv.base, 'POST', '/api/account/register', { nick, password: 'stare-haslo-1', email: nick + '@example.org' });
+  const none = await api(srv.base, 'POST', '/api/account/reset-request', { login: 'nie-ma-' + uniq() });
+  assert.deepEqual(none.data, { ok: true, mailEnabled: false });
+  const req = await api(srv.base, 'POST', '/api/account/reset-request', { login: nick + '@EXAMPLE.org' });
+  assert.ok(req.data.debugToken);
+  const done = await api(srv.base, 'POST', '/api/account/reset', { token: req.data.debugToken, password: 'nowe-haslo-12' });
+  assert.equal(done.status, 200, JSON.stringify(done.data));
+  const reuse = await api(srv.base, 'POST', '/api/account/reset', { token: req.data.debugToken, password: 'inne-haslo-12' });
+  assert.equal(reuse.status, 400);
+  const login = await api(srv.base, 'POST', '/api/account/login', { nick, password: 'nowe-haslo-12' });
+  assert.equal(login.status, 200);
+});
+
+test('konto + pokój: pokój zapamiętany na koncie, wejście na nowym urządzeniu po zalogowaniu', async () => {
+  const nick = 'M' + uniq();
+  const reg = await api(srv.base, 'POST', '/api/account/register', { nick, password: 'haslo-pokoju-1' });
+  const room = await api(srv.base, 'POST', '/api/rooms', { name: 'Klub konta', accountToken: reg.data.token });
+  assert.equal(room.status, 200, JSON.stringify(room.data));
+  assert.equal(room.data.nick, nick); // nick z konta
+
+  // drugi gracz z kontem dołącza linkiem bez wpisywania nicku
+  const n2 = 'N' + uniq();
+  const reg2 = await api(srv.base, 'POST', '/api/account/register', { nick: n2, password: 'haslo-pokoju-2' });
+  const j = await api(srv.base, 'POST', `/api/rooms/${room.data.room}/join`, { accountToken: reg2.data.token });
+  assert.equal(j.data.nick, n2);
+  const j2 = await api(srv.base, 'POST', `/api/rooms/${room.data.room}/join`, { accountToken: reg2.data.token });
+  assert.equal(j2.data.memberId, j.data.memberId); // ponowne dołączenie = ten sam nick
+
+  // nowe urządzenie: logowanie → lista pokoi → wejście do pokoju
+  const login = await api(srv.base, 'POST', '/api/account/login', { nick, password: 'haslo-pokoju-1' });
+  assert.deepEqual(login.data.rooms.map((x) => x.code), [room.data.room]);
+  const back = await api(srv.base, 'POST', `/api/rooms/${room.data.room}/account-login`, { accountToken: login.data.token });
+  assert.equal(back.status, 200, JSON.stringify(back.data));
+  assert.equal(back.data.memberId, room.data.memberId);
+  const stranger = await api(srv.base, 'POST', '/api/account/register', { nick: 'O' + uniq(), password: 'haslo-obcego-1' });
+  const deny = await api(srv.base, 'POST', `/api/rooms/${room.data.room}/account-login`, { accountToken: stranger.data.token });
+  assert.equal(deny.status, 404);
+  const fake = await api(srv.base, 'POST', `/api/rooms/${room.data.room}/account-login`, { accountToken: 'falszywy' });
+  assert.equal(fake.status, 400);
+  // wewnętrzne akcje nie są dostępne z zewnątrz
+  const internal = await api(srv.base, 'POST', '/api/account/verify', { token: login.data.token });
+  assert.equal(internal.status, 404);
+});
+
+test('konto + pokój: połączenie istniejącego nicku w pokoju z kontem', async () => {
+  const ctx = await roomWithTwo();
+  const reg = await api(srv.base, 'POST', '/api/account/register', { nick: 'L' + uniq(), password: 'haslo-laczenia' });
+  const r = await ctx.B.req('linkAccount', { accountToken: reg.data.token });
+  assert.ok(r.ok && r.linked, r.error);
+  const login = await api(srv.base, 'POST', '/api/account/login', { nick: reg.data.nick, password: 'haslo-laczenia' });
+  assert.equal(login.data.rooms[0].code, ctx.room);
+  const back = await api(srv.base, 'POST', `/api/rooms/${ctx.room}/account-login`, { accountToken: login.data.token });
+  assert.equal(back.data.nick, 'Bartek');
+  ctx.A.close(); ctx.B.close();
+});

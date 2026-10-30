@@ -13,7 +13,11 @@
     // Pokoje przechowywane tylko w UE. Pusty = bez ograniczenia (lokalnie w .dev.vars).
     "JURISDICTION": "eu",
     // "1" = dozwolone bardzo krótkie tempa i skrócone limity (tylko testy).
-    "TEST_MODE": "0"
+    "TEST_MODE": "0",
+    // Adres aplikacji w linkach do zmiany hasła.
+    "APP_URL": "https://przemmeq.github.io/szachownica/przy-szachownicy/"
+    // Odzyskiwanie hasła e-mailem (Resend): `npx wrangler secret put RESEND_API_KEY` i `MAIL_FROM`
+    // (np. "Przy Szachownicy <haslo@twojadomena.pl>"). Bez nich odzyskiwanie jest wyłączone.
   },
   // Bez logów zapytań (RODO: nie przechowujemy adresów IP).
   "observability": { "enabled": false }

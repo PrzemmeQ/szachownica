@@ -6,6 +6,11 @@
 // POST /api/rooms/:kod/transfer           { code }        → { memberId, nick, token }
 // GET  /api/rooms/:kod/ws                 (WebSocket, pierwsza wiadomość: hello{token})
 // Kod „publiczny” = poczekalnia ogólna (tworzy się sama przy pierwszym wejściu).
+// POST /api/rooms/:kod/account-login      { accountToken }  → { memberId, nick, token }
+// POST /api/account/register              { nick, password, email? } → { memberId, nick, token }
+// POST /api/account/login                 { nick, password } → { memberId, nick, token, rooms }
+// POST /api/account/reset-request         { login }  (nick lub e-mail) → { ok, mailEnabled }
+// POST /api/account/reset                 { token, password } → { memberId, nick, token, rooms }
 import { Room, ROOM_CODE_RE, PUBLIC_CODE, randomCode } from './room.js';
 
 export { Room };
@@ -78,6 +83,11 @@ async function route(req, env, url) {
 
   if (parts[1] === 'health') return json({ ok: true });
 
+  // konta: POST /api/account/(register|login|reset-request|reset)
+  if (parts[1] === 'account' && req.method === 'POST' && ['register', 'login', 'reset-request', 'reset'].includes(parts[2])) {
+    return forward(env, PUBLIC_CODE, 'acct-' + parts[2], req, await readJson(req));
+  }
+
   if (parts[1] !== 'rooms') return json({ error: 'Nie znaleziono.' }, 404);
 
   // utworzenie pokoju
@@ -85,7 +95,7 @@ async function route(req, env, url) {
     const body = await readJson(req);
     for (let i = 0; i < 5; i++) {
       const code = randomCode(12);
-      const res = await forward(env, code, 'create', req, { name: body.name, nick: body.nick });
+      const res = await forward(env, code, 'create', req, { name: body.name, nick: body.nick, accountToken: body.accountToken });
       if (res.status === 409) continue; // kod zajęty — losuj ponownie
       if (!res.ok) return res;
       const data = await res.json();
@@ -101,6 +111,7 @@ async function route(req, env, url) {
   if (!action && req.method === 'GET') return forward(env, code, 'info', req);
   if (action === 'join' && req.method === 'POST') return forward(env, code, 'join', req, await readJson(req));
   if (action === 'transfer' && req.method === 'POST') return forward(env, code, 'transfer', req, await readJson(req));
+  if (action === 'account-login' && req.method === 'POST') return forward(env, code, 'account-login', req, await readJson(req));
   if (action === 'ws') {
     if (req.headers.get('Upgrade') !== 'websocket') return json({ error: 'Oczekiwano WebSocket.' }, 426);
     const stub = roomStub(env, code);
