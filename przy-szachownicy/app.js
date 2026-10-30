@@ -8,8 +8,10 @@ import {
   setAccountRooms,
 } from './rooms.js';
 import {
-  sanToPl, describeMove, speechForMove, statusPl, SPEED_PL, formatMs, PROMO_PIECES,
+  sanToPl, describeMove, statusPl, speedPl, formatMs, PROMO_PIECES,
 } from './notation.js';
+import { t, tn, LANGS, currentLang, langInfo, setLang, initLang, fmtDate } from './i18n.js';
+import { moveKeys, keysText, playRecorded } from './speech.js';
 
 // ---------------------------------------------------------------------------
 // Ustawienia użytkownika
@@ -107,9 +109,9 @@ function toast(text, ms = 3500) {
 }
 function playerLabel(p) {
   if (!p) return '?';
-  const t = p.title ? `${p.title} ` : '';
+  const title = p.title ? `${p.title} ` : '';
   const r = p.rating ? ` (${p.rating}${p.provisional ? '?' : ''})` : '';
-  return `${t}${p.name}${r}`;
+  return `${title}${p.name}${r}`;
 }
 // Nick: litery łacińskie (z polskimi), cyfry — jak na serwerze (bez liter z innych alfabetów).
 const NICK_RE = /^[A-Za-z0-9ĄĆĘŁŃÓŚŹŻąćęłńóśźż][A-Za-z0-9ĄĆĘŁŃÓŚŹŻąćęłńóśźż _.-]{1,19}$/;
@@ -146,11 +148,14 @@ function beep() {
     o.start(); o.stop(audioCtx.currentTime + 0.3);
   } catch {}
 }
-let plVoice = null;
+// Głos syntezatora w języku aplikacji (polski albo wybrany).
+const VOICE_LANG = { pl: 'pl-PL', en: 'en-GB' };
+let voice = null;
 function pickVoice() {
   if (!('speechSynthesis' in window)) return;
+  const want = currentLang();
   const voices = speechSynthesis.getVoices();
-  plVoice = voices.find((v) => v.lang && v.lang.toLowerCase().startsWith('pl')) || null;
+  voice = voices.find((v) => v.lang && v.lang.toLowerCase().startsWith(want)) || null;
 }
 if ('speechSynthesis' in window) {
   pickVoice();
@@ -161,11 +166,20 @@ function speak(text) {
   try {
     speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(text);
-    u.lang = 'pl-PL';
-    if (plVoice) u.voice = plVoice;
+    u.lang = VOICE_LANG[currentLang()] || currentLang();
+    if (voice) u.voice = voice;
     u.rate = 0.95;
     speechSynthesis.speak(u);
   } catch {}
+}
+// Wypowiedź z kluczy (speech.js): nagrania, jeśli są, inaczej syntezator. extra — dopisany tekst (np. treść czatu).
+async function say(keys, extra = '', force = false) {
+  if (!force && !S.settings.speech) return;
+  if (!extra && await playRecorded(keys)) return;
+  const was = S.settings.speech;
+  S.settings.speech = true;
+  speak(keysText(keys) + (extra ? ' ' + extra : ''));
+  S.settings.speech = was;
 }
 function vibrate(p = 120) { if (S.settings.vibrate && navigator.vibrate) { try { navigator.vibrate(p); } catch {} } }
 
@@ -183,6 +197,8 @@ document.addEventListener('visibilitychange', () => {
 // Start
 // ---------------------------------------------------------------------------
 async function boot() {
+  await initLang(); // zapisany język (domyślnie polski)
+  pickVoice();
   render();
   if (roomsEnabled() && await bootRoom()) return;
   const lichess = new LichessProvider();
@@ -211,6 +227,7 @@ async function bootRoom() {
   // tokeny (logowanie QR, zmiana hasła) są po # — nie trafiają do logów serwera stron
   const hash = new URLSearchParams(location.hash.slice(1));
   const qr = (hash.get('qr') || '').trim();
+  const friend = (hash.get('znajomy') || '').trim();
   const reset = (hash.get('reset') || '').trim();
   const clean = () => history.replaceState(null, '', location.pathname);
   if (location.hash === '#nowy-pokoj') { // ze strony dla klubów: od razu zakładanie klubu (najpierw konto)
@@ -230,12 +247,20 @@ async function bootRoom() {
   if (qr) { // kod QR z komputera zeskanowany aparatem telefonu (otwiera się przeglądarka)
     clean();
     if (!savedAccount()) {
-      S.startError = 'Żeby zalogować komputer, najpierw zaloguj się tutaj. Albo otwórz aplikację, w której jesteś zalogowany, i użyj „Zaloguj komputer”.';
+      S.startError = t('Żeby zalogować komputer, najpierw zaloguj się tutaj. Albo otwórz aplikację, w której jesteś zalogowany, i użyj „Zaloguj komputer”.');
       S.view = 'start'; render();
       return true;
     }
     S.view = 'start'; render();
     await qrConfirm(qr);
+    return true;
+  }
+  if (friend) { // link do znajomych: bez konta najpierw rejestracja, potem od razu znajomi
+    clean();
+    S.pendingFriendLink = friend;
+    if (!savedAccount()) { openAccount('register', 'start'); return true; }
+    S.view = 'start'; render();
+    await friendLinkFlow();
     return true;
   }
   if (code) {
@@ -265,7 +290,7 @@ async function enterWith(provider) {
     provider.userId = S.user.id;
   } catch (e) {
     S.provider = null;
-    S.startError = e.message || (provider.features?.rooms ? 'Nie udało się połączyć z serwerem.' : 'Nie udało się połączyć z Lichess.');
+    S.startError = e.message || (provider.features?.rooms ? t('Nie udało się połączyć z serwerem.') : t('Nie udało się połączyć z Lichess.'));
     S.view = 'start';
     render();
     return;
@@ -321,7 +346,7 @@ async function openClub(room) {
   const st = myClubs().find((x) => x.room === room)?.status || 'member';
   let c = st === 'member' ? savedClub(room) : null;
   if (!c) {
-    S.waiting = { text: 'Otwieram klub…', kind: 'pending' }; render();
+    S.waiting = { text: t('Otwieram klub…'), kind: 'pending' }; render();
     try { c = await restoreRoom(room); } catch (e) {
       S.waiting = null;
       toast(e.message, 5000);
@@ -339,10 +364,10 @@ async function submitRoom() {
   unlockMedia();
   const f = S.roomForm;
   const nick = f.nick.trim() || savedAccount()?.nick || '';
-  if (!NICK_RE.test(nick)) { toast(NICK_ERR); return; }
-  if (!f.name.trim()) { toast('Wpisz nazwę klubu.'); return; }
+  if (!NICK_RE.test(nick)) { toast(t(NICK_ERR)); return; }
+  if (!f.name.trim()) { toast(t('Wpisz nazwę klubu.')); return; }
   lsSet('ps_room_nick', nick);
-  S.waiting = { text: 'Zakładam klub…', kind: 'pending' }; render();
+  S.waiting = { text: t('Zakładam klub…'), kind: 'pending' }; render();
   try {
     const saved = await createRoom(f.name.trim(), nick);
     S.waiting = null; S.startError = '';
@@ -369,7 +394,7 @@ async function openClubJoin(code) {
 async function checkClubCode() {
   const j = S.joinRoom;
   const code = (document.getElementById('club-code')?.value ?? j.code).trim();
-  if (!code) { toast('Wpisz kod klubu.'); return; }
+  if (!code) { toast(t('Wpisz kod klubu.')); return; }
   j.code = code; j.error = '';
   try {
     const d = await lookupClub(code);
@@ -385,10 +410,10 @@ async function submitJoin() {
   if (!j?.checked) { await checkClubCode(); return; }
   const nick = (document.getElementById('room-nick')?.value ?? S.roomForm.nick).trim() || savedAccount()?.nick || '';
   const password = document.getElementById('club-pass')?.value || '';
-  if (!NICK_RE.test(nick)) { toast(NICK_ERR); return; }
-  if (j.needsPassword && !password) { toast('Wpisz hasło klubu.'); return; }
+  if (!NICK_RE.test(nick)) { toast(t(NICK_ERR)); return; }
+  if (j.needsPassword && !password) { toast(t('Wpisz hasło klubu.')); return; }
   lsSet('ps_room_nick', nick);
-  S.waiting = { text: 'Dołączam…', kind: 'pending' }; render();
+  S.waiting = { text: t('Dołączam…'), kind: 'pending' }; render();
   try {
     const saved = await joinClub(j.code, nick, password);
     S.waiting = null; S.startError = '';
@@ -405,7 +430,7 @@ function loadScript(src) {
   return new Promise((resolve, reject) => {
     if (document.querySelector(`script[data-src="${src}"]`)) { resolve(); return; }
     const s = document.createElement('script');
-    s.src = src; s.dataset.src = src; s.onload = resolve; s.onerror = () => reject(new Error('Nie udało się wczytać ' + src));
+    s.src = src; s.dataset.src = src; s.onload = resolve; s.onerror = () => reject(new Error('' + t('Nie udało się wczytać') + ' ' + src));
     document.head.appendChild(s);
   });
 }
@@ -435,7 +460,7 @@ async function pollQrLogin() {
     const r = await qrPoll(q.id, q.secret);
     if (r.status === 'approved') {
       stopQrLogin(); S.qr = null;
-      toast(`Zalogowano jako ${r.saved.nick}.`);
+      toast(t('Zalogowano jako {nick}.', { nick: r.saved.nick }));
       S.view = 'start'; render();
       offerPasskey();
     } else if (r.status === 'expired' || Date.now() > q.until) { stopQrLogin(); S.qr = { expired: true }; render(); }
@@ -457,10 +482,10 @@ async function qrConfirm(code) {
   let info;
   try { info = await p.qrInfo(code); } catch (e) { toast(e.message, 6000); return; }
   confirmModal({
-    title: `Zalogować ${info.device} jako ${S.user?.name || ''}?`,
-    text: 'Zatwierdzaj tylko kod z ekranu, który masz teraz przed sobą. Jeśli ktoś przysłał Ci ten kod albo pokazuje go na swoim urządzeniu — odrzuć: dostałby dostęp do Twojego konta.',
-    okLabel: 'Tak, zaloguj', cancelLabel: 'Nie',
-    onOk: async () => { try { await p.qrApprove(code); toast(`Zalogowano: ${info.device}.`, 5000); } catch (e) { toast(e.message, 6000); } },
+    title: t('Zalogować {device} jako {v}?', { device: info.device, v: S.user?.name || '' }),
+    text: t('Zatwierdzaj tylko kod z ekranu, który masz teraz przed sobą. Jeśli ktoś przysłał Ci ten kod albo pokazuje go na swoim urządzeniu — odrzuć: dostałby dostęp do Twojego konta.'),
+    okLabel: t('Tak, zaloguj'), cancelLabel: t('Nie'),
+    onOk: async () => { try { await p.qrApprove(code); toast(t('Zalogowano: {device}.', { device: info.device }), 5000); } catch (e) { toast(e.message, 6000); } },
   });
 }
 // Skaner QR w aplikacji (działa też w aplikacji z ekranu głównego iPhone'a).
@@ -468,11 +493,11 @@ async function openQrScanner() {
   if (!(await accountProvider())) return;
   S.modal = { kind: 'qr-scan' }; render();
   const video = document.getElementById('qr-video');
-  if (!navigator.mediaDevices?.getUserMedia || !video) { S.scanError = 'Aparat niedostępny — wpisz kod z ekranu komputera.'; render(); return; }
+  if (!navigator.mediaDevices?.getUserMedia || !video) { S.scanError = t('Aparat niedostępny — wpisz kod z ekranu komputera.'); render(); return; }
   try {
     S.scanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
     video.srcObject = S.scanStream; await video.play();
-  } catch { S.scanError = 'Brak dostępu do aparatu — wpisz kod z ekranu komputera.'; render(); return; }
+  } catch { S.scanError = t('Brak dostępu do aparatu — wpisz kod z ekranu komputera.'); render(); return; }
   let detector = null;
   if ('BarcodeDetector' in window) { try { detector = new window.BarcodeDetector({ formats: ['qr_code'] }); } catch {} }
   if (!detector) { try { await loadScript('vendor/jsQR.js'); } catch {} }
@@ -503,16 +528,70 @@ function closeScanner() {
   if (S.modal?.kind === 'qr-scan') S.modal = null;
 }
 
+// --- link do znajomych ---------------------------------------------------------------
+async function friendLinkFlow() {
+  const token = S.pendingFriendLink;
+  if (!token || !savedAccount()) return;
+  S.pendingFriendLink = '';
+  const p = await accountProvider();
+  if (!p) return;
+  let info;
+  try { info = await p.friendLinkInfo(token); } catch (e) { toast(e.message, 6000); return; }
+  if (info.self) { toast(t('To Twój własny link — wyślij go znajomemu.'), 5000); return; }
+  if (info.already) { toast(t('{nick} już jest Twoim znajomym.', { nick: info.nick })); return; }
+  confirmModal({
+    title: t('Dodać {nick} do znajomych?', { nick: info.nick }), text: t('Zobaczycie się na liście znajomych, gdy będziecie online, i wyzwiecie się jednym kliknięciem.'),
+    okLabel: t('Tak, dodaj'), cancelLabel: t('Nie'),
+    onOk: async () => { try { await p.friendLinkUse(token); toast(t('{nick} jest teraz Twoim znajomym.', { nick: info.nick }), 5000); render(); } catch (e) { toast(e.message, 6000); } },
+  });
+}
+async function shareFriendLink() {
+  try {
+    const url = await S.provider.friendLinkCreate();
+    const text = t('Zagraj ze mną w szachy na prawdziwej szachownicy — {app}', { app: CONFIG.APP_NAME });
+    if (navigator.share) {
+      try { await navigator.share({ title: CONFIG.APP_NAME, text, url }); return; } catch (e) { if (e.name === 'AbortError') return; }
+    }
+    try { await navigator.clipboard.writeText(`${text}: ${url}`); toast(t('Skopiowano link — wklej go w WhatsAppie, SMS-ie albo e-mailu.'), 5000); }
+    catch { S.modal = { kind: 'confirm', title: t('Link do znajomych'), text: url, okLabel: 'OK' }; render(); }
+  } catch (e) { toast(e.message, 5000); }
+}
+
+// --- usunięcie konta (RODO) -------------------------------------------------------------
+async function openDeleteAccount() {
+  S.modal = { kind: 'delete-account', loading: true }; render();
+  try { S.modal = { kind: 'delete-account', clubs: await S.provider.ownedClubs() }; } catch (e) { S.modal = null; toast(e.message); }
+  render();
+}
+async function submitDeleteAccount() {
+  const m = S.modal;
+  const password = document.getElementById('del-pass')?.value || '';
+  const decisions = {};
+  for (const c of m.clubs || []) {
+    const v = document.getElementById('del-club-' + c.room)?.value || '';
+    if (!v) { toast(t('Wybierz, co z klubem „{name}”.', { name: c.name })); return; }
+    decisions[c.room] = v;
+  }
+  if (!password) { toast(t('Wpisz hasło, żeby potwierdzić.')); return; }
+  try {
+    await S.provider.deleteAccount(password, decisions);
+    S.modal = null; S.provider = null; S.user = null;
+    S.view = 'start'; render();
+    toast(t('Konto zostało usunięte. Dziękujemy za wspólne partie.'), 6000);
+  } catch (e) { toast(e.message, 6000); }
+}
+
 // --- klucze dostępu (Face ID / odcisk palca / Windows Hello) --------------------------
 const PASSKEY_NAME = 'Face ID / odcisk palca';
 // Po zalogowaniu na urządzeniu z czytnikiem: jedno pytanie na urządzenie.
 async function offerPasskey() {
   if (lsGet('ps_passkey_asked') || !savedAccount() || !(await passkeyPlatform())) return;
+  if (S.modal) return; // inne pytanie na ekranie — zapytamy przy następnym logowaniu
   lsSet('ps_passkey_asked', '1');
   confirmModal({
-    title: 'Włączyć logowanie Face ID / odciskiem palca?',
-    text: 'Następnym razem zalogujesz się jednym dotknięciem, bez wpisywania hasła. Hasło zostaje jako zapas. Klucz synchronizuje się przez iCloud albo konto Google.',
-    okLabel: 'Włącz', cancelLabel: 'Nie teraz',
+    title: t('Włączyć logowanie Face ID / odciskiem palca?'),
+    text: t('Następnym razem zalogujesz się jednym dotknięciem, bez wpisywania hasła. Hasło zostaje jako zapas. Klucz synchronizuje się przez iCloud albo konto Google.'),
+    okLabel: t('Włącz'), cancelLabel: t('Nie teraz'),
     onOk: addPasskey,
   });
 }
@@ -521,7 +600,7 @@ async function addPasskey() {
     const r = await passkeyRegister();
     if (!r) return; // anulowane
     if (S.provider?.me) S.provider.me.passkeys = r.passkeys;
-    toast(`Włączono logowanie: ${PASSKEY_NAME}.`, 5000);
+    toast(t('Włączono logowanie: {name}.', { name: t(PASSKEY_NAME) }), 5000);
     render();
   } catch (e) { toast(e.message, 6000); }
 }
@@ -529,7 +608,8 @@ async function loginWithPasskey() {
   try {
     const r = await passkeyLogin();
     if (!r) return;
-    toast(`Zalogowano jako ${r.saved.nick}.`);
+    toast(t('Zalogowano jako {nick}.', { nick: r.saved.nick }));
+    if (S.pendingFriendLink) { S.view = 'start'; render(); await friendLinkFlow(); return; }
     const f = S.accountForm;
     if (f.next === 'club-join') { const code = S.pendingClubCode || ''; S.pendingClubCode = ''; await openClubJoin(code); return; }
     if (f.next === 'room-new') { S.view = 'room-new'; render(); return; }
@@ -554,21 +634,21 @@ async function submitAccount(kind) {
     let r;
     if (kind === 'forgot') {
       const login = val('acct-login').trim();
-      if (!login) { toast('Wpisz nick albo e-mail.'); return; }
-      S.waiting = { text: 'Wysyłam…', kind: 'pending' }; render();
+      if (!login) { toast(t('Wpisz nick albo e-mail.')); return; }
+      S.waiting = { text: t('Wysyłam…'), kind: 'pending' }; render();
       const d = await requestPasswordReset(login);
       S.waiting = null;
       f.info = d.mailEnabled
-        ? 'Jeśli to konto ma podany e-mail, wysłaliśmy na niego link do zmiany hasła (ważny 1 godzinę). Sprawdź też spam.'
-        : 'Odzyskiwanie hasła e-mailem nie jest jeszcze włączone. Jeśli grasz jeszcze na innym urządzeniu, zmień hasło tam (menu Konto).';
+        ? t('Jeśli to konto ma podany e-mail, wysłaliśmy na niego link do zmiany hasła (ważny 1 godzinę). Sprawdź też spam.')
+        : t('Odzyskiwanie hasła e-mailem nie jest jeszcze włączone. Jeśli grasz jeszcze na innym urządzeniu, zmień hasło tam (menu Konto).');
       render();
       return;
     }
-    if (password.length < 8 && kind !== 'login') { toast('Hasło musi mieć co najmniej 8 znaków.'); return; }
+    if (password.length < 8 && kind !== 'login') { toast(t('Hasło musi mieć co najmniej 8 znaków.')); return; }
     const nick = f.nick.trim();
-    if (kind !== 'reset' && !nick) { toast('Wpisz nick.'); return; }
-    if (kind === 'register' && !NICK_RE.test(nick)) { toast(NICK_ERR); return; }
-    S.waiting = { text: kind === 'register' ? 'Zakładam konto…' : 'Loguję…', kind: 'pending' }; render();
+    if (kind !== 'reset' && !nick) { toast(t('Wpisz nick.')); return; }
+    if (kind === 'register' && !NICK_RE.test(nick)) { toast(t(NICK_ERR)); return; }
+    S.waiting = { text: kind === 'register' ? t('Zakładam konto…') : t('Loguję…'), kind: 'pending' }; render();
     if (kind === 'register') r = await registerAccount(nick, password, val('acct-email').trim());
     else if (kind === 'login') r = await loginAccount(nick, password);
     else r = await resetPassword(f.token, password);
@@ -576,12 +656,13 @@ async function submitAccount(kind) {
     // kluby przypięte do konta pojawią się w „Moje kluby” (otworzą się jednym kliknięciem)
     S.waiting = null;
     S.roomForm.nick = r.saved.nick;
+    if (S.pendingFriendLink) { S.view = 'start'; render(); await friendLinkFlow(); return; } // link do znajomych z WhatsAppa
     offerPasskey(); // jedno pytanie o Face ID na urządzenie
     if (f.next === 'public') { await enterWith(new RoomsProvider(r.saved)); return; }
     if (f.next === 'room-new') { S.view = 'room-new'; render(); return; }
     if (f.next === 'club-join') { const code = S.pendingClubCode || ''; S.pendingClubCode = ''; await openClubJoin(code); return; }
     S.view = 'start';
-    toast(kind === 'register' ? `Konto ${r.saved.nick} założone.` : `Zalogowano jako ${r.saved.nick}.`);
+    toast(kind === 'register' ? t('Konto {nick} założone.', { nick: r.saved.nick }) : t('Zalogowano jako {nick}.', { nick: r.saved.nick }));
     render();
   } catch (e) {
     S.waiting = null; toast(e.message, 5000); render();
@@ -592,8 +673,8 @@ async function shareLink(url, title) {
   if (navigator.share) {
     try { await navigator.share({ title, url }); return; } catch (e) { if (e.name === 'AbortError') return; }
   }
-  try { await navigator.clipboard.writeText(url); toast('Skopiowano link.'); }
-  catch { toast('Skopiuj link ręcznie.'); }
+  try { await navigator.clipboard.writeText(url); toast(t('Skopiowano link.')); }
+  catch { toast(t('Skopiuj link ręcznie.')); }
 }
 
 async function loadRoomHistory() {
@@ -620,16 +701,16 @@ function onProviderEvent(ev) {
       break;
     case 'authLost':
       toast(S.provider?.features?.rooms
-        ? (S.provider.authRemoved ? 'Zostałeś usunięty z tego klubu.'
-          : S.provider.isPublic ? 'Sesja konta wygasła — zaloguj się ponownie.' : 'Nie rozpoznano Cię w klubie — dołącz ponownie kodem klubu.')
-        : 'Sesja Lichess wygasła — zaloguj się ponownie.', 6000);
+        ? (S.provider.authRemoved ? t('Zostałeś usunięty z tego klubu.')
+          : S.provider.isPublic ? t('Sesja konta wygasła — zaloguj się ponownie.') : t('Nie rozpoznano Cię w klubie — dołącz ponownie kodem klubu.'))
+        : t('Sesja Lichess wygasła — zaloguj się ponownie.'), 6000);
       logout();
       break;
     case 'members': {
       if (S.provider?.me) S.user = { ...S.user, ratings: roomRatings(S.provider.me.ratings) };
       // nowa prośba o dołączenie — założyciel/admin słyszy sygnał
       const reqs = S.provider?.room?.requests || 0;
-      if (reqs > (S.lastRequests || 0) && !quiet) { toast(`Nowa prośba o dołączenie do klubu (${reqs}).`, 5000); beep(); }
+      if (reqs > (S.lastRequests || 0) && !quiet) { toast(t('Nowa prośba o dołączenie do klubu ({reqs}).', { reqs: reqs }), 5000); beep(); }
       S.lastRequests = reqs;
       if (S.view === 'coach' && reqs !== S.coachReqs) loadCoach();
       if (S.view === 'lobby' || S.view === 'coach') render();
@@ -640,10 +721,12 @@ function onProviderEvent(ev) {
       break;
     case 'clubStatus': {
       const msgs = {
-        approved: `Przyjęto Cię do klubu „${ev.name}”. Otworzysz go w „Moich klubach” (Menu).`,
-        rejected: `Prośba o dołączenie do klubu „${ev.name}” została odrzucona.`,
-        invited: `Zaproszenie do klubu „${ev.name}”. Wejdziesz przez „Moje kluby” (Menu).`,
-        expired: `Prośba o dołączenie do klubu „${ev.name}” wygasła.`,
+        approved: t('Przyjęto Cię do klubu „{name}”. Otworzysz go w „Moich klubach” (Menu).', { name: ev.name }),
+        rejected: t('Prośba o dołączenie do klubu „{name}” została odrzucona.', { name: ev.name }),
+        invited: t('Zaproszenie do klubu „{name}”. Wejdziesz przez „Moje kluby” (Menu).', { name: ev.name }),
+        deleted: t('Klub „{name}” został usunięty przez założyciela.', { name: ev.name }),
+        owner: t('Jesteś teraz założycielem klubu „{name}”.', { name: ev.name }),
+        expired: t('Prośba o dołączenie do klubu „{name}” wygasła.', { name: ev.name }),
       };
       if (msgs[ev.event]) { toast(msgs[ev.event], 7000); beep(); }
       break;
@@ -653,7 +736,10 @@ function onProviderEvent(ev) {
       if (S.view === 'lobby') render();
       break;
     case 'friendInvite':
-      toast(`${ev.from} zaprasza Cię do znajomych.`, 5000); beep(); // zdarzenie na żywo — nie z odtwarzania po połączeniu
+      toast(t('{from} zaprasza Cię do znajomych.', { from: ev.from }), 5000); beep(); // zdarzenie na żywo — nie z odtwarzania po połączeniu
+      break;
+    case 'friendJoined':
+      toast(t('{nick} dołączył(a) do Twoich znajomych z Twojego linku.', { nick: ev.nick }), 6000); beep();
       break;
     case 'gameStart': {
       const g = ev.game;
@@ -665,7 +751,7 @@ function onProviderEvent(ev) {
       } else if (S.view === 'game' && S.game?.id === g.id) {
         // już otwarta
       } else if (!quiet) {
-        toast(`Nowa partia: ${g.opponent.name}`);
+        toast(t('Nowa partia: {name}', { name: g.opponent.name }));
         beep();
         if (S.view === 'lobby') render();
       } else if (S.view === 'lobby') render();
@@ -690,7 +776,7 @@ function onProviderEvent(ev) {
       S.challenges.set(ev.challenge.id, ev.challenge);
       // rewanż od rywala, którego wynik właśnie oglądam — przycisk „Rewanż” zaczyna migać
       const rm = S.view === 'game' && rematchOffer();
-      if (!quiet) { if (!rm) toast(`Wyzwanie od ${ev.challenge.from}`); beep(); vibrate([80, 60, 80]); }
+      if (!quiet) { if (!rm) toast(t('Wyzwanie od {from}', { from: ev.challenge.from })); beep(); vibrate([80, 60, 80]); }
       if (S.view === 'lobby' || rm) render();
       break;
     }
@@ -711,16 +797,16 @@ function waitFor(handle, text) {
   render();
   handle.done.then((result) => {
     if (S.waiting !== w) return;
-    if (result === 'declined') { S.waiting = null; toast('Rywal odrzucił wyzwanie.'); render(); return; }
-    if (result === 'canceled') { S.waiting = null; toast('Wyzwanie anulowane.'); render(); return; }
+    if (result === 'declined') { S.waiting = null; toast(t('Rywal odrzucił wyzwanie.')); render(); return; }
+    if (result === 'canceled') { S.waiting = null; toast(t('Wyzwanie anulowane.')); render(); return; }
     // połączenie zamknięte: albo para znaleziona (gameStart zaraz dotrze), albo wygasło
     setTimeout(() => {
-      if (S.waiting === w) { S.waiting = null; toast('Nikt nie dołączył. Spróbuj jeszcze raz.'); render(); }
+      if (S.waiting === w) { S.waiting = null; toast(t('Nikt nie dołączył. Spróbuj jeszcze raz.')); render(); }
     }, 5000);
   }).catch((e) => {
     if (S.waiting !== w) return;
     S.waiting = null;
-    if (e.name !== 'AbortError') toast(e.message || 'Błąd połączenia.');
+    if (e.name !== 'AbortError') toast(e.message || t('Błąd połączenia.'));
     render();
   });
 }
@@ -737,7 +823,7 @@ async function startNewGame() {
   }
   try {
     if (f.mode === 'seek') {
-      S.waiting = { text: 'Łączenie…', kind: 'pending' }; render();
+      S.waiting = { text: t('Łączenie…'), kind: 'pending' }; render();
       const h = await S.provider.seek({ ...opts, color: undefined });
       if (h.matched) {
         // ktoś już czekał na to tempo — partia ruszyła (gameStart już otworzył ekran gry)
@@ -747,39 +833,39 @@ async function startNewGame() {
       }
       if (h.correspondence) {
         S.waiting = null;
-        toast('Ogłoszenie wystawione. Partia pojawi się na liście, gdy ktoś dołączy.', 6000);
+        toast(t('Ogłoszenie wystawione. Partia pojawi się na liście, gdy ktoś dołączy.'), 6000);
         render();
         return;
       }
-      waitFor(h, `Szukam rywala · ${p.group} ${p.label}${f.rated ? ' · rankingowa' : ''}`);
+      waitFor(h, `${t('Szukam rywala')} · ${t(p.group)} ${t(p.label)}${f.rated ? ' · ' + t('rankingowa') : ''}`);
     } else if (f.mode === 'friend') {
       const name = f.friend.trim();
-      if (!/^[A-Za-z0-9_-]{2,30}$/.test(name)) { toast('Wpisz poprawny nick z Lichess.'); return; }
-      S.waiting = { text: 'Wysyłanie wyzwania…', kind: 'pending' }; render();
+      if (!/^[A-Za-z0-9_-]{2,30}$/.test(name)) { toast(t('Wpisz poprawny nick z Lichess.')); return; }
+      S.waiting = { text: t('Wysyłanie wyzwania…'), kind: 'pending' }; render();
       const h = await S.provider.challenge(name, opts);
       if (h.correspondence) {
         S.waiting = null;
-        toast(`Wyzwanie wysłane do ${name}. Partia pojawi się na liście po przyjęciu.`, 6000);
+        toast(t('Wyzwanie wysłane do {name}. Partia pojawi się na liście po przyjęciu.', { name: name }), 6000);
         render();
         return;
       }
-      waitFor(h, `Czekam, aż ${name} przyjmie wyzwanie`);
+      waitFor(h, t('Czekam, aż {name} przyjmie wyzwanie', { name }));
     } else if (f.mode === 'member') {
       const opp = findPerson(f.opponent);
-      if (!opp) { toast(S.provider.isPublic ? 'Wybierz znajomego, który jest online.' : 'Wybierz rywala z klubu.'); return; }
-      S.waiting = { text: 'Wysyłanie wyzwania…', kind: 'pending' }; render();
+      if (!opp) { toast(S.provider.isPublic ? t('Wybierz znajomego, który jest online.') : t('Wybierz rywala z klubu.')); return; }
+      S.waiting = { text: t('Wysyłanie wyzwania…'), kind: 'pending' }; render();
       const h = await S.provider.challenge(opp.id, opts);
       if (h.matched) { if (S.waiting?.kind === 'pending') S.waiting = null; render(); return; } // rywal wyzwał nas w tym samym czasie
-      waitFor(h, `Czekam, aż ${opp.nick} przyjmie wyzwanie${opp.online ? '' : ' (teraz poza klubem)'}`);
+      waitFor(h, t('Czekam, aż {name} przyjmie wyzwanie', { name: opp.nick }) + (opp.online ? '' : ' ' + t('(teraz poza klubem)')));
     } else {
-      S.waiting = { text: 'Uruchamiam partię z komputerem…', kind: 'pending' }; render();
+      S.waiting = { text: t('Uruchamiam partię z komputerem…'), kind: 'pending' }; render();
       const { gameId } = await S.provider.challengeAI({ ...opts, level: f.level });
       S.waiting = null;
       openGame(gameId, f.color !== 'random' ? f.color : null);
     }
   } catch (e) {
     S.waiting = null;
-    toast(e.message || 'Nie udało się rozpocząć partii.');
+    toast(e.message || t('Nie udało się rozpocząć partii.'));
     render();
   }
 }
@@ -787,7 +873,7 @@ async function startNewGame() {
 async function acceptChallenge(id) {
   unlockMedia();
   const c = S.challenges.get(id);
-  S.waiting = { text: `Przyjmuję wyzwanie${c ? ' od ' + c.from : ''}…`, kind: 'accept' };
+  S.waiting = { text: t('Przyjmuję wyzwanie{v}…', { v: c ? ' od ' + c.from : '' }), kind: 'accept' };
   render();
   try {
     await S.provider.acceptChallenge(id);
@@ -835,7 +921,7 @@ function openGame(id, colorHint) {
   };
   S.game = G;
   S.view = 'game';
-  resetEntry(); S.sending = false; S.entryMsg = '';
+  resetEntry(); S.sending = false; S.entryMsg = ''; S.entryErr = false;
   render();
   G.stream = S.provider.streamGame(id, (msg) => onGameMsg(G, msg));
   requestWakeLock();
@@ -872,15 +958,15 @@ function announceDeclines(G, prev, prevPly) {
   const last = G.history[G.history.length - 1];
   const oppMoved = G.history.length > prevPly && last && last.color !== my;
   const iMoved = G.history.length > prevPly && last && last.color === my;
-  const check = (flag, cancelledKey, declined, expired) => {
+  const check = (flag, cancelledKey, sayKey, expired) => {
     if (!prev[flag] || G.state[flag]) return;
     if (S[cancelledKey]) { S[cancelledKey] = false; return; }
     if (iMoved || G.history.length < prevPly) return; // własny ruch albo przyjęte cofnięcie
-    toast(oppMoved ? expired : declined, 5000);
-    if (!oppMoved) { beep(); vibrate([60, 40, 60]); speak(declined); }
+    toast(oppMoved ? expired : keysText([sayKey]), 5000);
+    if (!oppMoved) { beep(); vibrate([60, 40, 60]); say([sayKey]); }
   };
-  check(my + 'takeback', 'tbCancelled', 'Rywal odmówił cofnięcia ruchu. Gra toczy się dalej.', 'Prośba o cofnięcie wygasła — rywal zagrał.');
-  check(my + 'draw', 'drawCancelled', 'Rywal odrzucił remis.', 'Propozycja remisu wygasła — rywal zagrał.');
+  check(my + 'takeback', 'tbCancelled', 'takeback-declined', t('Prośba o cofnięcie wygasła — rywal zagrał.'));
+  check(my + 'draw', 'drawCancelled', 'draw-declined', t('Propozycja remisu wygasła — rywal zagrał.'));
 }
 
 function onGameMsg(G, msg) {
@@ -910,26 +996,27 @@ function onGameMsg(G, msg) {
       if (G.history.length > prevPly) {
         const last = G.history[G.history.length - 1];
         if (!G.spectator && last.color !== G.myColor[0]) {
-          speak(speechForMove(last));
+          say(moveKeys(last));
           vibrate([80, 60, 80]);
           beep();
         }
-        resetEntry(); S.entryMsg = '';
+        resetEntry(); S.entryMsg = ''; S.entryErr = false;
         G.opponentGone = null;
       }
       if (G.history.length < prevPly) {
         // cofnięcie ruchu: powiedz, które ruchy zniknęły, żeby poprawić bierki na szachownicy
         const undone = prevHistory.slice(G.history.length).map((m) => fmtSan(m.san)).join(', ');
         resetEntry();
-        S.entryMsg = `Cofnięto: ${undone}. Ustaw bierki z powrotem na szachownicy.`;
-        speak(`Cofnięto ruch. Ustaw bierki z powrotem.`);
+        S.entryMsg = t('Cofnięto: {moves}. Ustaw bierki z powrotem na szachownicy.', { moves: undone });
+        say(['takeback-done']);
         vibrate([60, 40, 60]);
       }
       G.lastSeenPly = G.history.length;
       if (!wasOver && gameOver(G) && !G.announcedEnd) {
         G.announcedEnd = true;
         releaseWakeLock();
-        speak(resultText(G).title + '.');
+        const st = G.state;
+        say([st.status === 'aborted' || st.status === 'noStart' ? 'aborted' : !st.winner ? 'draw' : st.winner === G.myColor ? 'win' : 'loss']);
       }
       render();
       break;
@@ -939,10 +1026,10 @@ function onGameMsg(G, msg) {
       if (msg.gone) {
         // termin liczymy od chwili odebrania — odliczanie na żywo w updateClocks()
         G.opponentGone = { ...msg, deadline: Date.now() + (msg.claimWinInSeconds || 0) * 1000 };
-        if (!was) { beep(); vibrate([200, 100, 200]); speak('Rywal opuścił partię.'); }
+        if (!was) { beep(); vibrate([200, 100, 200]); say(['opponent-gone']); }
       } else {
         G.opponentGone = null;
-        if (was) { toast('Rywal wrócił do partii.'); beep(); }
+        if (was) { toast(t('Rywal wrócił do partii.')); beep(); }
       }
       render();
       break;
@@ -957,7 +1044,7 @@ function onGameMsg(G, msg) {
       G.lastChat = { user: from, text: String(msg.text || '').slice(0, 140) };
       if (Date.now() - (G.openedAt || 0) > 3000) { // bez odtwarzania starych wiadomości po otwarciu partii
         toast(`${from}: ${G.lastChat.text}`, 6000);
-        if (S.settings.readChat !== false) speak('Rywal pisze: ' + G.lastChat.text);
+        if (S.settings.readChat !== false) say(['chat'], G.lastChat.text);
       }
       render();
       break;
@@ -981,9 +1068,9 @@ function resultText(G) {
   const st = G.state;
   if (!st) return { title: '', sub: '' };
   const sub = statusPl(st.status);
-  if (st.status === 'aborted' || st.status === 'noStart') return { title: 'Partia przerwana', sub: '' };
-  if (st.winner) return { title: st.winner === G.myColor ? 'Wygrana' : 'Przegrana', sub };
-  return { title: 'Remis', sub: sub === 'Remis' ? '' : sub };
+  if (st.status === 'aborted' || st.status === 'noStart') return { title: t('Partia przerwana'), sub: '' };
+  if (st.winner) return { title: st.winner === G.myColor ? t('Wygrana') : t('Przegrana'), sub };
+  return { title: t('Remis'), sub: sub === 'Remis' ? '' : sub };
 }
 
 // --- wpisywanie ruchu --------------------------------------------------------
@@ -1016,10 +1103,10 @@ function sanMatch(input) {
   if (exact.length === 1) return { state: 'ok', move: exact[0] };
   const prefix = [...new Set(legal.filter((m) => sanKey(m.san).startsWith(key)).map((m) => m.san))];
   if (/^O+$/.test(key)) {
-    return prefix.length ? { state: 'partial', hints: prefix } : { state: 'bad', msg: 'Roszada nie jest teraz możliwa.' };
+    return prefix.length ? { state: 'partial', hints: prefix } : { state: 'bad', msg: t('Roszada nie jest teraz możliwa.') };
   }
   const p = key.match(SAN_RE);
-  const none = () => (prefix.length ? { state: 'partial', hints: prefix } : { state: 'bad', msg: 'Nie ma takiego ruchu w tej pozycji.' });
+  const none = () => (prefix.length ? { state: 'partial', hints: prefix } : { state: 'bad', msg: t('Nie ma takiego ruchu w tej pozycji.') });
   if (!p) return none();
   const [, piece, file, rank, to, promo] = p;
   // pobłażliwie: zbędne dookreślenie (Ngf3) albo bicie pionem bez kolumny (d5 zamiast exd5) też przejdzie
@@ -1029,9 +1116,9 @@ function sanMatch(input) {
   if (!c.length) return none();
   const sans = [...new Set(c.map((m) => m.san))];
   if (new Set(c.map((m) => m.from)).size > 1) {
-    return { state: 'ambiguous', hints: sans, msg: `Na ${to} mogą pójść: ${sans.map(fmtSan).join(', ')} — dopisz kolumnę lub rząd, skąd rusza figura.` };
+    return { state: 'ambiguous', hints: sans, msg: t('Na {to} mogą pójść: {moves} — dopisz kolumnę lub rząd, skąd rusza figura.', { to, moves: sans.map(fmtSan).join(', ') }) };
   }
-  if (c.length > 1) return { state: 'promo', msg: `Dopisz figurę promocji: ${to}=Q (hetman), =R (wieża), =B (goniec), =N (skoczek).` };
+  if (c.length > 1) return { state: 'promo', msg: t('Dopisz figurę promocji: {to}=Q (hetman), =R (wieża), =B (goniec), =N (skoczek).', { to }) };
   return { state: 'ok', move: c[0] };
 }
 
@@ -1040,7 +1127,7 @@ function pressSan(tok) {
   if (!G || !myTurn(G) || S.sending) return;
   if (tok === 'O-O' || tok === 'O-O-O') S.san = tok;
   else if (S.san.length < 8) S.san += tok;
-  S.entryMsg = '';
+  S.entryMsg = ''; S.entryErr = false;
   const r = sanMatch(S.san);
   // „wysyłaj od razu”: tylko gdy wpis nie jest początkiem dłuższego ruchu (np. O-O i O-O-O)
   if (r.state === 'ok' && S.settings.autoSend) {
@@ -1059,16 +1146,16 @@ function pressKey(ch) {
   if (kind === 'file' && !FILES.includes(ch)) return;
   if (kind === 'rank' && !RANKS.includes(ch)) return;
   S.input.push(ch);
-  S.entryMsg = '';
+  S.entryMsg = ''; S.entryErr = false;
   if (S.input.length === 2 && hintsOn(G)) {
     const from = S.input.join('');
     const own = G.chess.get(from);
-    if (!own || own.color !== G.myColor[0]) S.entryMsg = 'Na tym polu nie ma Twojej bierki.';
-    else if (!G.chess.moves({ square: from, verbose: true }).length) S.entryMsg = 'Ta bierka nie ma teraz ruchu.';
+    if (!own || own.color !== G.myColor[0]) { S.entryMsg = t('Na tym polu nie ma Twojej bierki.'); S.entryErr = true; }
+    else if (!G.chess.moves({ square: from, verbose: true }).length) { S.entryMsg = t('Ta bierka nie ma teraz ruchu.'); S.entryErr = true; }
   }
   if (S.input.length === 4) {
     const check = validateInput();
-    if (!check.ok) { if (hintsOn(G)) S.entryMsg = check.msg; }
+    if (!check.ok) { if (hintsOn(G)) { S.entryMsg = check.msg; S.entryErr = true; } }
     else if (check.promotion) S.promo = { from: check.from, to: check.to };
     else if (S.settings.autoSend) { renderEntry(); sendMove(); return; }
   }
@@ -1078,9 +1165,9 @@ function pressKey(ch) {
 function hintsOn(G) { return !!S.settings.learnMode && !!G?.full && !G.full.rated; }
 // Ogólny komunikat po „Wyślij” bez podpowiadania, które figury wchodzą w grę.
 function plainError(r) {
-  if (r.state === 'ambiguous') return 'Ruch niejednoznaczny — dopisz kolumnę lub rząd, z którego rusza figura.';
-  if (r.state === 'promo') return 'Dopisz figurę promocji: =Q, =R, =B albo =N.';
-  return 'Niepoprawny ruch — sprawdź zapis.';
+  if (r.state === 'ambiguous') return t('Ruch niejednoznaczny — dopisz kolumnę lub rząd, z którego rusza figura.');
+  if (r.state === 'promo') return t('Dopisz figurę promocji: =Q, =R, =B albo =N.');
+  return t('Niepoprawny ruch — sprawdź zapis.');
 }
 function backspace() {
   if (S.sending) return;
@@ -1090,10 +1177,10 @@ function backspace() {
     if (S.promo) { S.promo = null; }
     S.input.pop();
   }
-  S.entryMsg = '';
+  S.entryMsg = ''; S.entryErr = false;
   renderEntry();
 }
-function clearInput() { if (S.sending) return; resetEntry(); S.entryMsg = ''; renderEntry(); }
+function clearInput() { if (S.sending) return; resetEntry(); S.entryMsg = ''; S.entryErr = false; renderEntry(); }
 
 function validateInput() {
   const G = S.game;
@@ -1102,8 +1189,8 @@ function validateInput() {
   const cands = G.chess.moves({ square: from, verbose: true }).filter((m) => m.to === to);
   if (!cands.length) {
     const own = G.chess.get(from);
-    if (!own || own.color !== G.myColor[0]) return { ok: false, msg: 'Na polu ' + from + ' nie ma Twojej bierki.' };
-    return { ok: false, msg: `Ruch ${from}–${to} jest niedozwolony w tej pozycji.` };
+    if (!own || own.color !== G.myColor[0]) return { ok: false, msg: t('Na polu {from} nie ma Twojej bierki.', { from }) };
+    return { ok: false, msg: t('Ruch {from}–{to} jest niedozwolony w tej pozycji.', { from, to }) };
   }
   return { ok: true, from, to, promotion: cands.some((m) => m.promotion) };
 }
@@ -1114,22 +1201,22 @@ async function sendMove(promoPiece) {
   let uci;
   if (sanEntry()) {
     const r = sanMatch(S.san);
-    if (r.state !== 'ok') { S.entryMsg = hintsOn(G) ? (r.msg || 'Zapisz ruch, np. e4 albo Nf3.') : plainError(r); renderEntry(); return; }
+    if (r.state !== 'ok') { S.entryMsg = hintsOn(G) ? (r.msg || t('Zapisz ruch, np. e4 albo Nf3.')) : plainError(r); S.entryErr = true; renderEntry(); return; }
     uci = r.move.from + r.move.to + (r.move.promotion || '');
   } else {
-    if (S.input.length !== 4) { S.entryMsg = 'Wpisz pole startowe i docelowe, np. e2 e4.'; renderEntry(); return; }
+    if (S.input.length !== 4) { S.entryMsg = t('Wpisz pole startowe i docelowe, np. e2 e4.'); renderEntry(); return; }
     const check = validateInput();
-    if (!check.ok) { S.entryMsg = hintsOn(G) ? check.msg : 'Niepoprawny ruch — sprawdź pola.'; renderEntry(); return; }
+    if (!check.ok) { S.entryMsg = hintsOn(G) ? check.msg : t('Niepoprawny ruch — sprawdź pola.'); S.entryErr = true; renderEntry(); return; }
     if (check.promotion && !promoPiece) { S.promo = { from: check.from, to: check.to }; renderEntry(); return; }
     uci = check.from + check.to + (promoPiece || '');
   }
-  S.sending = true; S.entryMsg = 'Wysyłanie…'; S.promo = null;
+  S.sending = true; S.entryMsg = t('Wysyłanie…'); S.entryErr = false; S.promo = null;
   renderEntry();
   try {
     await S.provider.move(G.id, uci);
-    if (S.game === G) { resetEntry(); S.entryMsg = ''; }
+    if (S.game === G) { resetEntry(); S.entryMsg = ''; S.entryErr = false; }
   } catch (e) {
-    if (S.game === G) S.entryMsg = e.message || 'Nie udało się wysłać ruchu.';
+    if (S.game === G) { S.entryMsg = e.message || t('Nie udało się wysłać ruchu.'); S.entryErr = true; }
   } finally {
     S.sending = false;
     if (S.game === G) render();
@@ -1150,7 +1237,7 @@ function render() {
   else if (S.view === 'room-new') html = viewRoomNew();
   else if (S.view === 'club-join') html = viewClubJoin();
   else if (S.view === 'qr-login') html = viewQrLogin();
-  else if (S.view === 'account') html = viewAccount();
+  else if (S.view === 'account') html = viewAccount().replace(/<\/main>\s*$/, `<div class="start-others">${viewLangPicker()}</div></main>`); // wybór języka także przy logowaniu
   else if (S.view === 'lobby') html = viewLobby();
   else if (S.view === 'game') html = viewGame();
   else if (S.view === 'coach') html = viewCoach();
@@ -1169,19 +1256,19 @@ function render() {
 }
 
 function viewLoading() {
-  return `<main class="center"><p class="muted">Łączenie…</p></main>`;
+  return `<main class="center"><p class="muted">${t('Łączenie…')}</p></main>`;
 }
 
 function viewLichessLogin(primary) {
   const cls = primary ? 'btn primary big' : 'btn big';
   if (CONFIG.DEMO_ONLY) {
-    return `<p class="note">To jest podgląd. Logowanie przez Lichess zadziała, gdy aplikacja będzie wgrana pod własny adres (instrukcja w README).</p>`;
+    return `<p class="note">${t('To jest podgląd. Logowanie przez Lichess zadziała, gdy aplikacja będzie wgrana pod własny adres (instrukcja w README).')}</p>`;
   }
   return new LichessProvider().hasToken()
-    ? `<button class="${cls}" data-action="lichess-resume">Graj przez Lichess</button>
-       <button class="link" data-action="lichess-logout">Wyloguj z Lichess</button>`
-    : `<button class="${cls}" data-action="login">Zaloguj przez Lichess</button>
-       <button class="link" data-action="token-login">Inny sposób: wklej token Lichess</button>`;
+    ? `<button class="${cls}" data-action="lichess-resume">${t('Graj przez Lichess')}</button>
+       <button class="link" data-action="lichess-logout">${t('Wyloguj z Lichess')}</button>`
+    : `<button class="${cls}" data-action="login">${t('Zaloguj przez Lichess')}</button>
+       <button class="link" data-action="token-login">${t('Inny sposób: wklej token Lichess')}</button>`;
 }
 
 function viewStart() {
@@ -1196,109 +1283,126 @@ function viewStart() {
     return `
   <main class="start">
     ${brand}
-    <p class="lead">Grasz na prawdziwej szachownicy. Tutaj tylko wpisujesz swój ruch i odczytujesz ruch rywala — bez szachownicy na ekranie.</p>
-    <p class="muted small">Partie i ranking są na Twoim koncie Lichess.</p>
+    <p class="lead">${t('Grasz na prawdziwej szachownicy. Tutaj tylko wpisujesz swój ruch i odczytujesz ruch rywala — bez szachownicy na ekranie.')}</p>
+    <p class="muted small">${t('Partie i ranking są na Twoim koncie Lichess.')}</p>
     ${err}
     <div class="stack">
       ${viewLichessLogin(true)}
-      <button class="btn big" data-action="demo">Wypróbuj bez logowania</button>
+      <button class="btn big" data-action="demo">${t('Wypróbuj bez logowania')}</button>
     </div>
-    <p class="muted small">Tempa od 10 minut — żeby był czas zagrać ruch na szachownicy i go wpisać. Przez Lichess: rapid, klasyczne i korespondencja.</p>
+    <p class="muted small">${t('Tempa od 10 minut — żeby był czas zagrać ruch na szachownicy i go wpisać. Przez Lichess: rapid, klasyczne i korespondencja.')}</p>
     ${viewBanner()}
   </main>`;
   }
   const acct = savedAccount();
   const clubs = acct ? myClubs() : [];
   const hint = S.standaloneHint ? `
-    <div class="notice">Aplikacja z ekranu głównego ma osobną pamięć od przeglądarki. Zaloguj się tu raz — zapamięta Cię.
+    <div class="notice">${t('Aplikacja z ekranu głównego ma osobną pamięć od przeglądarki. Zaloguj się tu raz — zapamięta Cię.')}
       <button class="link small" data-action="hide-standalone">OK</button></div>` : '';
+  // na dole: Lichess (wyraźny przycisk — duża baza graczy), potem drobne linki i wybór języka
+  const lichessHas = !CONFIG.DEMO_ONLY && new LichessProvider().hasToken();
   const others = `
     <div class="start-others">
-      <div class="others-head">${acct ? 'Inne' : 'Bez konta'}</div>
-      ${CONFIG.DEMO_ONLY ? '' : new LichessProvider().hasToken()
-    ? `<button class="link small" data-action="lichess-resume">Graj przez Lichess</button> · <button class="link small" data-action="lichess-logout">Wyloguj z Lichess</button>`
-    : `<button class="link small" data-action="login">Zaloguj przez Lichess</button> · <button class="link small" data-action="token-login">token Lichess</button>`}
-      <br><button class="link small" data-action="demo">Wypróbuj z komputerem (demo)</button> · <a class="small" href="kluby.html">Dla klubów i trenerów</a> · ${PRIVACY_LINK}
+      ${CONFIG.DEMO_ONLY ? '' : `<p class="small">${t('Masz konto Lichess?')}</p>
+      <button class="btn lichess-btn" data-action="${lichessHas ? 'lichess-resume' : 'login'}">${t('Zagraj na Lichess')}</button>
+      <div class="small">${lichessHas ? '<button class="link small" data-action="lichess-logout">Wyloguj z Lichess</button>'
+    : `<button class="link small" data-action="token-login">${t('Inny sposób: token Lichess')}</button>`}</div>`}
+      <div class="small links-row"><button class="link small" data-action="demo">${t('Wypróbuj z komputerem (demo)')}</button> · <a class="small" href="${currentLang() === 'pl' ? 'kluby.html' : 'clubs.html'}">${t('Dla klubów i trenerów')}</a> · ${privacyLink()}</div>
+      ${viewLangPicker()}
     </div>`;
   if (!acct) {
     // bez konta: zachęta do konta na górze, reszta drobnym drukiem
     return `
   <main class="start">
     ${brand}
-    <p class="lead">Grasz na prawdziwej szachownicy. Tu tylko wpisujesz swój ruch i słyszysz ruch rywala.</p>
+    <p class="lead">${t('Grasz na prawdziwej szachownicy. Tu tylko wpisujesz swój ruch i słyszysz ruch rywala.')}</p>
     ${err}
     ${hint}
     <div class="stack">
-      <button class="btn primary big" data-action="account-register">Załóż konto</button>
-      <button class="btn big" data-action="account-login">Zaloguj się</button>
+      <button class="btn primary big" data-action="account-register">${t('Załóż konto')}</button>
+      <button class="btn big" data-action="account-login">${t('Zaloguj się')}</button>
     </div>
-    <p class="muted small center-text">Tylko nick i hasło, bez e-maila. Ranking, znajomi, kluby i szybka gra — na każdym urządzeniu.</p>
-    <p class="small center-text"><button class="link" data-action="qr-login">Logujesz się na komputerze? Zaloguj telefonem (QR)</button></p>
+    <p class="muted small center-text">${t('Tylko nick i hasło, bez e-maila. Ranking, znajomi, kluby i szybka gra — na każdym urządzeniu.')}</p>
+    <p class="small center-text"><button class="link" data-action="qr-login">${t('Logujesz się na komputerze? Zaloguj telefonem (QR)')}</button></p>
     ${others}
   </main>`;
   }
   const clubsCard = `
     <section class="card mode-card">
-      <h2>Moje kluby</h2>
-      ${clubs.length ? '' : '<p class="muted small">Masz kod klubu od trenera albo znajomych? Dołącz. Możesz też założyć własny klub.</p>'}
+      <h2>${t('Moje kluby')}</h2>
+      ${clubs.length ? '' : `<p class="muted small">${t('Masz kod klubu od trenera albo znajomych? Dołącz. Możesz też założyć własny klub.')}</p>`}
       <div class="stack">${clubs.map((c) => `
         <button class="btn big mode-btn ${c.status === 'invited' ? 'primary' : ''}" data-action="open-club" data-id="${esc(c.room)}">${c.status === 'pending' ? '⏳' : c.status === 'invited' ? '✉️' : '👥'} ${esc(c.name)}<span class="mode-sub">${
-  c.status === 'pending' ? 'czeka na zatwierdzenie przez założyciela lub admina'
-    : c.status === 'invited' ? 'zaproszenie — kliknij, żeby wejść'
-      : c.here ? `jako ${esc(c.nick)}` : 'zapisany na koncie — otwórz'}</span></button>`).join('')}
+  c.status === 'pending' ? t('czeka na zatwierdzenie przez założyciela lub admina')
+    : c.status === 'invited' ? t('zaproszenie — kliknij, żeby wejść')
+      : c.here ? `jako ${esc(c.nick)}` : t('zapisany na koncie — otwórz')}</span></button>`).join('')}
       </div>
-      <div class="row-actions"><button class="btn small" data-action="club-join-open">+ Dołącz do klubu</button> <button class="btn small" data-action="room-new">+ Załóż klub</button></div>
+      <div class="row-actions"><button class="btn small" data-action="club-join-open">${t('+ Dołącz do klubu')}</button> <button class="btn small" data-action="room-new">${t('+ Załóż klub')}</button></div>
     </section>`;
   return `
   <main class="start">
     <div class="brand-row">${brand}
-      <button class="btn small" data-action="account-menu" aria-label="Konto">${esc(acct.nick)} ▾</button></div>
+      <button class="btn small" data-action="account-menu" aria-label="${t('Konto')}">${esc(acct.nick)} ▾</button></div>
     ${err}
     ${hint}
     <div class="stack">
-      <button class="btn primary big mode-btn" data-action="quick-play">⚡ Szybka gra<span class="mode-sub">dobór rywala online, znajomi, ranking ogólny</span></button>
+      <button class="btn primary big mode-btn" data-action="quick-play">${t('⚡ Szybka gra')}<span class="mode-sub">${t('dobór rywala online, znajomi, ranking ogólny')}</span></button>
     </div>
     ${clubsCard}
-    <p class="small center-text"><button class="link" data-action="qr-scan">📷 Zaloguj komputer (skanuj kod QR)</button></p>
+    <p class="small center-text"><button class="link" data-action="qr-scan">${t('📷 Zaloguj komputer (skanuj kod QR)')}</button></p>
     ${others}
   </main>`;
+}
+
+// Wybór języka: mała flaga + nazwa; po kliknięciu lista alfabetyczna (flaga, nazwa w tym języku).
+function viewLangPicker() {
+  const cur = langInfo();
+  return `
+    <div class="lang-picker">
+      <button class="lang-btn" data-action="lang-open" aria-haspopup="listbox" aria-expanded="${S.langOpen ? 'true' : 'false'}" aria-label="${t('Język')}: ${esc(cur.name)}">
+        <img src="${cur.flag}" alt="" width="20" height="13"> ${esc(cur.name)} ▾</button>
+      ${S.langOpen ? `<ul class="lang-list" role="listbox">${LANGS.map((l) => `
+        <li><button class="lang-opt ${l.code === cur.code ? 'sel' : ''}" role="option" aria-selected="${l.code === cur.code}" data-action="lang-set" data-id="${l.code}">
+          <img src="${l.flag}" alt="" width="20" height="13"> ${esc(l.name)}</button></li>`).join('')}</ul>` : ''}
+    </div>`;
 }
 
 // Komputer: kod QR do zeskanowania zalogowanym telefonem.
 function viewQrLogin() {
   const q = S.qr || {};
-  const back = `<header class="g-top"><button class="btn small" data-action="qr-cancel">← Wróć</button></header>`;
+  const back = `<header class="g-top"><button class="btn small" data-action="qr-cancel">${t('← Wróć')}</button></header>`;
   let body;
-  if (q.loading) body = '<p class="muted">Przygotowuję kod…</p>';
-  else if (q.error) body = `<p class="error">${esc(q.error)}</p><div class="stack"><button class="btn primary" data-action="qr-login">Spróbuj ponownie</button></div>`;
-  else if (q.expired) body = `<p class="note">Kod wygasł.</p><div class="stack"><button class="btn primary" data-action="qr-login">Pokaż nowy kod</button></div>`;
+  if (q.loading) body = `<p class="muted">${t('Przygotowuję kod…')}</p>`;
+  else if (q.error) body = `<p class="error">${esc(q.error)}</p><div class="stack"><button class="btn primary" data-action="qr-login">${t('Spróbuj ponownie')}</button></div>`;
+  else if (q.expired) body = `<p class="note">${t('Kod wygasł.')}</p><div class="stack"><button class="btn primary" data-action="qr-login">${t('Pokaż nowy kod')}</button></div>`;
   else {
     body = `
     <div class="qr-box">${q.svg}</div>
     <ol class="small">
-      <li>Na telefonie otwórz aplikację, w której jesteś zalogowany.</li>
-      <li>Ekran główny → <strong>„📷 Zaloguj komputer”</strong> i zeskanuj ten kod.</li>
-      <li>Potwierdź na telefonie — ten ekran zaloguje się sam.</li>
+      <li>${t('Na telefonie otwórz aplikację, w której jesteś zalogowany.')}</li>
+      <li>${t('Ekran główny →')} <strong>${t('„📷 Zaloguj komputer”')}</strong> ${t('i zeskanuj ten kod.')}</li>
+      <li>${t('Potwierdź na telefonie — ten ekran zaloguje się sam.')}</li>
     </ol>
-    <p class="small">Aparat nie działa? Na telefonie wpisz kod: <span class="club-code inline" id="qr-short">${esc(q.short)}</span></p>
-    <p class="muted small">Kod ważny jeszcze <b id="qr-left">${fmtCountdown(Math.max(0, Math.ceil((q.until - Date.now()) / 1000)))}</b>, działa raz.</p>`;
+    <p class="small">${t('Aparat nie działa? Na telefonie wpisz kod:')} <span class="club-code inline" id="qr-short">${esc(q.short)}</span></p>
+    <p class="muted small">${t('Kod ważny jeszcze')} <b id="qr-left">${fmtCountdown(Math.max(0, Math.ceil((q.until - Date.now()) / 1000)))}</b>${t(', działa raz.')}</p>`;
   }
   return `
   <main class="start">${back}
-    <h1>Zaloguj telefonem</h1>
+    <h1>${t('Zaloguj telefonem')}</h1>
     ${body}
   </main>`;
 }
 
-const PRIVACY_LINK = `<a href="prywatnosc.html" target="_blank" rel="noopener">Prywatność</a>`;
+// strona prywatności w języku aplikacji (angielska: privacy.html)
+const privacyLink = () => `<a href="${currentLang() === 'pl' ? 'prywatnosc.html' : 'privacy.html'}" target="_blank" rel="noopener">${t('Prywatność')}</a>`;
 const NICK_INPUT = (value, placeholder) => `<input id="room-nick" name="username" type="text" maxlength="20" autocomplete="username" autocapitalize="off" spellcheck="false" value="${esc(value)}" placeholder="${placeholder}">`;
 
 // Konto: rejestracja / logowanie / nie pamiętam hasła / nowe hasło z linku.
 function viewAccount() {
   const f = S.accountForm;
-  const back = `<header class="g-top"><button class="btn small" data-action="to-start">← Wróć</button></header>`;
+  const back = `<header class="g-top"><button class="btn small" data-action="to-start">${t('← Wróć')}</button></header>`;
   const pass = (id, label, auto) => `
-    <label class="field">${label}
+    <label class="field">${t(label)}
       <input id="${id}" name="password" type="password" autocomplete="${auto}" value="">
     </label>`;
   // prawdziwe formularze <form> — iPhone (Pęk kluczy) i menedżery haseł proponują wtedy zapisanie hasła
@@ -1306,58 +1410,58 @@ function viewAccount() {
   if (f.mode === 'forgot') {
     return `
   <main class="start">${back}
-    <h1>Nie pamiętam hasła</h1>
-    <p class="lead">Wyślemy link do ustawienia nowego hasła na e-mail podany przy koncie.</p>
+    <h1>${t('Nie pamiętam hasła')}</h1>
+    <p class="lead">${t('Wyślemy link do ustawienia nowego hasła na e-mail podany przy koncie.')}</p>
     ${form('forgot', `
-    <label class="field">Nick albo e-mail
+    <label class="field">${t('Nick albo e-mail')}
       <input id="acct-login" name="username" type="text" autocomplete="username" autocapitalize="off" spellcheck="false" value="${esc(f.nick)}">
     </label>
     ${f.info ? `<p class="note small">${esc(f.info)}</p>` : ''}
-    <div class="stack"><button type="submit" class="btn primary big">Wyślij link</button></div>`)}
-    <p class="small"><button class="link" data-action="acct-mode" data-id="login">← Wróć do logowania</button></p>
+    <div class="stack"><button type="submit" class="btn primary big">${t('Wyślij link')}</button></div>`)}
+    <p class="small"><button class="link" data-action="acct-mode" data-id="login">${t('← Wróć do logowania')}</button></p>
   </main>`;
   }
   if (f.mode === 'reset') {
     return `
   <main class="start">${back}
-    <h1>Nowe hasło</h1>
+    <h1>${t('Nowe hasło')}</h1>
     ${form('reset', `
     ${pass('acct-pass', 'Nowe hasło (min. 8 znaków)', 'new-password')}
-    <div class="stack"><button type="submit" class="btn primary big">Ustaw hasło i zaloguj</button></div>`)}
+    <div class="stack"><button type="submit" class="btn primary big">${t('Ustaw hasło i zaloguj')}</button></div>`)}
   </main>`;
   }
   if (f.mode === 'login') {
     return `
   <main class="start">${back}
-    <h1>Zaloguj się</h1>
-    <p class="lead">Twój ranking, znajomi i kluby wrócą na tym urządzeniu.</p>
+    <h1>${t('Zaloguj się')}</h1>
+    <p class="lead">${t('Twój ranking, znajomi i kluby wrócą na tym urządzeniu.')}</p>
     ${form('login', `
-    <label class="field">Nick ${NICK_INPUT(f.nick, '')}</label>
+    <label class="field">${t('Nick')} ${NICK_INPUT(f.nick, '')}</label>
     ${pass('acct-pass', 'Hasło', 'current-password')}
-    <div class="stack"><button type="submit" class="btn primary big">Zaloguj się</button></div>`)}
+    <div class="stack"><button type="submit" class="btn primary big">${t('Zaloguj się')}</button></div>`)}
     <div class="stack">
-      ${passkeySupported() ? `<button class="btn big" data-action="passkey-login">Zaloguj Face ID / odciskiem palca</button>` : ''}
-      <button class="btn" data-action="qr-login">Zaloguj telefonem (kod QR)</button>
+      ${passkeySupported() ? `<button class="btn big" data-action="passkey-login">${t('Zaloguj Face ID / odciskiem palca')}</button>` : ''}
+      <button class="btn" data-action="qr-login">${t('Zaloguj telefonem (kod QR)')}</button>
     </div>
-    <p class="small"><button class="link" data-action="acct-mode" data-id="forgot">Nie pamiętam hasła</button></p>
-    <p class="small">Nie masz konta? <button class="link" data-action="acct-mode" data-id="register">Załóż konto</button></p>
+    <p class="small"><button class="link" data-action="acct-mode" data-id="forgot">${t('Nie pamiętam hasła')}</button></p>
+    <p class="small">${t('Nie masz konta?')} <button class="link" data-action="acct-mode" data-id="register">${t('Załóż konto')}</button></p>
   </main>`;
   }
   return `
   <main class="start">${back}
-    <h1>Załóż konto</h1>
-    <p class="lead">${f.next === 'club-join' || f.next === 'room-new' ? 'Do klubu potrzebne jest konto — wystarczy nick i hasło, bez e-maila. ' : ''}Konto trzyma ranking, znajomych i kluby — zalogujesz się na każdym urządzeniu. Bez konta Lichess.</p>
+    <h1>${t('Załóż konto')}</h1>
+    <p class="lead">${f.next === 'club-join' || f.next === 'room-new' ? '' + t('Do klubu potrzebne jest konto — wystarczy nick i hasło, bez e-maila.') + ' ' : ''}${t('Konto trzyma ranking, znajomych i kluby — zalogujesz się na każdym urządzeniu. Bez konta Lichess.')}</p>
     ${form('register', `
-    <label class="field">Nick (widoczny dla innych graczy) ${NICK_INPUT(f.nick, 'np. Ania_K')}</label>
+    <label class="field">${t('Nick (widoczny dla innych graczy)')} ${NICK_INPUT(f.nick, 'np. Ania_K')}</label>
     ${pass('acct-pass', 'Hasło (min. 8 znaków)', 'new-password')}
-    <p class="note small">Wymyśl <strong>nowe hasło, którego nie używasz nigdzie indziej</strong> (np. do poczty czy banku). Najlepiej kilka słów, np. „zielony-goniec-na-b5”. Zbyt popularnych haseł aplikacja nie przyjmie.</p>
-    <label class="field">E-mail <span class="muted">(nieobowiązkowy — tylko do odzyskania hasła)</span>
+    <p class="note small">${t('Wymyśl')} <strong>${t('nowe hasło, którego nie używasz nigdzie indziej')}</strong> ${t('(np. do poczty czy banku). Najlepiej kilka słów, np. „zielony-goniec-na-b5”. Zbyt popularnych haseł aplikacja nie przyjmie.')}</p>
+    <label class="field">E-mail <span class="muted">${t('(nieobowiązkowy — tylko do odzyskania hasła)')}</span>
       <input id="acct-email" name="email" type="email" autocomplete="email" inputmode="email" value="${esc(f.email)}" placeholder="adres@e-mail.pl">
     </label>
-    <div class="stack"><button type="submit" class="btn primary big">Załóż konto</button></div>`)}
-    <p class="small">Masz już konto? <button class="link" data-action="acct-mode" data-id="login">Zaloguj się</button></p>
-    <p class="note small">W szybkiej grze grasz z nieznajomymi. Nie da się sprawdzić, czy ktoś gra przy szachownicy, czy z programem — z kimś, komu ufasz, zagrasz w klubie.</p>
-    <p class="muted small">Zapisujemy nick, skrót hasła (nie samo hasło), e-mail tylko jeśli go podasz, partie, ranking i listę znajomych. ${PRIVACY_LINK}</p>
+    <div class="stack"><button type="submit" class="btn primary big">${t('Załóż konto')}</button></div>`)}
+    <p class="small">${t('Masz już konto?')} <button class="link" data-action="acct-mode" data-id="login">${t('Zaloguj się')}</button></p>
+    <p class="note small">${t('W szybkiej grze grasz z nieznajomymi. Nie da się sprawdzić, czy ktoś gra przy szachownicy, czy z programem — z kimś, komu ufasz, zagrasz w klubie.')}</p>
+    <p class="muted small">${t('Zapisujemy nick, skrót hasła (nie samo hasło), e-mail tylko jeśli go podasz, partie, ranking i listę znajomych.')} ${privacyLink()}</p>
   </main>`;
 }
 
@@ -1366,19 +1470,19 @@ function viewRoomNew() {
   const acct = savedAccount();
   return `
   <main class="start">
-    <header class="g-top"><button class="btn small" data-action="to-start">← Wróć</button></header>
-    <h1>Nowy klub</h1>
-    <p class="lead">Zamknięta grupa dla znajomych, klubu albo szkółki. Ranking jest wspólny z poczekalnią ogólną (jeden na tempo).</p>
+    <header class="g-top"><button class="btn small" data-action="to-start">${t('← Wróć')}</button></header>
+    <h1>${t('Nowy klub')}</h1>
+    <p class="lead">${t('Zamknięta grupa dla znajomych, klubu albo szkółki. Ranking jest wspólny z poczekalnią ogólną (jeden na tempo).')}</p>
     <form data-form="room-new" autocomplete="off">
-      <label class="field">Nazwa klubu
-        <input id="room-name" type="text" maxlength="40" autocomplete="off" value="${esc(f.name)}" placeholder="np. Klub Hetman — środy">
+      <label class="field">${t('Nazwa klubu')}
+        <input id="room-name" type="text" maxlength="40" autocomplete="off" value="${esc(f.name)}" placeholder="${t('np. Klub Hetman — środy')}">
       </label>
-      <label class="field">Twój nick w klubie ${NICK_INPUT(f.nick || acct?.nick || '', 'np. Ania')}</label>
-      <p class="muted small">Klub zapisze się na koncie ${esc(acct?.nick || '')} — wrócisz do niego po zalogowaniu na innym urządzeniu.</p>
-      <div class="stack"><button type="submit" class="btn primary big">Załóż klub</button></div>
+      <label class="field">${t('Twój nick w klubie')} ${NICK_INPUT(f.nick || acct?.nick || '', 'np. Ania')}</label>
+      <p class="muted small">${t('Klub zapisze się na koncie')} ${esc(acct?.nick || '')} ${t('— wrócisz do niego po zalogowaniu na innym urządzeniu.')}</p>
+      <div class="stack"><button type="submit" class="btn primary big">${t('Załóż klub')}</button></div>
     </form>
-    <p class="muted small">Dostaniesz kod klubu (np. HETMA-7Q4MX) i link do wysłania. Nowi członkowie dołączają kontem i czekają na Twoje zatwierdzenie (można to wyłączyć). Możesz też dodawać graczy po nicku, zmienić kod i ustawić hasło klubu.</p>
-    <p class="muted small">Zapisujemy tylko nick, przynależność do klubu i partie. ${PRIVACY_LINK}</p>
+    <p class="muted small">${t('Dostaniesz kod klubu (np. HETMA-7Q4MX) i link do wysłania. Nowi członkowie dołączają kontem i czekają na Twoje zatwierdzenie (można to wyłączyć). Możesz też dodawać graczy po nicku, zmienić kod i ustawić hasło klubu.')}</p>
+    <p class="muted small">${t('Zapisujemy tylko nick, przynależność do klubu i partie.')} ${privacyLink()}</p>
   </main>`;
 }
 
@@ -1390,33 +1494,33 @@ function viewClubJoin() {
   if (j.sent) {
     return `
   <main class="start">
-    <header class="g-top"><button class="btn small" data-action="to-start">← Menu</button></header>
-    <h1>Prośba wysłana</h1>
-    <p class="lead">Klub <strong>${esc(j.name)}</strong> przyjmuje nowych członków po zatwierdzeniu. Założyciel albo administrator zobaczy Twoją prośbę.</p>
-    <p class="note small">Klub czeka w „Moich klubach” z dopiskiem „czeka na zatwierdzenie”. Gdy Cię przyjmą, dostaniesz powiadomienie (jeśli masz otwartą aplikację) i klub otworzy się jednym kliknięciem. Prośba ważna 7 dni.</p>
-    <div class="stack"><button class="btn primary big" data-action="to-start">Wróć do menu</button></div>
+    <header class="g-top"><button class="btn small" data-action="to-start">${t('← Menu')}</button></header>
+    <h1>${t('Prośba wysłana')}</h1>
+    <p class="lead">${t('Klub')} <strong>${esc(j.name)}</strong> ${t('przyjmuje nowych członków po zatwierdzeniu. Założyciel albo administrator zobaczy Twoją prośbę.')}</p>
+    <p class="note small">${t('Klub czeka w „Moich klubach” z dopiskiem „czeka na zatwierdzenie”. Gdy Cię przyjmą, dostaniesz powiadomienie (jeśli masz otwartą aplikację) i klub otworzy się jednym kliknięciem. Prośba ważna 7 dni.')}</p>
+    <div class="stack"><button class="btn primary big" data-action="to-start">${t('Wróć do menu')}</button></div>
   </main>`;
   }
   const step2 = j.checked ? `
-      <p class="lead">Klub <strong>${esc(j.name)}</strong></p>
-      <label class="field">Twój nick w klubie ${NICK_INPUT(f.nick || acct?.nick || '', 'np. Bartek')}</label>
-      ${j.needsPassword ? `<label class="field">Hasło klubu <input id="club-pass" type="password" autocomplete="off"></label>` : ''}
-      <p class="muted small">Klub zapisze się na koncie ${esc(acct?.nick || '')}. Jeśli klub zatwierdza nowych członków, najpierw poczekasz na zgodę założyciela albo admina.</p>
-      <div class="stack"><button type="submit" class="btn primary big">Dołącz</button></div>` : `
-      <div class="stack"><button type="submit" class="btn primary big">Dalej</button></div>`;
+      <p class="lead">${t('Klub')} <strong>${esc(j.name)}</strong></p>
+      <label class="field">${t('Twój nick w klubie')} ${NICK_INPUT(f.nick || acct?.nick || '', 'np. Bartek')}</label>
+      ${j.needsPassword ? `<label class="field">${t('Hasło klubu')} <input id="club-pass" type="password" autocomplete="off"></label>` : ''}
+      <p class="muted small">${t('Klub zapisze się na koncie')} ${esc(acct?.nick || '')}${t('. Jeśli klub zatwierdza nowych członków, najpierw poczekasz na zgodę założyciela albo admina.')}</p>
+      <div class="stack"><button type="submit" class="btn primary big">${t('Dołącz')}</button></div>` : `
+      <div class="stack"><button type="submit" class="btn primary big">${t('Dalej')}</button></div>`;
   return `
   <main class="start">
-    <header class="g-top"><button class="btn small" data-action="to-start">← Wróć</button></header>
-    <h1>Dołącz do klubu</h1>
+    <header class="g-top"><button class="btn small" data-action="to-start">${t('← Wróć')}</button></header>
+    <h1>${t('Dołącz do klubu')}</h1>
     <form data-form="club-join" autocomplete="off">
-      <label class="field">Kod klubu
-        <input id="club-code" type="text" maxlength="16" autocapitalize="characters" autocomplete="off" spellcheck="false" value="${esc(j.code)}" placeholder="np. HETMA-7Q4MX" ${j.checked ? 'readonly' : ''}>
+      <label class="field">${t('Kod klubu')}
+        <input id="club-code" type="text" maxlength="16" autocapitalize="characters" autocomplete="off" spellcheck="false" value="${esc(j.code)}" placeholder="${t('np. HETMA-7Q4MX')}" ${j.checked ? 'readonly' : ''}>
       </label>
-      ${j.checked ? `<p class="small"><button type="button" class="link" data-action="club-code-change">Inny kod</button></p>` : ''}
+      ${j.checked ? `<p class="small"><button type="button" class="link" data-action="club-code-change">${t('Inny kod')}</button></p>` : ''}
       ${j.error ? `<p class="error">${esc(j.error)}</p>` : ''}
       ${step2}
     </form>
-    <p class="muted small">Kod dostaniesz od założyciela klubu albo trenera. Po kilku błędnych próbach dołączanie do klubów zostaje zablokowane na pewien czas. ${PRIVACY_LINK}</p>
+    <p class="muted small">${t('Kod dostaniesz od założyciela klubu albo trenera. Po kilku błędnych próbach dołączanie do klubów zostaje zablokowane na pewien czas.')} ${privacyLink()}</p>
   </main>`;
 }
 
@@ -1433,7 +1537,7 @@ function ratingsLine() {
   if (S.provider?.features?.rooms) {
     const r = S.provider.me?.ratings || {};
     return RATING_SPEEDS.filter(([k]) => r[k]?.games).map(([k, l]) => `${l} ${roomRating(r[k])}`).join(' · ')
-      || 'Ranking pojawi się po pierwszej partii rankingowej';
+      || t('Ranking pojawi się po pierwszej partii rankingowej');
   }
   const r = S.user?.ratings || {};
   const parts = [];
@@ -1449,22 +1553,22 @@ function viewLobby() {
     ? S.ongoing.map((g) => `
       <button class="row" data-action="open-game" data-id="${esc(g.id)}">
         <span class="row-main">${esc(g.opponent.name)}${g.opponent.rating ? ` <span class="muted">(${g.opponent.rating})</span>` : ''}</span>
-        <span class="row-sub">${esc(SPEED_PL[g.speed] || g.speed || '')} · grasz ${g.color === 'white' ? 'białymi' : 'czarnymi'}</span>
-        <span class="pill ${g.isMyTurn ? 'pill-on' : ''}">${g.isMyTurn ? 'Twój ruch' : 'czekasz'}</span>
+        <span class="row-sub">${esc(speedPl(g.speed))} ${t('· grasz')} ${g.color === 'white' ? t('białymi') : t('czarnymi')}</span>
+        <span class="pill ${g.isMyTurn ? 'pill-on' : ''}">${g.isMyTurn ? t('Twój ruch') : 'czekasz'}</span>
       </button>`).join('')
-    : `<p class="muted small">Brak trwających partii.</p>`;
+    : `<p class="muted small">${t('Brak trwających partii.')}</p>`;
 
   const chal = [...S.challenges.values()];
   const challenges = chal.length ? `
     <section class="card">
-      <h2>Wyzwania</h2>
+      <h2>${t('Wyzwania')}</h2>
       ${chal.map((c) => `
         <div class="row static">
           <span class="row-main">${esc(c.from)}${c.rating ? ` <span class="muted">(${c.rating})</span>` : ''}</span>
-          <span class="row-sub">${esc(SPEED_PL[c.speed] || c.speed)} ${esc(c.label)}${c.rated ? ' · rankingowa' : ''}</span>
+          <span class="row-sub">${esc(speedPl(c.speed))} ${esc(c.label)}${c.rated ? ' ' + t('· rankingowa') + '' : ''}</span>
           ${c.compatible
-            ? `<span class="row-actions"><button class="btn small primary" data-action="accept" data-id="${esc(c.id)}">Przyjmij</button><button class="btn small" data-action="decline" data-id="${esc(c.id)}">Odrzuć</button></span>`
-            : `<span class="row-sub warn">Tego tempa lub wariantu nie da się grać przez API.</span><span class="row-actions"><button class="btn small" data-action="decline" data-id="${esc(c.id)}">Odrzuć</button></span>`}
+            ? `<span class="row-actions"><button class="btn small primary" data-action="accept" data-id="${esc(c.id)}">${t('Przyjmij')}</button><button class="btn small" data-action="decline" data-id="${esc(c.id)}">${t('Odrzuć')}</button></span>`
+            : `<span class="row-sub warn">${t('Tego tempa lub wariantu nie da się grać przez API.')}</span><span class="row-actions"><button class="btn small" data-action="decline" data-id="${esc(c.id)}">${t('Odrzuć')}</button></span>`}
         </div>`).join('')}
     </section>` : '';
 
@@ -1474,36 +1578,36 @@ function viewLobby() {
     <header class="topbar">
       <div>
         <div class="who">${esc(S.user?.name || '')}${demo ? ' <span class="pill">demo</span>' : ''}${rooms ? ` <span class="muted">· ${esc(S.provider.roomName)}</span>` : ''}</div>
-        <div class="muted small">${esc(ratingsLine()) || (demo ? 'Tryb demo — bez rankingu' : '')}</div>
+        <div class="muted small">${esc(ratingsLine()) || (demo ? t('Tryb demo — bez rankingu') : '')}</div>
       </div>
       <div class="topbar-actions">
-        <span class="dot ${S.online ? 'on' : 'off'}" title="${S.online ? 'Połączono' : 'Łączenie…'}"></span>
-        ${rooms ? `<button class="icon-btn" data-action="room-menu" aria-label="${S.provider.isPublic ? 'Konto' : 'Klub'}">⌂</button>` : ''}
-        <button class="icon-btn" data-action="settings" aria-label="Ustawienia">⚙︎</button>
-        ${rooms ? '' : `<button class="icon-btn" data-action="logout" aria-label="Wyloguj">⏻</button>`}
-        <button class="btn small" data-action="to-menu">Menu</button>
+        <span class="dot ${S.online ? 'on' : 'off'}" title="${S.online ? t('Połączono') : t('Łączenie…')}"></span>
+        ${rooms ? `<button class="icon-btn" data-action="room-menu" aria-label="${S.provider.isPublic ? t('Konto') : t('Klub')}">⌂</button>` : ''}
+        <button class="icon-btn" data-action="settings" aria-label="${t('Ustawienia')}">⚙︎</button>
+        ${rooms ? '' : `<button class="icon-btn" data-action="logout" aria-label="${t('Wyloguj')}">⏻</button>`}
+        <button class="btn small" data-action="to-menu">${t('Menu')}</button>
       </div>
     </header>
 
-    ${!S.online && rooms ? `<div class="notice">Brak połączenia z serwerem — łączę ponownie…</div>` : ''}
+    ${!S.online && rooms ? `<div class="notice">${t('Brak połączenia z serwerem — łączę ponownie…')}</div>` : ''}
     ${rooms && S.provider.isPublic && S.provider.me && !S.provider.me.hasPassword
-    ? `<div class="notice">Konto bez hasła — ranking jest tylko na tym urządzeniu. <button class="btn small primary" data-action="secure-open">Ustaw hasło</button></div>` : ''}
+    ? `<div class="notice">${t('Konto bez hasła — ranking jest tylko na tym urządzeniu.')} <button class="btn small primary" data-action="secure-open">${t('Ustaw hasło')}</button></div>` : ''}
 
     ${challenges}
 
     <section class="card">
-      <h2>Trwające partie</h2>
+      <h2>${t('Trwające partie')}</h2>
       ${ongoing}
     </section>
 
     ${viewNewGame()}
 
-    ${rooms && isCoach() && S.provider.room?.requests ? `<div class="notice req-note">Prośby o dołączenie do klubu: <strong>${S.provider.room.requests}</strong>
-      <button class="btn small primary" data-action="coach-open">Zobacz</button></div>` : ''}
+    ${rooms && isCoach() && S.provider.room?.requests ? `<div class="notice req-note">${t('Prośby o dołączenie do klubu:')} <strong>${S.provider.room.requests}</strong>
+      <button class="btn small primary" data-action="coach-open">${t('Zobacz')}</button></div>` : ''}
     ${rooms && S.provider.isPublic ? viewFriends() : ''}
-    ${rooms && isCoach() ? `<section class="card"><h2>Panel trenera</h2>
-      <p class="muted small">Jako ${S.provider.me?.role === 'owner' ? 'założyciel' : 'administrator'} klubu widzisz partie wszystkich członków (podgląd na żywo, wyniki, zapis do analizy) i zarządzasz członkami.</p>
-      <button class="btn small primary" data-action="coach-open">Otwórz panel trenera</button></section>` : ''}
+    ${rooms && isCoach() ? `<section class="card"><h2>${t('Panel trenera')}</h2>
+      <p class="muted small">${t('Jako')} ${S.provider.me?.role === 'owner' ? t('założyciel') : 'administrator'} ${t('klubu widzisz partie wszystkich członków (podgląd na żywo, wyniki, zapis do analizy) i zarządzasz członkami.')}</p>
+      <button class="btn small primary" data-action="coach-open">${t('Otwórz panel trenera')}</button></section>` : ''}
     ${rooms ? viewRoomRanking() + viewRoomHistory() : viewBanner()}
   </main>`;
 }
@@ -1525,7 +1629,7 @@ function viewRoomRanking() {
     return `
       <li class="rank-row ${m.id === meId ? 'me' : ''}">
         <span class="rank-n">${r?.games ? i + 1 + '.' : ''}</span>
-        ${pub ? '' : `<span class="dot ${m.online ? 'on' : 'off'}" title="${m.online ? 'w klubie' : 'poza klubem'}"></span>`}
+        ${pub ? '' : `<span class="dot ${m.online ? 'on' : 'off'}" title="${m.online ? t('w klubie') : t('poza klubem')}"></span>`}
         <span class="rank-nick">${esc(m.nick)}${m.id === meId ? ' <span class="muted small">(Ty)</span>' : ''}</span>
         <span class="rank-r">${r?.games ? esc(roomRating(r)) : '<span class="muted small">—</span>'}</span>
         <span class="rank-g muted small">${r?.games || 0} p.</span>
@@ -1533,11 +1637,11 @@ function viewRoomRanking() {
   }).join('');
   return `
   <section class="card">
-    <h2>${pub ? 'Ranking ogólny' : 'Członkowie klubu'}</h2>
-    <div class="tabs">${RATING_SPEEDS.map(([k, l]) => `<button class="tab ${sp === k ? 'sel' : ''}" data-action="rank-speed" data-id="${k}">${l}</button>`).join('')}</div>
+    <h2>${pub ? t('Ranking ogólny') : t('Członkowie klubu')}</h2>
+    <div class="tabs">${RATING_SPEEDS.map(([k, l]) => `<button class="tab ${sp === k ? 'sel' : ''}" data-action="rank-speed" data-id="${k}">${t(l)}</button>`).join('')}</div>
     <ol class="rank-list">${rows}</ol>
-    <p class="muted small">${pub ? 'Czołówka (20 najlepszych) i Ty. ' : 'Ranking jest wspólny dla poczekalni i wszystkich klubów (jeden na tempo, start 1200). '}„?” — ranking jeszcze niepewny (mało partii). Liczą się tylko partie rankingowe.</p>
-    ${pub ? '' : `<button class="btn small" data-action="room-menu">Zaproś do klubu</button>`}
+    <p class="muted small">${pub ? '' + t('Czołówka (20 najlepszych) i Ty.') + ' ' : '' + t('Ranking jest wspólny dla poczekalni i wszystkich klubów (jeden na tempo, start 1200).') + ' '}${t('„?” — ranking jeszcze niepewny (mało partii). Liczą się tylko partie rankingowe.')}</p>
+    ${pub ? '' : `<button class="btn small" data-action="room-menu">${t('Zaproś do klubu')}</button>`}
   </section>`;
 }
 
@@ -1545,8 +1649,8 @@ const RESULT_PL = { white: '1–0', black: '0–1' };
 function viewRoomHistory() {
   const h = S.roomHistory;
   let body;
-  if (!h) body = `<p class="muted small">${S.historyLoading ? 'Wczytywanie…' : ''}</p>`;
-  else if (!h.length) body = `<p class="muted small">Jeszcze nie rozegrano żadnej partii.</p>`;
+  if (!h) body = `<p class="muted small">${S.historyLoading ? t('Wczytywanie…') : ''}</p>`;
+  else if (!h.length) body = `<p class="muted small">${t('Jeszcze nie rozegrano żadnej partii.')}</p>`;
   else {
     body = `<ul class="hist-list">${h.map((g) => {
       const res = g.status === 'aborted' || g.status === 'noStart' ? 'przerw.' : RESULT_PL[g.winner] || '½–½';
@@ -1554,14 +1658,14 @@ function viewRoomHistory() {
       return `<li>
         <span class="hist-players">${esc(g.white)}${diff(g.diffW)} – ${esc(g.black)}${diff(g.diffB)}</span>
         <span class="hist-res">${res}</span>
-        <span class="muted small">${esc(SPEED_PL[g.speed] || g.speed)} ${esc(g.label)} · ${esc(statusPl(g.status))}${g.rated ? '' : ' · towarzyska'} · ${new Date(g.endedAt).toLocaleDateString('pl-PL')}${(isCoach() || g.whiteId === S.user?.id || g.blackId === S.user?.id) && g.plies
+        <span class="muted small">${esc(speedPl(g.speed))} ${esc(g.label)} · ${esc(statusPl(g.status))}${g.rated ? '' : ' ' + t('· towarzyska') + ''} · ${new Date(g.endedAt).toLocaleDateString('pl-PL')}${(isCoach() || g.whiteId === S.user?.id || g.blackId === S.user?.id) && g.plies
     ? ` · <button class="link small" data-action="game-analysis" data-id="${esc(g.id)}">analiza</button> · <button class="link small" data-action="game-pgn" data-id="${esc(g.id)}">PGN</button>` : ''}</span>
       </li>`;
     }).join('')}</ul>`;
   }
   return `
   <details class="card room-hist" data-action="room-history" ${S.roomHistoryOpen ? 'open' : ''}>
-    <summary>${S.provider.features?.public ? 'Twoje partie' : 'Historia partii w klubie'}</summary>
+    <summary>${S.provider.features?.public ? t('Twoje partie') : t('Historia partii w klubie')}</summary>
     ${body}
   </details>`;
 }
@@ -1585,40 +1689,42 @@ function findPerson(id) {
 function ratedBlockReason() {
   const p = S.provider;
   if (!p?.features?.rooms) return '';
-  if (!p.me?.account) return 'Partie rankingowe wymagają konta — załóż je na ekranie startowym (Konto).';
+  if (!p.me?.account) return t('Partie rankingowe wymagają konta — załóż je na ekranie startowym (Konto).');
   if (!p.isPublic && S.form.mode === 'member') {
     const opp = findPerson(S.form.opponent);
-    if (opp && !opp.account) return `${opp.nick} nie ma konta — z tą osobą zagrasz tylko towarzysko.`;
+    if (opp && !opp.account) return t('{nick} nie ma konta — z tą osobą zagrasz tylko towarzysko.', { nick: opp.nick });
   }
   return '';
 }
 function viewFriends() {
   const s = S.provider.social;
-  if (!s) return `<section class="card"><h2>Znajomi</h2><p class="muted small">Wczytywanie…</p></section>`;
+  if (!s) return `<section class="card"><h2>${t('Znajomi')}</h2><p class="muted small">${t('Wczytywanie…')}</p></section>`;
   const person = (p, actions) => `
     <li class="friend-row">
       <span class="dot ${p.online ? 'on' : 'off'}" title="${p.online ? 'online' : 'offline'}"></span>
       <span class="friend-nick">${esc(p.nick)}${p.rating ? ` <span class="muted small">(${p.rating})</span>` : ''}</span>
       <span class="row-actions">${actions}</span>
     </li>`;
-  const btn = (action, id, label, cls = '') => `<button class="btn small ${cls}" data-action="${action}" data-id="${esc(id)}">${label}</button>`;
+  const btn = (action, id, label, cls = '') => `<button class="btn small ${cls}" data-action="${action}" data-id="${esc(id)}">${t(label)}</button>`;
   const challenge = (p) => (p.online ? btn('friend-challenge', p.id, 'Wyzwij', 'primary') : '');
-  const sec = (title, list, fn) => (list?.length ? `<h3>${title}</h3><ul class="friend-list">${list.map(fn).join('')}</ul>` : '');
+  const sec = (title, list, fn) => (list?.length ? `<h3>${t(title)}</h3><ul class="friend-list">${list.map(fn).join('')}</ul>` : '');
   return `
   <section class="card friends">
-    <h2>Znajomi</h2>
+    <h2>${t('Znajomi')}</h2>
     ${sec('Zaproszenia do znajomych', s.incoming, (p) => person(p, btn('friend-accept', p.id, 'Przyjmij', 'primary') + btn('friend-decline', p.id, 'Odrzuć')))}
     ${s.friends?.length ? sec('Twoi znajomi', s.friends, (p) => person(p, challenge(p) + btn('friend-more', p.id, '⋯')))
-    : `<p class="muted small">Nie masz jeszcze znajomych. Zaproś kogoś nickiem albo z listy ostatnich rywali.</p>`}
+    : `<p class="muted small">${t('Nie masz jeszcze znajomych. Zaproś kogoś nickiem albo z listy ostatnich rywali.')}</p>`}
     ${sec('Ostatni rywale', s.recent, (p) => person(p, challenge(p) + btn('friend-invite-id', p.id, 'Zaproś') + btn('friend-block', p.id, 'Zablokuj')))}
     ${sec('Wysłane zaproszenia', s.outgoing, (p) => person(p, btn('friend-cancel', p.id, 'Anuluj')))}
+    <div class="row-actions"><button class="btn small primary" data-action="friend-link">${t('Zaproś linkiem (WhatsApp, SMS…)')}</button></div>
+    <p class="muted small">${t('Link działa raz, przez 7 dni. Kto go otworzy, zostanie Twoim znajomym — także po założeniu konta.')}</p>
     <form data-form="friend-add" class="inline-form" autocomplete="off">
-      <input id="friend-nick" type="text" maxlength="20" autocapitalize="off" spellcheck="false" placeholder="Nick gracza" aria-label="Nick gracza do zaproszenia">
-      <button type="submit" class="btn small">Zaproś do znajomych</button>
+      <input id="friend-nick" type="text" maxlength="20" autocapitalize="off" spellcheck="false" placeholder="${t('Nick gracza')}" aria-label="${t('Nick gracza do zaproszenia')}">
+      <button type="submit" class="btn small">${t('Zaproś do znajomych')}</button>
     </form>
-    ${s.blocked?.length ? `<details class="blocked"><summary class="small">Zablokowani (${s.blocked.length})</summary>
+    ${s.blocked?.length ? `<details class="blocked"><summary class="small">${t('Zablokowani (')}${s.blocked.length})</summary>
       <ul class="friend-list">${s.blocked.map((p) => person({ ...p, online: false }, btn('friend-unblock', p.id, 'Odblokuj'))).join('')}</ul></details>` : ''}
-    <p class="muted small">Zablokowana osoba nie może Cię wyzwać ani zaprosić. Nie dowie się o blokadzie.</p>
+    <p class="muted small">${t('Zablokowana osoba nie może Cię wyzwać ani zaprosić. Nie dowie się o blokadzie.')}</p>
   </section>`;
 }
 
@@ -1638,16 +1744,16 @@ function viewNewGame() {
   const groups = [...new Set(allowed.map((p) => p.group))];
   const presetsHtml = groups.map((g) => `
     <div class="preset-group">
-      <div class="muted small">${g}</div>
+      <div class="muted small">${t(g)}</div>
       <div class="chips">
         ${allowed.filter((p) => p.group === g).map((p) => `
-          <button class="chip ${f.preset === p.id ? 'sel' : ''}" data-action="preset" data-id="${p.id}">${p.label}</button>`).join('')}
+          <button class="chip ${f.preset === p.id ? 'sel' : ''}" data-action="preset" data-id="${p.id}">${t(p.label)}</button>`).join('')}
       </div>
     </div>`).join('');
 
   const friend = f.mode === 'friend' ? `
-    <label class="field">Nick znajomego na Lichess
-      <input id="friend-input" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" value="${esc(f.friend)}" placeholder="np. jan_kowalski">
+    <label class="field">${t('Nick znajomego na Lichess')}
+      <input id="friend-input" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" value="${esc(f.friend)}" placeholder="${t('np. jan_kowalski')}">
     </label>` : '';
   let member = '';
   if (f.mode === 'member') {
@@ -1657,49 +1763,49 @@ function viewNewGame() {
         .sort((a, b) => (b.online ? 1 : 0) - (a.online ? 1 : 0) || a.nick.localeCompare(b.nick, 'pl'));
     if (!others.find((m) => m.id === f.opponent)) f.opponent = others.find((m) => m.online)?.id || others[0]?.id || '';
     member = others.length ? `
-    <div class="field">Rywal
+    <div class="field">${t('Rywal')}
       <div class="chips">${others.map((m) => `<button class="chip ${f.opponent === m.id ? 'sel' : ''}" data-action="opponent" data-id="${esc(m.id)}"><span class="dot ${m.online ? 'on' : 'off'}"></span> ${esc(m.nick)}${m.friend ? ' ★' : ''}</button>`).join('')}</div>
     </div>`
-      : pub ? `<p class="note small">Nikt ze znajomych ani ostatnich rywali nie jest teraz online. Dodaj znajomych niżej albo poszukaj rywala w zakładce „Poczekalnia”.</p>`
-        : `<p class="note small">W klubie nie ma jeszcze nikogo poza Tobą. <button class="link" data-action="room-menu">Zaproś kogoś</button></p>`;
+      : pub ? `<p class="note small">${t('Nikt ze znajomych ani ostatnich rywali nie jest teraz online. Dodaj znajomych niżej albo poszukaj rywala w zakładce „Poczekalnia”.')}</p>`
+        : `<p class="note small">${t('W klubie nie ma jeszcze nikogo poza Tobą.')} <button class="link" data-action="room-menu">${t('Zaproś kogoś')}</button></p>`;
   }
   let seekList = '';
   if (rooms && f.mode === 'seek') {
     const seeks = (S.provider.seeks || []).filter((s) => s.memberId !== S.user?.id);
     seekList = `
-    <div class="field">Czekają na rywala
+    <div class="field">${t('Czekają na rywala')}
       ${seeks.length ? `<ul class="seek-list">${seeks.map((s) => `
         <li>
           <span class="seek-who">${esc(s.nick)} <span class="muted">(${s.rating})</span></span>
-          <span class="muted small">${esc(SPEED_PL[s.speed] || s.speed)} ${esc(s.label)}${s.rated ? ' · rankingowa' : ' · towarzyska'}</span>
-          <button class="btn small primary" data-action="seek-accept" data-id="${esc(s.id)}">Graj</button>
+          <span class="muted small">${esc(speedPl(s.speed))} ${esc(s.label)}${s.rated ? ' ' + t('· rankingowa') + '' : ' ' + t('· towarzyska') + ''}</span>
+          <button class="btn small primary" data-action="seek-accept" data-id="${esc(s.id)}">${t('Graj')}</button>
         </li>`).join('')}</ul>`
-    : `<p class="muted small">Nikt teraz nie czeka. Wybierz tempo i szukaj — aplikacja połączy Cię z pierwszą osobą, która wybierze to samo tempo.</p>`}
+    : `<p class="muted small">${t('Nikt teraz nie czeka. Wybierz tempo i szukaj — aplikacja połączy Cię z pierwszą osobą, która wybierze to samo tempo.')}</p>`}
     </div>`;
   }
   const level = f.mode === 'ai' && !demo ? `
-    <div class="field">Poziom komputera
+    <div class="field">${t('Poziom komputera')}
       <div class="chips">${[1, 2, 3, 4, 5, 6, 7, 8].map((l) => `<button class="chip ${f.level === l ? 'sel' : ''}" data-action="level" data-id="${l}">${l}</button>`).join('')}</div>
     </div>` : '';
   const color = f.mode !== 'seek' ? `
-    <div class="field">Kolor
-      <div class="chips">${[['random', 'Losowo'], ['white', 'Białe'], ['black', 'Czarne']].map(([k, l]) => `<button class="chip ${f.color === k ? 'sel' : ''}" data-action="color" data-id="${k}">${l}</button>`).join('')}</div>
+    <div class="field">${t('Kolor')}
+      <div class="chips">${[['random', 'Losowo'], ['white', 'Białe'], ['black', 'Czarne']].map(([k, l]) => `<button class="chip ${f.color === k ? 'sel' : ''}" data-action="color" data-id="${k}">${t(l)}</button>`).join('')}</div>
     </div>` : '';
   // rankingowa tylko, gdy oboje mają konto (w poczekalni ogólnej zawsze)
   const ratedBlock = ratedBlockReason();
   const rated = f.mode !== 'ai' ? `
-    <label class="toggle ${ratedBlock ? 'disabled' : ''}"><input type="checkbox" data-action="rated" ${f.rated && !ratedBlock ? 'checked' : ''} ${ratedBlock ? 'disabled' : ''}> Partia rankingowa</label>
-    ${ratedBlock ? `<p class="muted small">${esc(ratedBlock)}</p>` : f.rated ? '' : `<p class="muted small">Towarzyska: bez rankingu. W ustawieniach możesz włączyć „Tryb nauki” z podpowiedziami.</p>`}` : '';
+    <label class="toggle ${ratedBlock ? 'disabled' : ''}"><input type="checkbox" data-action="rated" ${f.rated && !ratedBlock ? 'checked' : ''} ${ratedBlock ? 'disabled' : ''}> ${t('Partia rankingowa')}</label>
+    ${ratedBlock ? `<p class="muted small">${esc(ratedBlock)}</p>` : f.rated ? '' : `<p class="muted small">${t('Towarzyska: bez rankingu. W ustawieniach możesz włączyć „Tryb nauki” z podpowiedziami.')}</p>`}` : '';
   const lichessSeek = S.provider?.name === 'lichess' && f.mode === 'seek';
   const near = lichessSeek ? `
-    <label class="toggle"><input type="checkbox" data-action="near" ${f.near ? 'checked' : ''}> Tylko rywale ±100 od mojego rankingu</label>
-    <p class="muted small">Ustaw bierki przed szukaniem — Lichess przerywa partię, gdy pierwszy ruch nie pada szybko.</p>` : '';
+    <label class="toggle"><input type="checkbox" data-action="near" ${f.near ? 'checked' : ''}> ${t('Tylko rywale ±100 od mojego rankingu')}</label>
+    <p class="muted small">${t('Ustaw bierki przed szukaniem — Lichess przerywa partię, gdy pierwszy ruch nie pada szybko.')}</p>` : '';
   const label = f.mode === 'seek' ? 'Szukaj rywala' : f.mode === 'friend' || f.mode === 'member' ? 'Wyślij wyzwanie' : 'Zagraj z komputerem';
 
   return `
   <section class="card">
-    <h2>Nowa partia</h2>
-    <div class="tabs">${modes.map(([k, l]) => `<button class="tab ${f.mode === k ? 'sel' : ''}" data-action="mode" data-id="${k}">${l}</button>`).join('')}</div>
+    <h2>${t('Nowa partia')}</h2>
+    <div class="tabs">${modes.map(([k, l]) => `<button class="tab ${f.mode === k ? 'sel' : ''}" data-action="mode" data-id="${k}">${t(l)}</button>`).join('')}</div>
     ${friend}
     ${member}
     ${seekList}
@@ -1708,26 +1814,26 @@ function viewNewGame() {
     ${color}
     ${near}
     ${rated}
-    <button class="btn primary big" data-action="start-game">${label}</button>
+    <button class="btn primary big" data-action="start-game">${t(label)}</button>
   </section>`;
 }
 
 // Lobby Lichess: krótka informacja o własnych klubach i rankingu (gdy serwer klubów jest włączony).
 function viewBanner() {
   if (!roomsEnabled() || savedAccount()) return '';
-  return `<p class="note small">Własne kluby, znajomi i ranking bez konta Lichess: <button class="link small" data-action="to-menu">Menu</button> → „Załóż konto”.</p>`;
+  return `<p class="note small">${t('Własne kluby, znajomi i ranking bez konta Lichess:')} <button class="link small" data-action="to-menu">${t('Menu')}</button> ${t('→ „Załóż konto”.')}</p>`;
 }
 
 function viewGame() {
   const G = S.game;
   if (!G.full) {
-    return `<main class="game"><header class="g-top"><button class="btn small" data-action="back">← Partie</button></header>
-      <p class="muted center-text">${G.error ? esc(G.error) : 'Wczytywanie partii…'}</p></main>`;
+    return `<main class="game"><header class="g-top"><button class="btn small" data-action="back">${t('← Partie')}</button></header>
+      <p class="muted center-text">${G.error ? esc(G.error) : t('Wczytywanie partii…')}</p></main>`;
   }
   const opp = G.myColor === 'white' ? G.full.black : G.full.white;
   const me = G.myColor === 'white' ? G.full.white : G.full.black;
   const tc = G.full.clock ? `${G.full.clock.initial / 60000}+${G.full.clock.increment / 1000}` : G.full.daysPerTurn ? `${G.full.daysPerTurn} d/ruch` : '';
-  const meta = `${SPEED_PL[G.full.speed] || G.full.speed} ${tc}${G.full.rated ? ' · rankingowa' : ''}`;
+  const meta = `${speedPl(G.full.speed)} ${tc}${G.full.rated ? ' · ' + t('rankingowa') : ''}`;
   const over = gameOver(G);
 
   // ostatni ruch rywala (trener: ostatni ruch w ogóle)
@@ -1735,60 +1841,60 @@ function viewGame() {
   let lastOpp = null;
   for (let i = G.history.length - 1; i >= 0; i--) { if (spec || G.history[i].color !== G.myColor[0]) { lastOpp = { m: G.history[i], idx: i }; break; } }
   const lastBlock = lastOpp
-    ? `<div class="lm-label">${spec ? 'Ostatni ruch' : 'Ruch rywala'} · ${Math.floor(lastOpp.idx / 2) + 1}.${lastOpp.m.color === 'b' ? '..' : ''}</div>
+    ? `<div class="lm-label">${spec ? t('Ostatni ruch') : t('Ruch rywala')} · ${Math.floor(lastOpp.idx / 2) + 1}.${lastOpp.m.color === 'b' ? '..' : ''}</div>
        <div class="lm-san">${esc(fmtSan(lastOpp.m.san))}</div>
        <div class="lm-desc">${esc(describeMove(lastOpp.m))}</div>
-       <button class="link small" data-action="repeat">Powtórz na głos</button>`
-    : `<div class="lm-label">Ruch rywala</div>
+       <button class="link small" data-action="repeat">${t('Powtórz na głos')}</button>`
+    : `<div class="lm-label">${t('Ruch rywala')}</div>
        <div class="lm-san dim">—</div>
-       <div class="lm-desc">${G.myColor === 'white' ? 'Zaczynasz białymi.' : 'Rywal gra białymi — czekaj na pierwszy ruch.'}</div>`;
+       <div class="lm-desc">${G.myColor === 'white' ? t('Zaczynasz białymi.') : t('Rywal gra białymi — czekaj na pierwszy ruch.')}</div>`;
 
   let status;
   if (over) status = '';
-  else if (spec) status = `<div class="status">Podgląd trenera · ruch ${G.chess?.turn() === 'w' ? 'białych' : 'czarnych'}</div>`;
-  else if (myTurn(G)) status = `<div class="status on">Twój ruch</div>`;
-  else status = `<div class="status">Ruch rywala — czekaj</div>`;
+  else if (spec) status = `<div class="status">${t('Podgląd trenera · ruch')} ${G.chess?.turn() === 'w' ? t('białych') : 'czarnych'}</div>`;
+  else if (myTurn(G)) status = `<div class="status on">${t('Twój ruch')}</div>`;
+  else status = `<div class="status">${t('Ruch rywala — czekaj')}</div>`;
 
   const oppDraw = !spec && G.state && !over && (G.myColor === 'white' ? G.state.bdraw : G.state.wdraw);
   const myDraw = !spec && G.state && !over && (G.myColor === 'white' ? G.state.wdraw : G.state.bdraw);
   const notices = [];
-  if (!G.conn) notices.push(`<div class="notice">Brak połączenia — łączę ponownie…</div>`);
-  if (oppDraw) notices.push(`<div class="notice">Rywal proponuje remis. <span class="row-actions"><button class="btn small primary" data-action="draw-yes">Przyjmij</button><button class="btn small" data-action="draw-no">Odrzuć</button></span></div>`);
-  if (myDraw) notices.push(`<div class="notice muted">Zaproponowałeś remis.</div>`);
+  if (!G.conn) notices.push(`<div class="notice">${t('Brak połączenia — łączę ponownie…')}</div>`);
+  if (oppDraw) notices.push(`<div class="notice">${t('Rywal proponuje remis.')} <span class="row-actions"><button class="btn small primary" data-action="draw-yes">${t('Przyjmij')}</button><button class="btn small" data-action="draw-no">${t('Odrzuć')}</button></span></div>`);
+  if (myDraw) notices.push(`<div class="notice muted">${t('Zaproponowałeś remis.')}</div>`);
   const canTakeback = !spec && !!S.provider?.takeback;
   const oppTb = canTakeback && G.state && !over && (G.myColor === 'white' ? G.state.btakeback : G.state.wtakeback);
   const myTb = canTakeback && G.state && !over && (G.myColor === 'white' ? G.state.wtakeback : G.state.btakeback);
-  if (oppTb) notices.push(`<div class="notice">Rywal prosi o cofnięcie swojego ostatniego ruchu. <span class="row-actions"><button class="btn small primary" data-action="takeback-yes">Zgódź się</button><button class="btn small" data-action="takeback-no">Odmów</button></span></div>`);
-  if (myTb) notices.push(`<div class="notice muted">Poprosiłeś o cofnięcie ruchu — czekam na zgodę rywala. <button class="btn small" data-action="takeback-cancel">Wycofaj prośbę</button></div>`);
+  if (oppTb) notices.push(`<div class="notice">${t('Rywal prosi o cofnięcie swojego ostatniego ruchu.')} <span class="row-actions"><button class="btn small primary" data-action="takeback-yes">${t('Zgódź się')}</button><button class="btn small" data-action="takeback-no">${t('Odmów')}</button></span></div>`);
+  if (myTb) notices.push(`<div class="notice muted">${t('Poprosiłeś o cofnięcie ruchu — czekam na zgodę rywala.')} <button class="btn small" data-action="takeback-cancel">${t('Wycofaj prośbę')}</button></div>`);
   if (G.opponentGone && !over && !spec) {
     // wyraźny pasek z odliczaniem na żywo (updateClocks); przyciski aktywne po odliczaniu
     const left = goneLeft(G);
     notices.push(`<div class="gone-bar" role="alert">
-      <div class="gone-title">Rywal opuścił partię</div>
-      <div class="gone-sub" id="gone-sub">${left > 0 ? `Ogłosisz wygraną albo remis za <b id="gone-count">${fmtCountdown(left)}</b>, jeśli nie wróci.` : 'Możesz ogłosić wygraną albo remis.'}</div>
-      <div class="row-actions"><button class="btn small primary" data-action="claim-win" ${left > 0 ? 'disabled' : ''}>Ogłoś wygraną</button>
-        <button class="btn small" data-action="claim-draw" ${left > 0 ? 'disabled' : ''}>Ogłoś remis</button></div>
+      <div class="gone-title">${t('Rywal opuścił partię')}</div>
+      <div class="gone-sub" id="gone-sub">${left > 0 ? `${t('Ogłosisz wygraną albo remis za')} <b id="gone-count">${fmtCountdown(left)}</b>${t(', jeśli nie wróci.')}` : t('Możesz ogłosić wygraną albo remis.')}</div>
+      <div class="row-actions"><button class="btn small primary" data-action="claim-win" ${left > 0 ? 'disabled' : ''}>${t('Ogłoś wygraną')}</button>
+        <button class="btn small" data-action="claim-draw" ${left > 0 ? 'disabled' : ''}>${t('Ogłoś remis')}</button></div>
     </div>`);
   }
 
   const myMoves = G.history.filter((m) => m.color === G.myColor[0]).length;
   const actions = over || spec ? '' : `
     <div class="g-actions">
-      ${canTakeback && myMoves > 0 && !myTb && (G.state?.takebackLeft?.[G.myColor] ?? 1) > 0 ? `<button class="btn small" data-action="takeback-ask">Cofnij mój ruch</button>` : ''}
-      ${myDraw ? '' : `<button class="btn small" data-action="offer-draw" ${G.history.length < 2 ? 'disabled' : ''}>Zaproponuj remis</button>`}
-      ${myMoves === 0 ? `<button class="btn small" data-action="abort">Przerwij</button>` : `<button class="btn small danger" data-action="resign">Poddaj</button>`}
+      ${canTakeback && myMoves > 0 && !myTb && (G.state?.takebackLeft?.[G.myColor] ?? 1) > 0 ? `<button class="btn small" data-action="takeback-ask">${t('Cofnij mój ruch')}</button>` : ''}
+      ${myDraw ? '' : `<button class="btn small" data-action="offer-draw" ${G.history.length < 2 ? 'disabled' : ''}>${t('Zaproponuj remis')}</button>`}
+      ${myMoves === 0 ? `<button class="btn small" data-action="abort">${t('Przerwij')}</button>` : `<button class="btn small danger" data-action="resign">${t('Poddaj')}</button>`}
     </div>`;
 
   return `
   <main class="game">
     <header class="g-top">
-      <button class="btn small" data-action="back">← Partie</button>
+      <button class="btn small" data-action="back">${t('← Partie')}</button>
       <div class="g-meta">${esc(meta)}</div>
-      <button class="icon-btn" data-action="game-menu" aria-label="Menu">⋯</button>
+      <button class="icon-btn" data-action="game-menu" aria-label="${t('Menu')}">⋯</button>
     </header>
 
     <div class="player">
-      <span class="pname">${esc(playerLabel(opp))} <span class="muted">· ${G.myColor === 'white' ? 'czarne' : 'białe'}</span></span>
+      <span class="pname">${esc(playerLabel(opp))} <span class="muted">· ${G.myColor === 'white' ? 'czarne' : t('białe')}</span></span>
       <span class="clock" id="clock-opp"></span>
     </div>
 
@@ -1797,7 +1903,7 @@ function viewGame() {
     ${notices.join('')}
 
     <div class="player me">
-      <span class="pname">${spec ? esc(playerLabel(me)) : 'Ty'} <span class="muted">· ${G.myColor === 'white' ? 'białe' : 'czarne'}</span></span>
+      <span class="pname">${spec ? esc(playerLabel(me)) : 'Ty'} <span class="muted">· ${G.myColor === 'white' ? t('białe') : 'czarne'}</span></span>
       <span class="clock" id="clock-me"></span>
     </div>
     ${status}
@@ -1818,7 +1924,7 @@ function viewChat(G) {
   return `
     <div class="chat-row">
       ${G.lastChat ? `<div class="small"><span class="muted">${esc(G.lastChat.user)}:</span> ${esc(G.lastChat.text)}</div>` : ''}
-      <div class="chips">${QUICK_REPLIES.map((q, i) => `<button class="chip small" data-action="chat-send" data-id="${i}">${esc(q)}</button>`).join('')}</div>
+      <div class="chips">${QUICK_REPLIES.map((q, i) => `<button class="chip small" data-action="chat-send" data-id="${i}">${esc(t(q))}</button>`).join('')}</div>
     </div>`;
 }
 
@@ -1835,41 +1941,42 @@ function viewEntrySan(G, enabled) {
   let cls = 'entry-msg';
   if (S.entryMsg) {
     line = esc(S.entryMsg);
-    if (/Nie udało|odrzucił|nie Twój|niedozwolony|Niepoprawny|niejednoznaczny|Dopisz/i.test(S.entryMsg)) cls += ' err';
+    if (S.entryErr) cls += ' err';
   } else if (r.state === 'typed') {
-    line = '<span class="muted small">Gotowe? Naciśnij „Wyślij ruch”.</span>';
+    line = `<span class="muted small">${t('Gotowe? Naciśnij „Wyślij ruch”.')}</span>`;
   } else if (r.state === 'ok') {
     line = `<span><strong>${esc(fmtSan(r.move.san))}</strong> — ${esc(describeMove(r.move))}</span>`;
   } else if (r.state === 'partial') {
-    line = `<span class="muted small">Pasuje: ${esc(r.hints.slice(0, 10).map(fmtSan).join(', '))}${r.hints.length > 10 ? '…' : ''}</span>`;
+    line = `<span class="muted small">${t('Pasuje:')} ${esc(r.hints.slice(0, 10).map(fmtSan).join(', '))}${r.hints.length > 10 ? '…' : ''}</span>`;
   } else if (r.state === 'ambiguous' || r.state === 'promo') {
     line = esc(r.msg); cls += ' warn';
   } else if (r.state === 'bad') {
     line = esc(r.msg); cls += ' err';
   } else {
     line = `<span class="muted small">${G.history.length < 2 && myTurn(G)
-      ? 'Zagraj na szachownicy i zapisz ruch, np. e4 albo Nf3.'
-      : 'Figura + pole (Nf3), pion: pole (e4) lub bicie (exd5). Roszada: O-O.'}</span>`;
+      ? t('Zagraj na szachownicy i zapisz ruch, np. e4 albo Nf3.')
+      : t('Figura + pole (Nf3), pion: pole (e4) lub bicie (exd5). Roszada: O-O.')}</span>`;
   }
   const on = enabled ? '' : 'disabled';
   const key = (k, label, extra = '') => `<button class="key ${extra}" data-action="san" data-k="${k}" ${on}>${label}</button>`;
-  const pieceKeys = SAN_PIECES.map(([en, name, pl]) => key(en, `${englishLetters() ? en : pl}<span class="key-sub">${name}</span>`, 'piece')).join('');
+  const pieceKeys = SAN_PIECES.map(([en, name, pl]) => key(en, `${englishLetters() ? en : pl}<span class="key-sub">${t(name)}</span>`, 'piece')).join('');
   const fileKeys = FILES.map((f) => key(f, f)).join('');
   const rankKeys = RANKS.map((n) => key(n, n)).join('');
-  const extra = [['x', 'x<span class="key-sub">bicie</span>'], ['=', '=<span class="key-sub">promocja</span>'], ['O-O', 'O-O<span class="key-sub">krótka</span>'], ['O-O-O', 'O-O-O<span class="key-sub">długa</span>']]
+  const sub = (s) => `<span class="key-sub">${t(s)}</span>`;
+  const extra = [['x', 'x' + sub('bicie')], ['=', '=' + sub('promocja')], ['O-O', 'O-O' + sub('krótka')], ['O-O-O', 'O-O-O' + sub('długa')]]
     .map(([k, l]) => key(k, l, 'piece')).join('');
   return `
-    <div class="san-box ${S.san ? '' : 'empty'}" aria-live="polite">${S.san ? esc(fmtSan(S.san)) : 'np. e4, Nf3, exd5, O-O'}</div>
+    <div class="san-box ${S.san ? '' : 'empty'}" aria-live="polite">${S.san ? esc(fmtSan(S.san)) : t('np. e4, Nf3, exd5, O-O')}</div>
     <div class="${cls}" aria-live="polite">${line}</div>
     <div class="keys keys5">${pieceKeys}</div>
     <div class="keys">${fileKeys}</div>
     <div class="keys">${rankKeys}</div>
     <div class="keys keys4">${extra}</div>
     <div class="entry-actions">
-      <button class="btn" data-action="backspace" ${S.san.length && !S.sending ? '' : 'disabled'}>⌫ Cofnij</button>
-      <button class="btn primary" data-action="send" ${enabled && (hints ? r.state === 'ok' : S.san.length > 0) ? '' : 'disabled'}>Wyślij ruch</button>
+      <button class="btn" data-action="backspace" ${S.san.length && !S.sending ? '' : 'disabled'}>${t('⌫ Cofnij')}</button>
+      <button class="btn primary" data-action="send" ${enabled && (hints ? r.state === 'ok' : S.san.length > 0) ? '' : 'disabled'}>${t('Wyślij ruch')}</button>
     </div>
-    <div class="entry-mode"><button class="link small" data-action="entry-mode">Wpisujesz notacją · przełącz na „skąd → dokąd”</button>${hints ? ' · <span class="muted small">tryb nauki</span>' : ''}</div>`;
+    <div class="entry-mode"><button class="link small" data-action="entry-mode">${t('Wpisujesz notacją · przełącz na „skąd → dokąd”')}</button>${hints ? ` · <span class="muted small">${t('tryb nauki')}</span>` : ''}</div>`;
 }
 
 function viewEntrySquares(G, enabled) {
@@ -1884,13 +1991,13 @@ function viewEntrySquares(G, enabled) {
   const rankKeys = RANKS.map((r) => `<button class="key" data-action="key" data-k="${r}" ${keyOn('rank') ? '' : 'disabled'}>${r}</button>`).join('');
   const promo = S.promo ? `
     <div class="promo">
-      <div class="small">Promocja piona na:</div>
-      <div class="chips">${PROMO_PIECES.map((p) => `<button class="chip big" data-action="promo" data-id="${p.key}">${p.label} <span class="muted small">${p.name}</span></button>`).join('')}</div>
+      <div class="small">${t('Promocja piona na:')}</div>
+      <div class="chips">${PROMO_PIECES.map((p) => `<button class="chip big" data-action="promo" data-id="${p.key}">${englishLetters() ? p.key.toUpperCase() : p.label} <span class="muted small">${t(p.name)}</span></button>`).join('')}</div>
     </div>` : '';
-  const msgClass = /niedozwolony|nie ma|Nie udało|odrzucił|nie Twój|Niepoprawny/i.test(S.entryMsg) ? 'entry-msg err' : 'entry-msg';
+  const msgClass = S.entryErr ? 'entry-msg err' : 'entry-msg';
   const hint = G.history.length < 2 && myTurn(G) && !S.entryMsg
-    ? 'Zagraj na szachownicy i wpisz ruch: pole startowe, potem docelowe (np. e2 e4).'
-    : 'Roszada: wpisz ruch króla, np. e1 g1.';
+    ? t('Zagraj na szachownicy i wpisz ruch: pole startowe, potem docelowe (np. e2 e4).')
+    : t('Roszada: wpisz ruch króla, np. e1 g1.');
   return `
     <div class="slots" aria-live="polite">${slots}</div>
     <div class="${msgClass}" aria-live="polite">${esc(S.entryMsg) || `<span class="muted small">${hint}</span>`}</div>
@@ -1898,10 +2005,10 @@ function viewEntrySquares(G, enabled) {
     <div class="keys">${fileKeys}</div>
     <div class="keys">${rankKeys}</div>
     <div class="entry-actions">
-      <button class="btn" data-action="backspace" ${S.input.length && !S.sending ? '' : 'disabled'}>⌫ Cofnij</button>
-      <button class="btn primary" data-action="send" ${enabled && S.input.length === 4 && !S.promo ? '' : 'disabled'}>Wyślij ruch</button>
+      <button class="btn" data-action="backspace" ${S.input.length && !S.sending ? '' : 'disabled'}>${t('⌫ Cofnij')}</button>
+      <button class="btn primary" data-action="send" ${enabled && S.input.length === 4 && !S.promo ? '' : 'disabled'}>${t('Wyślij ruch')}</button>
     </div>
-    <div class="entry-mode"><button class="link small" data-action="entry-mode">Wpisujesz „skąd → dokąd” · przełącz na notację (np. Nf3)</button></div>`;
+    <div class="entry-mode"><button class="link small" data-action="entry-mode">${t('Wpisujesz „skąd → dokąd” · przełącz na notację (np. Nf3)')}</button></div>`;
 }
 
 function renderEntry() {
@@ -1929,10 +2036,10 @@ const UNRATED_PL = {
 function viewRatingResult(G) {
   const rr = G.ratingResult;
   if (!rr || !G.full?.rated || G.spectator) return '';
-  if (!rr.counted) return `<div class="muted small">Ranking bez zmian: ${esc(UNRATED_PL[rr.reason] || 'partia się nie liczyła')}.</div>`;
+  if (!rr.counted) return `<div class="muted small">${t('Ranking bez zmian:')} ${esc(t(UNRATED_PL[rr.reason] || 'partia się nie liczyła'))}.</div>`;
   const d = G.myColor === 'white' ? rr.diffW : rr.diffB;
   const now = S.provider?.me?.ratings?.[G.full.speed === 'classical' ? 'classical' : 'rapid']?.rating;
-  return `<div class="rating-change">Ranking: <b>${d > 0 ? '+' : ''}${d ?? 0}</b>${now ? ` → ${now}` : ''}</div>`;
+  return `<div class="rating-change">${t('Ranking:')} <b>${d > 0 ? '+' : ''}${d ?? 0}</b>${now ? ` → ${now}` : ''}</div>`;
 }
 
 function viewResult(G) {
@@ -1944,13 +2051,13 @@ function viewResult(G) {
       <div class="result-title">${esc(r.title)}</div>
       ${r.sub ? `<div class="muted">${esc(r.sub)}</div>` : ''}
       ${viewRatingResult(G)}
-      ${offer ? `<div class="notice rematch-note">${esc(offer.from)} proponuje rewanż</div>` : ''}
+      ${offer ? `<div class="notice rematch-note">${esc(offer.from)} ${t('proponuje rewanż')}</div>` : ''}
       <div class="stack">
-        ${G.spectator ? '' : `<button class="btn primary ${offer ? 'pulse' : ''}" data-action="rematch">${offer ? 'Rewanż — odpowiedz' : 'Rewanż'}</button>`}
-        <button class="btn ${G.spectator ? 'primary' : ''}" data-action="back">${G.spectator ? 'Wróć do panelu trenera' : 'Wróć do listy partii'}</button>
-        ${url ? `<a class="btn" href="${esc(url)}" target="_blank" rel="noopener">Analiza partii na Lichess</a>` : ''}
-        ${!url && S.provider.gamePgn ? `<button class="btn" data-action="game-analysis" data-id="${esc(G.id)}">Analiza partii na Lichess</button>
-          <button class="link small" data-action="game-pgn" data-id="${esc(G.id)}">Pobierz zapis partii (PGN)</button>` : ''}
+        ${G.spectator ? '' : `<button class="btn primary ${offer ? 'pulse' : ''}" data-action="rematch">${offer ? t('Rewanż — odpowiedz') : t('Rewanż')}</button>`}
+        <button class="btn ${G.spectator ? 'primary' : ''}" data-action="back">${G.spectator ? t('Wróć do panelu trenera') : t('Wróć do listy partii')}</button>
+        ${url ? `<a class="btn" href="${esc(url)}" target="_blank" rel="noopener">${t('Analiza partii na Lichess')}</a>` : ''}
+        ${!url && S.provider.gamePgn ? `<button class="btn" data-action="game-analysis" data-id="${esc(G.id)}">${t('Analiza partii na Lichess')}</button>
+          <button class="link small" data-action="game-pgn" data-id="${esc(G.id)}">${t('Pobierz zapis partii (PGN)')}</button>` : ''}
       </div>
     </div>`;
 }
@@ -1964,11 +2071,11 @@ async function rematch() {
   // rywal już zaproponował rewanż — potwierdzenie „Przyjąć?”
   const offer = rematchOffer();
   if (offer) {
-    const color = offer.color === 'white' ? 'białymi' : offer.color === 'black' ? 'czarnymi' : 'losowym kolorem';
+    const color = offer.color === 'white' ? t('białymi') : offer.color === 'black' ? t('czarnymi') : t('losowym kolorem');
     S.modal = {
-      kind: 'confirm', title: 'Przyjąć rewanż?',
-      text: `${offer.from} proponuje rewanż: ${offer.label}${offer.rated ? ', rankingowa' : ', towarzyska'}. Grasz ${color}.`,
-      okLabel: 'Tak, gramy', cancelLabel: 'Nie',
+      kind: 'confirm', title: t('Przyjąć rewanż?'),
+      text: t('{from} proponuje rewanż: {label}{v}. Grasz {color}.', { from: offer.from, label: offer.label, v: offer.rated ? ', rankingowa' : ', towarzyska', color: color }),
+      okLabel: t('Tak, gramy'), cancelLabel: t('Nie'),
       onOk: async () => { closeGame(); S.view = 'lobby'; await acceptChallenge(offer.id); },
       onCancel: async () => { await declineChallenge(offer.id); },
     };
@@ -1984,7 +2091,7 @@ async function rematch() {
   opts.rematchOf = G.id; // Lichess: prawdziwy rewanż (u rywala zwykły przycisk „Rewanż”)
   closeGame();
   S.view = 'lobby';
-  S.waiting = { text: 'Wysyłanie propozycji rewanżu…', kind: 'pending' };
+  S.waiting = { text: t('Wysyłanie propozycji rewanżu…'), kind: 'pending' };
   render();
   try {
     if (opp.ai) {
@@ -1996,11 +2103,11 @@ async function rematch() {
     const h = await S.provider.challenge(opp.id || opp.name, opts);
     if (h.matched) { if (S.waiting?.kind === 'pending') S.waiting = null; render(); return; } // obaj kliknęli „Rewanż”
     if (h.correspondence) {
-      S.waiting = null; toast(`Rewanż wysłany do ${opp.name}. Partia pojawi się na liście po przyjęciu.`, 6000); render(); return;
+      S.waiting = null; toast(t('Rewanż wysłany do {name}. Partia pojawi się na liście po przyjęciu.', { name: opp.name }), 6000); render(); return;
     }
-    waitFor(h, `Czekam, aż ${opp.name} przyjmie rewanż`);
+    waitFor(h, t('Czekam, aż {name} przyjmie rewanż', { name: opp.name }));
   } catch (e) {
-    S.waiting = null; toast(e.message || 'Nie udało się wysłać rewanżu.'); render();
+    S.waiting = null; toast(e.message || t('Nie udało się wysłać rewanżu.')); render();
   }
 }
 
@@ -2048,31 +2155,31 @@ async function loadCoach() {
 // Panel: prośby o dołączenie, dodawanie po nicku, zaproszenia, zablokowani.
 function viewMembership(d, myRole) {
   const day = (t) => new Date(t).toLocaleDateString('pl-PL');
-  const btn = (action, id, label, cls = '') => `<button class="btn small ${cls}" data-action="${action}" data-id="${esc(id)}">${label}</button>`;
+  const btn = (action, id, label, cls = '') => `<button class="btn small ${cls}" data-action="${action}" data-id="${esc(id)}">${t(label)}</button>`;
   const row = (nick, sub, actions) => `<li class="friend-row"><span class="friend-nick">${esc(nick)}${sub ? ` <span class="muted small">${sub}</span>` : ''}</span><span class="row-actions">${actions}</span></li>`;
   const reqs = d.requests || [];
   return `
   <section class="card friends" id="membership">
-    <h2>Członkostwo</h2>
+    <h2>${t('Członkostwo')}</h2>
     ${myRole === 'owner'
     ? `<label class="toggle"><input type="checkbox" data-action="approval" ${d.approve ? 'checked' : ''}>
-        <span>Nowi członkowie wymagają zatwierdzenia<br><span class="muted small">Kod i hasło klubu pozwalają tylko poprosić o dołączenie; wpuszczasz Ty albo admin.</span></span></label>`
-    : `<p class="muted small">Zatwierdzanie nowych członków: ${d.approve ? 'włączone' : 'wyłączone'} (zmienia założyciel).</p>`}
-    <h3>Prośby o dołączenie${reqs.length ? ` (${reqs.length})` : ''}</h3>
+        <span>${t('Nowi członkowie wymagają zatwierdzenia')}<br><span class="muted small">${t('Kod i hasło klubu pozwalają tylko poprosić o dołączenie; wpuszczasz Ty albo admin.')}</span></span></label>`
+    : `<p class="muted small">${t('Zatwierdzanie nowych członków:')} ${d.approve ? t('włączone') : t('wyłączone')} ${t('(zmienia założyciel).')}</p>`}
+    <h3>${t('Prośby o dołączenie')}${reqs.length ? ` (${reqs.length})` : ''}</h3>
     ${reqs.length ? `<ul class="friend-list">${reqs.map((r) => row(r.nick,
-    `${day(r.at)}${r.wasRemoved ? ' · <span class="warn">wcześniej usunięty</span>' : ''}${r.rejected ? ` · odrzucona ${r.rejected}×` : ''}`,
+    `${day(r.at)}${r.wasRemoved ? ` · <span class="warn">${t('wcześniej usunięty')}</span>` : ''}${r.rejected ? ' · ' + t('odrzucona {n}×', { n: r.rejected }) : ''}`,
     btn('req-approve', r.id, 'Przyjmij', 'primary') + btn('req-reject', r.id, 'Odrzuć'))).join('')}</ul>`
-    : `<p class="muted small">Brak oczekujących próśb. Prośba wygasa po 7 dniach.</p>`}
-    <h3>Dodaj do klubu po nicku</h3>
+    : `<p class="muted small">${t('Brak oczekujących próśb. Prośba wygasa po 7 dniach.')}</p>`}
+    <h3>${t('Dodaj do klubu po nicku')}</h3>
     <form data-form="invite-nick" class="inline-form" autocomplete="off">
-      <input id="invite-nick" type="text" maxlength="20" autocapitalize="off" spellcheck="false" placeholder="Nick konta" aria-label="Nick konta do zaproszenia">
-      <button type="submit" class="btn small">Zaproś</button>
+      <input id="invite-nick" type="text" maxlength="20" autocapitalize="off" spellcheck="false" placeholder="${t('Nick konta')}" aria-label="${t('Nick konta do zaproszenia')}">
+      <button type="submit" class="btn small">${t('Zaproś')}</button>
     </form>
-    <p class="muted small">Zaproszony wchodzi jednym kliknięciem w „Moich klubach”, bez kodu. Zaproszenie zdejmuje blokadę.</p>
+    <p class="muted small">${t('Zaproszony wchodzi jednym kliknięciem w „Moich klubach”, bez kodu. Zaproszenie zdejmuje blokadę.')}</p>
     ${d.invites?.length ? `<ul class="friend-list">${d.invites.map((i) => row(i.nick, `zaproszony ${day(i.at)}`, btn('invite-cancel', i.id, 'Anuluj'))).join('')}</ul>` : ''}
-    <h3>Zablokowani w klubie</h3>
-    ${d.blocked?.length ? `<ul class="friend-list">${d.blocked.map((b) => row(b.nick, b.reason === 'removed' ? 'usunięty z klubu' : 'prośby odrzucone 2×', btn('member-unblock', b.id, 'Odblokuj'))).join('')}</ul>`
-    : `<p class="muted small">Nikt nie jest zablokowany.</p>`}
+    <h3>${t('Zablokowani w klubie')}</h3>
+    ${d.blocked?.length ? `<ul class="friend-list">${d.blocked.map((b) => row(b.nick, b.reason === 'removed' ? t('usunięty z klubu') : t('prośby odrzucone 2×'),btn('member-unblock', b.id, 'Odblokuj'))).join('')}</ul>`
+    : `<p class="muted small">${t('Nikt nie jest zablokowany.')}</p>`}
   </section>`;
 }
 
@@ -2084,10 +2191,10 @@ function viewCoach() {
     ? d.ongoing.map((g) => `
       <button class="row" data-action="coach-watch" data-id="${esc(g.id)}">
         <span class="row-main">${esc(g.white)} – ${esc(g.black)}</span>
-        <span class="row-sub">${esc(SPEED_PL[g.speed] || g.speed)} ${esc(g.label)} · ${g.plies} półruchów${g.rated ? '' : ' · towarzyska'}</span>
-        <span class="pill">Podgląd</span>
+        <span class="row-sub">${esc(speedPl(g.speed))} ${esc(g.label)} · ${g.plies} ${t('półruchów')}${g.rated ? '' : ' ' + t('· towarzyska') + ''}</span>
+        <span class="pill">${t('Podgląd')}</span>
       </button>`).join('')
-    : `<p class="muted small">Nikt teraz nie gra.</p>`;
+    : `<p class="muted small">${t('Nikt teraz nie gra.')}</p>`;
   const myRole = S.provider.me?.role;
   const meId = S.user?.id;
   const ROLE_PL = { owner: 'założyciel', admin: 'admin' };
@@ -2095,40 +2202,40 @@ function viewCoach() {
   const manage = (m) => {
     if (m.id === meId || m.role === 'owner') return '';
     const b = [];
-    if (myRole === 'owner') b.push(`<button class="link small" data-action="member-role" data-id="${esc(m.id)}" data-role="${m.role === 'admin' ? 'member' : 'admin'}">${m.role === 'admin' ? 'odbierz admina' : 'zrób adminem'}</button>`);
-    if (myRole === 'owner' || m.role !== 'admin') b.push(`<button class="link small danger-text" data-action="member-remove" data-id="${esc(m.id)}" data-nick="${esc(m.nick)}">usuń</button>`);
+    if (myRole === 'owner') b.push(`<button class="link small" data-action="member-role" data-id="${esc(m.id)}" data-role="${m.role === 'admin' ? 'member' : 'admin'}">${m.role === 'admin' ? t('odbierz admina') : t('zrób adminem')}</button>`);
+    if (myRole === 'owner' || m.role !== 'admin') b.push(`<button class="link small danger-text" data-action="member-remove" data-id="${esc(m.id)}" data-nick="${esc(m.nick)}">${t('usuń')}</button>`);
     return b.join(' · ');
   };
   const players = d ? `
     <div class="scroll"><table class="coach-table">
-      <tr><th>Gracz</th><th>Partie</th><th>W</th><th>R</th><th>P</th><th>Ostatnia</th><th></th></tr>
-      ${d.members.map((m) => `<tr><td><span class="dot ${m.online ? 'on' : 'off'}"></span>${esc(m.nick)}${ROLE_PL[m.role] ? ` <span class="muted small">(${ROLE_PL[m.role]})</span>` : ''}</td>
+      <tr><th>${t('Gracz')}</th><th>${t('Partie')}</th><th>W</th><th>R</th><th>P</th><th>${t('Ostatnia')}</th><th></th></tr>
+      ${d.members.map((m) => `<tr><td><span class="dot ${m.online ? 'on' : 'off'}"></span>${esc(m.nick)}${ROLE_PL[m.role] ? ` <span class="muted small">(${t(ROLE_PL[m.role])})</span>` : ''}</td>
         <td>${m.games}</td><td>${m.wins}</td><td>${m.draws}</td><td>${m.losses}</td><td>${ago(m.last)}</td><td class="nowrap">${manage(m)}</td></tr>`).join('')}
     </table></div>
-    <p class="muted small">W — wygrane, R — remisy, P — przegrane. Liczą się zakończone partie (rankingowe i towarzyskie).
-      ${myRole === 'owner' ? 'Admin może przeglądać partie i usuwać członków.' : ''} Usunięta osoba nie wróci do klubu, dopóki jej nie odblokujesz (lista „Zablokowani w klubie”).</p>` : '';
+    <p class="muted small">${t('W — wygrane, R — remisy, P — przegrane. Liczą się zakończone partie (rankingowe i towarzyskie).')}
+      ${myRole === 'owner' ? t('Admin może przeglądać partie i usuwać członków.') : ''} ${t('Usunięta osoba nie wróci do klubu, dopóki jej nie odblokujesz (lista „Zablokowani w klubie”).')}</p>` : '';
   const hist = (S.roomHistory || []).filter((g) => g.status !== 'aborted' && g.status !== 'noStart');
   const games = hist.length ? `<ul class="hist-list">${hist.map((g) => `
       <li>
         <span class="hist-players">${esc(g.white)} – ${esc(g.black)}</span>
         <span class="hist-res">${RESULT_PL[g.winner] || '½–½'}</span>
-        <span class="muted small">${esc(g.label)} · ${g.plies} półruchów · ${new Date(g.endedAt).toLocaleDateString('pl-PL')}
+        <span class="muted small">${esc(g.label)} · ${g.plies} ${t('półruchów ·')} ${new Date(g.endedAt).toLocaleDateString('pl-PL')}
           · <button class="link small" data-action="game-analysis" data-id="${esc(g.id)}">analiza</button>
           · <button class="link small" data-action="game-pgn" data-id="${esc(g.id)}">PGN</button></span>
-      </li>`).join('')}</ul>` : `<p class="muted small">Jeszcze nie rozegrano żadnej partii.</p>`;
+      </li>`).join('')}</ul>` : `<p class="muted small">${t('Jeszcze nie rozegrano żadnej partii.')}</p>`;
   return `
   <main class="lobby">
-    <header class="g-top"><button class="btn small" data-action="coach-close">← Klub</button>
-      <div class="g-meta">Panel trenera · ${esc(S.provider.roomName)}</div>
-      <button class="icon-btn" data-action="coach-refresh" aria-label="Odśwież">↻</button></header>
+    <header class="g-top"><button class="btn small" data-action="coach-close">${t('← Klub')}</button>
+      <div class="g-meta">${t('Panel trenera ·')} ${esc(S.provider.roomName)}</div>
+      <button class="icon-btn" data-action="coach-refresh" aria-label="${t('Odśwież')}">↻</button></header>
     ${c.error ? `<p class="error">${esc(c.error)}</p>` : ''}
     ${c.loading && !d ? '<p class="muted">Wczytywanie…</p>' : ''}
-    <section class="card"><h2>Trwające partie</h2>${ongoing}
-      <p class="muted small">Podgląd na żywo: ruchy, zegary i pozycja. Gracze nie widzą, że oglądasz.</p></section>
+    <section class="card"><h2>${t('Trwające partie')}</h2>${ongoing}
+      <p class="muted small">${t('Podgląd na żywo: ruchy, zegary i pozycja. Gracze nie widzą, że oglądasz.')}</p></section>
     ${d ? viewMembership(d, myRole) : ''}
-    <section class="card"><h2>Gracze</h2>${players}</section>
-    <section class="card"><h2>Rozegrane partie</h2>${games}
-      ${hist.length ? `<button class="btn small" data-action="room-pgn">Pobierz wszystkie partie (PGN)</button>` : ''}</section>
+    <section class="card"><h2>${t('Gracze')}</h2>${players}</section>
+    <section class="card"><h2>${t('Rozegrane partie')}</h2>${games}
+      ${hist.length ? `<button class="btn small" data-action="room-pgn">${t('Pobierz wszystkie partie (PGN)')}</button>` : ''}</section>
   </main>`;
 }
 
@@ -2142,7 +2249,7 @@ function viewHistory(G) {
   }
   return `
     <details class="history" ${S.historyOpen ? 'open' : ''} data-action="history-toggle">
-      <summary>Zapis partii (${G.history.length} pół­ruchów)</summary>
+      <summary>${t('Zapis partii (')}${G.history.length} ${t('pół­ruchów)')}</summary>
       <ol class="hlist">${rows.join('')}</ol>
     </details>`;
 }
@@ -2154,7 +2261,7 @@ function viewWaiting() {
     <div class="dialog">
       <div class="spinner" aria-hidden="true"></div>
       <p>${esc(S.waiting.text)}</p>
-      ${S.waiting.cancel ? `<button class="btn" data-action="cancel-wait">Anuluj</button>` : ''}
+      ${S.waiting.cancel ? `<button class="btn" data-action="cancel-wait">${t('Anuluj')}</button>` : ''}
     </div>
   </div>`;
 }
@@ -2181,52 +2288,52 @@ function viewModal() {
       <form data-form="prompt" autocomplete="off">
         <label class="field">${esc(m.label || '')}<input id="prompt-input" type="${m.type || 'text'}" autocomplete="${m.autocomplete || 'off'}" value="${esc(m.value || '')}"></label>
         <div class="row-actions end">
-          <button type="button" class="btn" data-action="modal-close">Anuluj</button>
+          <button type="button" class="btn" data-action="modal-close">${t('Anuluj')}</button>
           <button type="submit" class="btn primary">${esc(m.okLabel || 'Zapisz')}</button>
         </div>
       </form>`;
   } else if (m.kind === 'settings') {
-    const t = (key, label, sub) => `
+    const tog = (key, label, sub) => `
       <label class="toggle"><input type="checkbox" data-action="setting" data-key="${key}" ${S.settings[key] ? 'checked' : ''}>
-        <span>${label}${sub ? `<br><span class="muted small">${sub}</span>` : ''}</span></label>`;
+        <span>${t(label)}${sub ? `<br><span class="muted small">${t(sub)}</span>` : ''}</span></label>`;
     body = `
-      <h2>Ustawienia</h2>
-      ${t('speech', 'Czytaj ruch rywala na głos', 'Po polsku, jeśli urządzenie ma polski głos.')}
-      ${t('sound', 'Krótki dźwięk przy ruchu rywala')}
-      ${t('vibrate', 'Wibracja przy ruchu rywala', 'Działa na Androidzie.')}
-      ${t('sanEntry', 'Wpisuję ruch notacją (np. Nf3, exd5, O-O)', 'Oficjalny zapis turniejowy. Wyłączone = pole startowe i docelowe (e2 e4).')}
-      ${t('englishNotation', 'Angielskie litery figur: K Q R B N', 'Jak na turniejach i w Lichess. Wyłączone = polskie: K H W G S (ruch rywala, zapis partii, przyciski).')}
-      ${t('autoSend', 'Wysyłaj ruch od razu po wpisaniu', 'Bez przycisku „Wyślij”. Szybciej, ale łatwiej o pomyłkę.')}
-      ${t('emergencyBoard', 'Awaryjny podgląd pozycji w menu partii', 'Na wypadek pomyłki przy przestawianiu bierek.')}
-      ${t('learnMode', 'Tryb nauki: podpowiedzi przy wpisywaniu ruchu', 'Tylko w partiach towarzyskich: pokazuje pasujące ruchy i opis. W rankingowych podpowiedzi nie ma nigdy.')}
-      ${S.provider?.chat ? t('readChat', 'Czytaj na głos wiadomości rywala (czat Lichess)') : ''}
-      <div class="row-actions end"><button class="btn primary" data-action="modal-close">Gotowe</button></div>`;
+      <h2>${t('Ustawienia')}</h2>
+      ${tog('speech', 'Czytaj ruch rywala na głos', 'Po polsku, jeśli urządzenie ma polski głos.')}
+      ${tog('sound', 'Krótki dźwięk przy ruchu rywala')}
+      ${tog('vibrate', 'Wibracja przy ruchu rywala', 'Działa na Androidzie.')}
+      ${tog('sanEntry', 'Wpisuję ruch notacją (np. Nf3, exd5, O-O)', 'Oficjalny zapis turniejowy. Wyłączone = pole startowe i docelowe (e2 e4).')}
+      ${tog('englishNotation', 'Angielskie litery figur: K Q R B N', 'Jak na turniejach i w Lichess. Wyłączone = polskie: K H W G S (ruch rywala, zapis partii, przyciski).')}
+      ${tog('autoSend', 'Wysyłaj ruch od razu po wpisaniu', 'Bez przycisku „Wyślij”. Szybciej, ale łatwiej o pomyłkę.')}
+      ${tog('emergencyBoard', 'Awaryjny podgląd pozycji w menu partii', 'Na wypadek pomyłki przy przestawianiu bierek.')}
+      ${tog('learnMode', 'Tryb nauki: podpowiedzi przy wpisywaniu ruchu', 'Tylko w partiach towarzyskich: pokazuje pasujące ruchy i opis. W rankingowych podpowiedzi nie ma nigdy.')}
+      ${S.provider?.chat ? tog('readChat', 'Czytaj na głos wiadomości rywala (czat Lichess)') : ''}
+      <div class="row-actions end"><button class="btn primary" data-action="modal-close">${t('Gotowe')}</button></div>`;
   } else if (m.kind === 'game-menu') {
     body = `
-      <h2>Partia</h2>
+      <h2>${t('Partia')}</h2>
       <div class="stack">
-        ${S.settings.emergencyBoard ? `<button class="btn" data-action="show-board">Awaryjny podgląd pozycji</button>` : ''}
-        <button class="btn" data-action="settings">Ustawienia</button>
-        <button class="btn" data-action="modal-close">Zamknij</button>
+        ${S.settings.emergencyBoard ? `<button class="btn" data-action="show-board">${t('Awaryjny podgląd pozycji')}</button>` : ''}
+        <button class="btn" data-action="settings">${t('Ustawienia')}</button>
+        <button class="btn" data-action="modal-close">${t('Zamknij')}</button>
       </div>`;
   } else if (m.kind === 'board') {
-    body = `<h2>Pozycja w partii</h2><p class="muted small">Sprawdź i popraw ustawienie bierek na swojej szachownicy.</p>${boardHtml()}
-      <div class="row-actions end"><button class="btn primary" data-action="modal-close">Zamknij</button></div>`;
+    body = `<h2>${t('Pozycja w partii')}</h2><p class="muted small">${t('Sprawdź i popraw ustawienie bierek na swojej szachownicy.')}</p>${boardHtml()}
+      <div class="row-actions end"><button class="btn primary" data-action="modal-close">${t('Zamknij')}</button></div>`;
   } else if (m.kind === 'token') {
     const url = S.provider?.tokenCreateUrl?.() || new LichessProvider().tokenCreateUrl();
     body = `
-      <h2>Logowanie tokenem</h2>
-      <p class="small">Przydaje się, gdy zwykłe logowanie nie wraca do aplikacji (np. na iPhonie po dodaniu do ekranu głównego).</p>
+      <h2>${t('Logowanie tokenem')}</h2>
+      <p class="small">${t('Przydaje się, gdy zwykłe logowanie nie wraca do aplikacji (np. na iPhonie po dodaniu do ekranu głównego).')}</p>
       <ol class="small">
-        <li><a href="${esc(url)}" target="_blank" rel="noopener">Utwórz token na Lichess</a> (uprawnienie „Play games with the board API” jest już zaznaczone).</li>
-        <li>Skopiuj token i wklej go poniżej.</li>
+        <li><a href="${esc(url)}" target="_blank" rel="noopener">${t('Utwórz token na Lichess')}</a> ${t('(uprawnienie „Play games with the board API” jest już zaznaczone).')}</li>
+        <li>${t('Skopiuj token i wklej go poniżej.')}</li>
       </ol>
-      <label class="field">Token
-        <input id="token-input" type="password" autocomplete="off" spellcheck="false" placeholder="lip_…">
+      <label class="field">${t('Token')}
+        <input id="token-input" type="password" autocomplete="off" spellcheck="false" placeholder="${t('lip_…')}">
       </label>
       <div class="row-actions end">
-        <button class="btn" data-action="modal-close">Anuluj</button>
-        <button class="btn primary" data-action="token-save">Zaloguj</button>
+        <button class="btn" data-action="modal-close">${t('Anuluj')}</button>
+        <button class="btn primary" data-action="token-save">${t('Zaloguj')}</button>
       </div>`;
   } else if (m.kind === 'room') {
     const p = S.provider;
@@ -2235,75 +2342,97 @@ function viewModal() {
     const room = p.room || {};
     const owner = me.role === 'owner';
     const accountPart = p.isPublic
-      ? `<p class="small">Konto: <strong>${esc(S.user?.name || '')}</strong>${me.hasPassword ? ' · zabezpieczone hasłem' : ' · <span class="warn">bez hasła</span>'}${me.email ? `<br><span class="muted">E-mail: ${esc(me.email)}</span>` : ''}</p>
-         ${me.hasPassword ? '' : `<p class="note small">Bez hasła konto i ranking są tylko na tym urządzeniu. Ustaw hasło, żeby logować się na każdym urządzeniu.</p>`}
-         <div class="row-actions"><button class="btn small ${me.hasPassword ? '' : 'primary'}" data-action="secure-open">${me.hasPassword ? 'Zmień hasło lub e-mail' : 'Ustaw hasło'}</button></div>`
-      : `<p class="small">Kod klubu — podaj go osobom, z którymi chcesz grać:</p>
+      ? `<p class="small">${t('Konto:')} <strong>${esc(S.user?.name || '')}</strong>${me.hasPassword ? ' ' + t('· zabezpieczone hasłem') + '' : ` · <span class="warn">${t('bez hasła')}</span>`}${me.email ? `<br><span class="muted">${t('E-mail:')} ${esc(me.email)}</span>` : ''}</p>
+         ${me.hasPassword ? '' : `<p class="note small">${t('Bez hasła konto i ranking są tylko na tym urządzeniu. Ustaw hasło, żeby logować się na każdym urządzeniu.')}</p>`}
+         <div class="row-actions"><button class="btn small ${me.hasPassword ? '' : 'primary'}" data-action="secure-open">${me.hasPassword ? t('Zmień hasło lub e-mail') : t('Ustaw hasło')}</button></div>`
+      : `<p class="small">${t('Kod klubu — podaj go osobom, z którymi chcesz grać:')}</p>
       <div class="club-code" id="club-code-show">${esc(p.roomCode)}</div>
-      <input class="link-box" id="invite-link" type="text" readonly value="${esc(link || '')}" aria-label="Link do klubu">
+      <input class="link-box" id="invite-link" type="text" readonly value="${esc(link || '')}" aria-label="${t('Link do klubu')}">
       <div class="row-actions">
-        <button class="btn small primary" data-action="share-invite">Udostępnij link</button>
-        <button class="btn small" data-action="copy-code">Kopiuj kod</button>
+        <button class="btn small primary" data-action="share-invite">${t('Udostępnij link')}</button>
+        <button class="btn small" data-action="copy-code">${t('Kopiuj kod')}</button>
       </div>
-      <p class="muted small">Kod i link otwierają klub każdemu, kto je ma — wysyłaj tylko swoim.${room.hasPassword ? ' Do dołączenia potrzebne jest też hasło klubu.' : ''}</p>
-      ${owner ? `<h3>Dostęp do klubu</h3>
+      <p class="muted small">${t('Kod i link otwierają klub każdemu, kto je ma — wysyłaj tylko swoim.')}${room.hasPassword ? ' ' + t('Do dołączenia potrzebne jest też hasło klubu.') + '' : ''}</p>
+      ${owner ? `<h3>${t('Dostęp do klubu')}</h3>
         <div class="row-actions">
-          <button class="btn small" data-action="club-recode">Zmień kod</button>
-          <button class="btn small" data-action="club-password">${room.hasPassword ? 'Zmień lub usuń hasło klubu' : 'Ustaw hasło klubu'}</button>
+          <button class="btn small" data-action="club-recode">${t('Zmień kod')}</button>
+          <button class="btn small" data-action="club-password">${room.hasPassword ? t('Zmień lub usuń hasło klubu') : t('Ustaw hasło klubu')}</button>
         </div>
-        <p class="muted small">Po zmianie kodu stary kod i link przestają działać; obecni członkowie zostają.</p>` : ''}
-      <p class="small">Nowi członkowie: <strong>${room.approve ? 'czekają na zatwierdzenie' : 'wchodzą od razu po kodzie'}</strong>${me.role === 'owner' || me.role === 'admin' ? ' · <button class="link small" data-action="coach-open">prośby i zaproszenia w panelu trenera</button>' : ''}.</p>`;
+        <p class="muted small">${t('Po zmianie kodu stary kod i link przestają działać; obecni członkowie zostają.')}</p>` : ''}
+      <p class="small">${t('Nowi członkowie:')} <strong>${room.approve ? t('czekają na zatwierdzenie') : t('wchodzą od razu po kodzie')}</strong>${me.role === 'owner' || me.role === 'admin' ? ` · <button class="link small" data-action="coach-open">${t('prośby i zaproszenia w panelu trenera')}</button>` : ''}.</p>`;
     const forget = p.isPublic
       ? (me.hasPassword
-        ? `<button class="btn small" data-action="account-logout">Wyloguj z tego urządzenia</button>`
-        : `<button class="btn small danger" data-action="room-forget">Usuń konto z tego urządzenia</button>`)
-      : `${owner ? '' : `<button class="btn small danger" data-action="club-leave">Opuść klub</button>`}
-         <button class="btn small" data-action="room-forget">Usuń z tego urządzenia</button>`;
+        ? `<button class="btn small" data-action="account-logout">${t('Wyloguj z tego urządzenia')}</button>`
+        : `<button class="btn small danger" data-action="room-forget">${t('Usuń konto z tego urządzenia')}</button>`)
+      : `${owner ? '' : `<button class="btn small danger" data-action="club-leave">${t('Opuść klub')}</button>`}
+         <button class="btn small" data-action="room-forget">${t('Usuń z tego urządzenia')}</button>`;
     const devices = p.isPublic ? `
-      <h3>${PASSKEY_NAME}</h3>
-      ${me.passkeys ? `<p class="small">Włączone (${me.passkeys} ${me.passkeys === 1 ? 'klucz' : 'klucze'}). Logujesz się jednym dotknięciem; hasło zostaje jako zapas.</p>
-        <div class="row-actions">${passkeySupported() ? '<button class="btn small" data-action="passkey-add">Dodaj na tym urządzeniu</button>' : ''}<button class="btn small" data-action="passkeys-remove">Usuń klucze</button></div>`
-    : passkeySupported() ? `<p class="small">Logowanie Face ID, odciskiem palca albo PIN-em urządzenia — bez wpisywania hasła.</p>
-        <div class="row-actions"><button class="btn small primary" data-action="passkey-add">Włącz na tym urządzeniu</button></div>`
-      : '<p class="muted small">Ta przeglądarka nie obsługuje kluczy dostępu.</p>'}
-      <h3>Inne urządzenia</h3>
-      <p class="small">Na innym urządzeniu zaloguj się nickiem i hasłem — kluby i ranking wrócą same. Na komputerze możesz też kliknąć „Zaloguj telefonem” i zeskanować kod tutaj.</p>
-      <div class="row-actions"><button class="btn small" data-action="qr-scan">📷 Zaloguj komputer</button>
-        <button class="btn small" data-action="logout-all">Wyloguj wszystkie urządzenia</button></div>`
-      : `<h3>Inne urządzenie</h3><p class="small">Zaloguj się tam na swoje konto — klub będzie w „Moich klubach”.</p>`;
+      <h3>${t(PASSKEY_NAME)}</h3>
+      ${me.passkeys ? `<p class="small">${tn(me.passkeys, 'Włączone ({n} klucz).|Włączone ({n} klucze).|Włączone ({n} kluczy).')} ${t('Logujesz się jednym dotknięciem; hasło zostaje jako zapas.')}</p>
+        <div class="row-actions">${passkeySupported() ? `<button class="btn small" data-action="passkey-add">${t('Dodaj na tym urządzeniu')}</button>` : ''}<button class="btn small" data-action="passkeys-remove">${t('Usuń klucze')}</button></div>`
+    : passkeySupported() ? `<p class="small">${t('Logowanie Face ID, odciskiem palca albo PIN-em urządzenia — bez wpisywania hasła.')}</p>
+        <div class="row-actions"><button class="btn small primary" data-action="passkey-add">${t('Włącz na tym urządzeniu')}</button></div>`
+      : `<p class="muted small">${t('Ta przeglądarka nie obsługuje kluczy dostępu.')}</p>`}
+      <h3>${t('Inne urządzenia')}</h3>
+      <p class="small">${t('Na innym urządzeniu zaloguj się nickiem i hasłem — kluby i ranking wrócą same. Na komputerze możesz też kliknąć „Zaloguj telefonem” i zeskanować kod tutaj.')}</p>
+      <div class="row-actions"><button class="btn small" data-action="qr-scan">${t('📷 Zaloguj komputer')}</button>
+        <button class="btn small" data-action="logout-all">${t('Wyloguj wszystkie urządzenia')}</button></div>
+      <h3>${t('Usunięcie konta')}</h3>
+      <p class="small">${t('Usuwa konto i wszystkie Twoje dane. Rozegrane partie zostaną u rywali z nickiem „usunięty gracz”.')}</p>
+      <div class="row-actions"><button class="btn small danger" data-action="delete-account">${t('Usuń konto…')}</button></div>`
+      : `<h3>${t('Inne urządzenie')}</h3><p class="small">${t('Zaloguj się tam na swoje konto — klub będzie w „Moich klubach”.')}</p>`;
     body = `
-      <h2>${p.isPublic ? 'Twoje konto' : `Klub „${esc(p.roomName)}”`}</h2>
+      <h2>${p.isPublic ? t('Twoje konto') : t('Klub „{roomName}”', { roomName: esc(p.roomName) })}</h2>
       ${accountPart}
       ${devices}
       <div class="row-actions end">
         ${forget}
-        <button class="btn primary" data-action="modal-close">Gotowe</button>
+        <button class="btn primary" data-action="modal-close">${t('Gotowe')}</button>
       </div>`;
+  } else if (m.kind === 'delete-account') {
+    const clubs = m.clubs || [];
+    body = m.loading ? `<h2>${t('Usuń konto')}</h2><p class="muted">${t('Wczytywanie…')}</p>` : `
+      <h2>${t('Usunąć konto')} ${esc(S.user?.name || '')}?</h2>
+      <p class="small">${t('Usuniemy od razu: nick, hasło, e-mail, klucze Face ID, logowania na wszystkich urządzeniach, znajomych, blokady, ranking i członkostwo w klubach. Rozegrane partie zostaną u rywali i w klubach z nickiem „usunięty gracz”. Z kopii zapasowych serwera dane znikną w ciągu 30 dni. Tego nie da się cofnąć.')}</p>
+      ${clubs.length ? `<h3>${t('Twoje kluby')}</h3><p class="small">${t('Jesteś założycielem — zdecyduj, co z każdym klubem:')}</p>
+        ${clubs.map((c) => `<label class="field">${esc(c.name)}
+          <select id="del-club-${esc(c.room)}">
+            <option value="">${t('— wybierz —')}</option>
+            <option value="delete">${t('Usuń klub całkowicie (wszyscy członkowie go stracą)')}</option>
+            ${c.members.map((x) => `<option value="${esc(x.id)}">${t('Przekaż:')} ${esc(x.nick)}${x.role === 'admin' ? ' (admin)' : ''}</option>`).join('')}
+          </select></label>`).join('')}` : ''}
+      <form data-form="delete-account" autocomplete="off">
+        <label class="field">${t('Hasło (potwierdzenie)')}<input id="del-pass" type="password" autocomplete="current-password"></label>
+        <div class="row-actions end">
+          <button type="button" class="btn" data-action="modal-close">${t('Anuluj')}</button>
+          <button type="submit" class="btn danger">${t('Usuń konto na zawsze')}</button>
+        </div>
+      </form>`;
   } else if (m.kind === 'qr-scan') {
     body = `
-      <h2>Zaloguj komputer</h2>
-      <p class="small">Na komputerze kliknij „Zaloguj telefonem” i skieruj aparat na kod QR.</p>
+      <h2>${t('Zaloguj komputer')}</h2>
+      <p class="small">${t('Na komputerze kliknij „Zaloguj telefonem” i skieruj aparat na kod QR.')}</p>
       ${S.scanError ? `<p class="note small">${esc(S.scanError)}</p>` : '<video id="qr-video" class="qr-video" playsinline muted></video>'}
       <form data-form="qr-code" class="inline-form" autocomplete="off">
-        <input id="qr-code" type="text" maxlength="8" autocapitalize="characters" spellcheck="false" placeholder="albo wpisz kod, np. K7M2QX" aria-label="Kod z ekranu komputera">
-        <button type="submit" class="btn small">Dalej</button>
+        <input id="qr-code" type="text" maxlength="8" autocapitalize="characters" spellcheck="false" placeholder="${t('albo wpisz kod, np. K7M2QX')}" aria-label="${t('Kod z ekranu komputera')}">
+        <button type="submit" class="btn small">${t('Dalej')}</button>
       </form>
-      <div class="row-actions end"><button class="btn" data-action="qr-scan-close">Zamknij</button></div>`;
+      <div class="row-actions end"><button class="btn" data-action="qr-scan-close">${t('Zamknij')}</button></div>`;
   } else if (m.kind === 'secure') {
     const me = S.provider?.me || {};
     body = `
-      <h2>${me.hasPassword ? 'Zmień hasło lub e-mail' : 'Zabezpiecz konto'}</h2>
-      <p class="small">Logujesz się nickiem <strong>${esc(S.user?.name || '')}</strong> i hasłem. Ranking zostaje.</p>
+      <h2>${me.hasPassword ? t('Zmień hasło lub e-mail') : t('Zabezpiecz konto')}</h2>
+      <p class="small">${t('Logujesz się nickiem')} <strong>${esc(S.user?.name || '')}</strong> ${t('i hasłem. Ranking zostaje.')}</p>
       <form data-form="secure" method="post" action="#">
       <input type="text" name="username" autocomplete="username" value="${esc(S.user?.name || '')}" hidden>
-      ${me.hasPassword ? `<label class="field">Obecne hasło <span class="muted">(tylko przy zmianie hasła)</span><input id="sec-old" type="password" autocomplete="current-password"></label>` : ''}
-      <label class="field">${me.hasPassword ? 'Nowe hasło (puste = bez zmiany)' : 'Hasło (min. 8 znaków)'}<input id="sec-pass" name="password" type="password" autocomplete="new-password"></label>
-      <p class="muted small">Użyj hasła, którego nie używasz nigdzie indziej. ${me.hasPassword ? 'Po zmianie hasła inne urządzenia zostaną wylogowane.' : ''}</p>
-      <label class="field">E-mail <span class="muted">(nieobowiązkowy — do odzyskania hasła)</span>
+      ${me.hasPassword ? `<label class="field">${t('Obecne hasło')} <span class="muted">${t('(tylko przy zmianie hasła)')}</span><input id="sec-old" type="password" autocomplete="current-password"></label>` : ''}
+      <label class="field">${me.hasPassword ? t('Nowe hasło (puste = bez zmiany)') : t('Hasło (min. 8 znaków)')}<input id="sec-pass" name="password" type="password" autocomplete="new-password"></label>
+      <p class="muted small">${t('Użyj hasła, którego nie używasz nigdzie indziej.')} ${me.hasPassword ? t('Po zmianie hasła inne urządzenia zostaną wylogowane.') : ''}</p>
+      <label class="field">E-mail <span class="muted">${t('(nieobowiązkowy — do odzyskania hasła)')}</span>
         <input id="sec-email" type="email" autocomplete="email" inputmode="email" value="${esc(me.email || '')}" placeholder="adres@e-mail.pl"></label>
       <div class="row-actions end">
-        <button type="button" class="btn" data-action="modal-close">Anuluj</button>
-        <button type="submit" class="btn primary">Zapisz</button>
+        <button type="button" class="btn" data-action="modal-close">${t('Anuluj')}</button>
+        <button type="submit" class="btn primary">${t('Zapisz')}</button>
       </div>
       </form>`;
   }
@@ -2385,12 +2514,12 @@ app.addEventListener('click', async (e) => {
   if (a === 'history-toggle' || a === 'room-history' || a === 'rated' || a === 'setting' || a === 'approval' || a === 'near') return; // obsługiwane przez 'change'/'toggle'
   switch (a) {
     case 'login':
-      try { await new LichessProvider().login(); } catch (err) { S.startError = 'Nie udało się rozpocząć logowania: ' + err.message; render(); }
+      try { await new LichessProvider().login(); } catch (err) { S.startError = '' + t('Nie udało się rozpocząć logowania:') + ' ' + err.message; render(); }
       break;
     case 'token-login': S.modal = { kind: 'token' }; render(); break;
     case 'token-save': {
       const v = (document.getElementById('token-input')?.value || '').trim();
-      if (!/^[A-Za-z0-9_]{10,}$/.test(v)) { toast('To nie wygląda na token Lichess.'); break; }
+      if (!/^[A-Za-z0-9_]{10,}$/.test(v)) { toast(t('To nie wygląda na token Lichess.')); break; }
       const p = new LichessProvider();
       p.setToken(v);
       S.modal = null;
@@ -2402,12 +2531,12 @@ app.addEventListener('click', async (e) => {
     case 'lichess-resume': S.startError = ''; await enterWith(new LichessProvider()); break;
     case 'lichess-logout':
       confirmModal({
-        title: 'Wylogować z Lichess?', text: 'Aplikacja straci dostęp do Twojego konta Lichess na tym urządzeniu.', okLabel: 'Wyloguj',
+        title: t('Wylogować z Lichess?'), text: t('Aplikacja straci dostęp do Twojego konta Lichess na tym urządzeniu.'), okLabel: t('Wyloguj'),
         onOk: async () => { await new LichessProvider().logout(); render(); },
       });
       break;
     case 'logout':
-      confirmModal({ title: 'Wylogować?', text: S.provider?.isDemo ? 'Zakończysz tryb demo.' : 'Aplikacja straci dostęp do Twojego konta Lichess na tym urządzeniu.', okLabel: 'Wyloguj', onOk: logout });
+      confirmModal({ title: t('Wylogować?'), text: S.provider?.isDemo ? t('Zakończysz tryb demo.') : t('Aplikacja straci dostęp do Twojego konta Lichess na tym urządzeniu.'), okLabel: t('Wyloguj'), onOk: logout });
       break;
     // --- wariant B: pokoje ---
     case 'room-new':
@@ -2434,20 +2563,29 @@ app.addEventListener('click', async (e) => {
     case 'qr-cancel': stopQrLogin(); S.qr = null; S.view = 'start'; render(); break;
     case 'qr-scan': S.modal = null; await openQrScanner(); break;
     case 'qr-scan-close': closeScanner(); render(); break;
+    case 'friend-link': await shareFriendLink(); break;
+    case 'lang-open': S.langOpen = !S.langOpen; render(); break;
+    case 'lang-set':
+      S.langOpen = false;
+      await setLang(id);
+      pickVoice();
+      render();
+      break;
+    case 'delete-account': await openDeleteAccount(); break;
     case 'passkey-login': await loginWithPasskey(); break;
     case 'passkey-add': await addPasskey(); break;
     case 'passkeys-remove':
       confirmModal({
-        title: 'Usunąć klucze dostępu?', text: 'Logowanie Face ID / odciskiem palca przestanie działać na wszystkich urządzeniach. Zostaje hasło.',
-        okLabel: 'Usuń', danger: true,
-        onOk: async () => { try { await S.provider.passkeysRemove(); toast('Usunięto klucze dostępu.'); render(); } catch (err) { toast(err.message); } },
+        title: t('Usunąć klucze dostępu?'), text: t('Logowanie Face ID / odciskiem palca przestanie działać na wszystkich urządzeniach. Zostaje hasło.'),
+        okLabel: t('Usuń'), danger: true,
+        onOk: async () => { try { await S.provider.passkeysRemove(); toast(t('Usunięto klucze dostępu.')); render(); } catch (err) { toast(err.message); } },
       });
       break;
     case 'logout-all':
       confirmModal({
-        title: 'Wylogować wszystkie urządzenia?', text: 'Wszystkie inne telefony i komputery zostaną wylogowane z konta i klubów. To urządzenie zostaje zalogowane, a kluby otworzysz ponownie jednym kliknięciem.',
-        okLabel: 'Wyloguj wszystkie', danger: true,
-        onOk: async () => { try { await S.provider.logoutAll(); forgetAllClubs(); toast('Wylogowano wszystkie inne urządzenia.', 5000); } catch (err) { toast(err.message); } },
+        title: t('Wylogować wszystkie urządzenia?'), text: t('Wszystkie inne telefony i komputery zostaną wylogowane z konta i klubów. To urządzenie zostaje zalogowane, a kluby otworzysz ponownie jednym kliknięciem.'),
+        okLabel: t('Wyloguj wszystkie'), danger: true,
+        onOk: async () => { try { await S.provider.logoutAll(); forgetAllClubs(); toast(t('Wylogowano wszystkie inne urządzenia.'), 5000); } catch (err) { toast(err.message); } },
       });
       break;
     case 'account-menu': {
@@ -2469,16 +2607,16 @@ app.addEventListener('click', async (e) => {
     case 'friend-block': {
       const p = findPerson(id);
       confirmModal({
-        title: `Zablokować ${p?.nick || 'gracza'}?`, text: 'Nie będzie mógł Cię wyzwać ani zaprosić do znajomych. Zniknie z Twoich znajomych i ostatnich rywali. Nie dowie się o blokadzie.',
-        okLabel: 'Zablokuj', danger: true, onOk: () => social(() => S.provider.block(id), 'Zablokowano.'),
+        title: t('Zablokować {v}?', { v: p?.nick || 'gracza' }), text: t('Nie będzie mógł Cię wyzwać ani zaprosić do znajomych. Zniknie z Twoich znajomych i ostatnich rywali. Nie dowie się o blokadzie.'),
+        okLabel: t('Zablokuj'), danger: true, onOk: () => social(() => S.provider.block(id), 'Zablokowano.'),
       });
       break;
     }
     case 'friend-more': {
       const p = findPerson(id);
       confirmModal({
-        title: p?.nick || 'Znajomy', text: 'Usunąć z listy znajomych? Możesz też zablokować tę osobę.',
-        okLabel: 'Usuń ze znajomych', danger: true, cancelLabel: 'Zablokuj',
+        title: p?.nick || t('Znajomy'), text: t('Usunąć z listy znajomych? Możesz też zablokować tę osobę.'),
+        okLabel: t('Usuń ze znajomych'), danger: true, cancelLabel: t('Zablokuj'),
         onOk: () => social(() => S.provider.friendRemove(id), 'Usunięto ze znajomych.'),
         onCancel: () => social(() => S.provider.block(id), 'Zablokowano.'),
       });
@@ -2486,39 +2624,39 @@ app.addEventListener('click', async (e) => {
     }
     // --- zarządzanie klubem ---
     case 'copy-code':
-      try { await navigator.clipboard.writeText(S.provider.roomCode); toast('Skopiowano kod.'); } catch { toast('Skopiuj kod ręcznie.'); }
+      try { await navigator.clipboard.writeText(S.provider.roomCode); toast(t('Skopiowano kod.')); } catch { toast(t('Skopiuj kod ręcznie.')); }
       break;
     case 'club-recode':
       confirmModal({
-        title: 'Zmienić kod klubu?', text: 'Stary kod i link przestaną działać. Obecni członkowie zostają w klubie.', okLabel: 'Zmień kod',
-        onOk: async () => { try { const c = await S.provider.changeCode(); toast(`Nowy kod: ${c}`, 5000); S.modal = { kind: 'room' }; render(); } catch (err) { toast(err.message); } },
+        title: t('Zmienić kod klubu?'), text: t('Stary kod i link przestaną działać. Obecni członkowie zostają w klubie.'), okLabel: t('Zmień kod'),
+        onOk: async () => { try { const c = await S.provider.changeCode(); toast(t('Nowy kod: {c}', { c: c }), 5000); S.modal = { kind: 'room' }; render(); } catch (err) { toast(err.message); } },
       });
       break;
     case 'club-password':
       S.modal = {
-        kind: 'prompt', title: 'Hasło klubu', label: 'Nowe hasło (puste = bez hasła)', type: 'password', autocomplete: 'new-password',
-        text: 'Hasło klubu jest dodatkowym zabezpieczeniem oprócz kodu: dołączający musi znać jedno i drugie. Obecni członkowie nie muszą go wpisywać.',
+        kind: 'prompt', title: t('Hasło klubu'), label: t('Nowe hasło (puste = bez hasła)'), type: 'password', autocomplete: 'new-password',
+        text: t('Hasło klubu jest dodatkowym zabezpieczeniem oprócz kodu: dołączający musi znać jedno i drugie. Obecni członkowie nie muszą go wpisywać.'),
         onOk: async (v) => {
-          try { const has = await S.provider.setRoomPassword(v); toast(has ? 'Ustawiono hasło klubu.' : 'Usunięto hasło klubu.'); S.modal = { kind: 'room' }; render(); } catch (err) { toast(err.message, 5000); }
+          try { const has = await S.provider.setRoomPassword(v); toast(has ? t('Ustawiono hasło klubu.') : t('Usunięto hasło klubu.')); S.modal = { kind: 'room' }; render(); } catch (err) { toast(err.message, 5000); }
         },
       };
       render();
       break;
     case 'club-leave':
       confirmModal({
-        title: 'Opuścić klub?', text: 'Znikniesz z listy członków. Ranking zostaje (jest wspólny). Wrócisz, dołączając ponownie kodem klubu.',
-        okLabel: 'Opuść klub', danger: true,
-        onOk: async () => { try { await S.provider.leaveRoom(); toast('Opuszczono klub.'); goMenu(); } catch (err) { toast(err.message); } },
+        title: t('Opuścić klub?'), text: t('Znikniesz z listy członków. Ranking zostaje (jest wspólny). Wrócisz, dołączając ponownie kodem klubu.'),
+        okLabel: t('Opuść klub'), danger: true,
+        onOk: async () => { try { await S.provider.leaveRoom(); toast(t('Opuszczono klub.')); goMenu(); } catch (err) { toast(err.message); } },
       });
       break;
     case 'req-approve':
-      try { await S.provider.approveRequest(id); toast('Przyjęto do klubu.'); await loadCoach(); } catch (err) { toast(err.message, 5000); }
+      try { await S.provider.approveRequest(id); toast(t('Przyjęto do klubu.')); await loadCoach(); } catch (err) { toast(err.message, 5000); }
       break;
     case 'req-reject':
-      try { await S.provider.rejectRequest(id); toast('Odrzucono prośbę.'); await loadCoach(); } catch (err) { toast(err.message, 5000); }
+      try { await S.provider.rejectRequest(id); toast(t('Odrzucono prośbę.')); await loadCoach(); } catch (err) { toast(err.message, 5000); }
       break;
     case 'member-unblock':
-      try { await S.provider.unblockMember(id); toast('Odblokowano. Może znów poprosić o dołączenie.'); await loadCoach(); } catch (err) { toast(err.message, 5000); }
+      try { await S.provider.unblockMember(id); toast(t('Odblokowano. Może znów poprosić o dołączenie.')); await loadCoach(); } catch (err) { toast(err.message, 5000); }
       break;
     case 'invite-cancel':
       try { await S.provider.cancelInvite(id); await loadCoach(); } catch (err) { toast(err.message, 5000); }
@@ -2528,32 +2666,32 @@ app.addEventListener('click', async (e) => {
       break;
     case 'member-remove':
       confirmModal({
-        title: `Usunąć ${el.dataset.nick} z klubu?`, text: 'Ta osoba zostanie wylogowana z klubu i nie wróci, nawet znając kod — chyba że ją odblokujesz albo zaprosisz po nicku. Jej partie zostają w historii.',
-        okLabel: 'Usuń', danger: true,
-        onOk: async () => { try { await S.provider.removeMember(id); toast('Usunięto z klubu.'); await loadCoach(); } catch (err) { toast(err.message); } },
+        title: t('Usunąć {nick} z klubu?', { nick: el.dataset.nick }), text: t('Ta osoba zostanie wylogowana z klubu i nie wróci, nawet znając kod — chyba że ją odblokujesz albo zaprosisz po nicku. Jej partie zostają w historii.'),
+        okLabel: t('Usuń'), danger: true,
+        onOk: async () => { try { await S.provider.removeMember(id); toast(t('Usunięto z klubu.')); await loadCoach(); } catch (err) { toast(err.message); } },
       });
       break;
     case 'account-logout':
       confirmModal({
-        title: 'Wylogować z tego urządzenia?', text: 'Zalogujesz się ponownie nickiem i hasłem. Ranking, znajomi i kluby zostają na koncie.',
-        okLabel: 'Wyloguj', onOk: logout,
+        title: t('Wylogować z tego urządzenia?'), text: t('Zalogujesz się ponownie nickiem i hasłem. Ranking, znajomi i kluby zostają na koncie.'),
+        okLabel: t('Wyloguj'), onOk: logout,
       });
       break;
     case 'seek-accept':
       unlockMedia();
-      S.waiting = { text: 'Łączę z rywalem…', kind: 'pending' }; render();
+      S.waiting = { text: t('Łączę z rywalem…'), kind: 'pending' }; render();
       try { await S.provider.seekAccept(id); } catch (err) { toast(err.message); }
       if (S.waiting?.kind === 'pending') { S.waiting = null; render(); }
       break;
     case 'room-menu': S.modal = { kind: 'room' }; render(); break;
-    case 'share-invite': await shareLink(S.provider.inviteLink(), `Klub „${S.provider.roomName}” (kod ${S.provider.roomCode}) — ${CONFIG.APP_NAME}`); break;
+    case 'share-invite': await shareLink(S.provider.inviteLink(), t('Klub „{name}” (kod {code}) — {app}', { name: S.provider.roomName, code: S.provider.roomCode, app: CONFIG.APP_NAME })); break;
     case 'room-forget':
       confirmModal({
-        title: S.provider?.isPublic ? 'Usunąć konto z tego urządzenia?' : 'Usunąć klub z tego urządzenia?',
+        title: S.provider?.isPublic ? t('Usunąć konto z tego urządzenia?') : t('Usunąć klub z tego urządzenia?'),
         text: S.provider?.isPublic
-          ? 'Konto bez hasła: ranking i partie zostaną przy nicku, ale z tego urządzenia już na niego nie wrócisz. Jeśli chcesz grać dalej na innym urządzeniu, najpierw utwórz kod przeniesienia.'
-          : `Zostajesz członkiem klubu. ${S.provider?.me?.linked ? 'Klub jest zapisany na koncie — wrócisz do niego po zalogowaniu.' : 'Bez konta wrócisz tylko z innego urządzenia albo kodem przeniesienia utworzonym wcześniej.'}`,
-        okLabel: 'Usuń z urządzenia', danger: true, onOk: logout,
+          ? t('Wylogujesz się z tego urządzenia. Konto, ranking i kluby zostają — zalogujesz się ponownie nickiem i hasłem.')
+          : t('Zostajesz członkiem klubu. Klub jest zapisany na koncie — otworzysz go ponownie z „Moich klubów”.'),
+        okLabel: t('Usuń z urządzenia'), danger: true, onOk: logout,
       });
       break;
     case 'rank-speed': S.rankSpeed = id; render(); break;
@@ -2600,27 +2738,27 @@ app.addEventListener('click', async (e) => {
     case 'entry-mode':
       if (S.sending) break;
       S.settings.sanEntry = !sanEntry(); saveSettings();
-      resetEntry(); S.entryMsg = '';
-      toast(sanEntry() ? 'Notacja: zapisz ruch, np. e4 albo Nf3.' : 'Skąd → dokąd: wpisz pole startowe i docelowe.');
+      resetEntry(); S.entryMsg = ''; S.entryErr = false;
+      toast(sanEntry() ? t('Notacja: zapisz ruch, np. e4 albo Nf3.') : t('Skąd → dokąd: wpisz pole startowe i docelowe.'));
       renderEntry();
       break;
     case 'repeat': {
       const G = S.game;
       const last = [...(G?.history || [])].reverse().find((m) => m.color !== G.myColor[0]);
-      if (last) { const was = S.settings.speech; S.settings.speech = true; speak(speechForMove(last)); S.settings.speech = was; }
+      if (last) say(moveKeys(last), '', true);
       break;
     }
     case 'offer-draw':
-      try { await S.provider.draw(S.game.id, true); toast('Zaproponowano remis.'); } catch (err) { toast(err.message); }
+      try { await S.provider.draw(S.game.id, true); toast(t('Zaproponowano remis.')); } catch (err) { toast(err.message); }
       break;
     case 'draw-yes': try { await S.provider.draw(S.game.id, true); } catch (err) { toast(err.message); } break;
     case 'draw-no': try { await S.provider.draw(S.game.id, false); } catch (err) { toast(err.message); } break;
     case 'takeback-ask':
       confirmModal({
-        title: 'Poprosić o cofnięcie ruchu?',
-        text: 'Rywal musi się zgodzić. Jeśli już odpowiedział, cofną się oba ruchy: jego i Twój. Czas na zegarze się nie zwraca.',
-        okLabel: 'Poproś',
-        onOk: async () => { try { await S.provider.takeback(S.game.id, true); toast('Poproszono o cofnięcie ruchu.'); } catch (err) { toast(err.message); } },
+        title: t('Poprosić o cofnięcie ruchu?'),
+        text: t('Rywal musi się zgodzić. Jeśli już odpowiedział, cofną się oba ruchy: jego i Twój. Czas na zegarze się nie zwraca.'),
+        okLabel: t('Poproś'),
+        onOk: async () => { try { await S.provider.takeback(S.game.id, true); toast(t('Poproszono o cofnięcie ruchu.')); } catch (err) { toast(err.message); } },
       });
       break;
     case 'takeback-yes': try { await S.provider.takeback(S.game.id, true); } catch (err) { toast(err.message); } break;
@@ -2628,24 +2766,24 @@ app.addEventListener('click', async (e) => {
     // fallthrough
     case 'takeback-no': try { await S.provider.takeback(S.game.id, false); } catch (err) { toast(err.message); } break;
     case 'resign':
-      confirmModal({ title: 'Poddać partię?', okLabel: 'Poddaj', danger: true, onOk: async () => { try { await S.provider.resign(S.game.id); } catch (err) { toast(err.message); } } });
+      confirmModal({ title: t('Poddać partię?'), okLabel: t('Poddaj'), danger: true, onOk: async () => { try { await S.provider.resign(S.game.id); } catch (err) { toast(err.message); } } });
       break;
     case 'abort':
-      confirmModal({ title: 'Przerwać partię?', text: 'Przed pierwszym ruchem partia nie liczy się do rankingu.', okLabel: 'Przerwij', onOk: async () => { try { await S.provider.abort(S.game.id); } catch (err) { toast(err.message); } } });
+      confirmModal({ title: t('Przerwać partię?'), text: t('Przed pierwszym ruchem partia nie liczy się do rankingu.'), okLabel: t('Przerwij'), onOk: async () => { try { await S.provider.abort(S.game.id); } catch (err) { toast(err.message); } } });
       break;
     case 'claim-win': try { await S.provider.claimVictory(S.game.id); } catch (err) { toast(err.message); } break;
     case 'claim-draw': try { await S.provider.claimDraw(S.game.id); } catch (err) { toast(err.message); } break;
     case 'game-menu': S.modal = { kind: 'game-menu' }; render(); break;
     case 'chat-send': {
-      const text = QUICK_REPLIES[Number(id)];
-      try { await S.provider.chat(S.game.id, text); toast(`Wysłano: ${text}`); } catch (err) { toast(err.message); }
+      const text = t(QUICK_REPLIES[Number(id)]);
+      try { await S.provider.chat(S.game.id, text); toast(t('Wysłano: {text}', { text: text })); } catch (err) { toast(err.message); }
       break;
     }
     case 'show-board':
       confirmModal({
-        title: 'Pokazać pozycję?',
-        text: 'To podgląd awaryjny — na wypadek, gdy bierki na Twojej szachownicy nie zgadzają się z partią.',
-        okLabel: 'Pokaż',
+        title: t('Pokazać pozycję?'),
+        text: t('To podgląd awaryjny — na wypadek, gdy bierki na Twojej szachownicy nie zgadzają się z partią.'),
+        okLabel: t('Pokaż'),
         onOk: () => { S.modal = { kind: 'board' }; render(); },
       });
       break;
@@ -2659,12 +2797,12 @@ app.addEventListener('change', (e) => {
   if (el.dataset.action === 'near') { S.form.near = el.checked; saveForm(); }
   if (el.dataset.action === 'approval') {
     S.provider.setApproval(el.checked)
-      .then((on) => { toast(on ? 'Nowi członkowie będą czekać na zatwierdzenie.' : 'Nowi członkowie wchodzą od razu po kodzie.'); loadCoach(); })
+      .then((on) => { toast(on ? t('Nowi członkowie będą czekać na zatwierdzenie.') : t('Nowi członkowie wchodzą od razu po kodzie.')); loadCoach(); })
       .catch((err) => { toast(err.message); el.checked = !el.checked; });
   }
   if (el.dataset.action === 'setting') {
     S.settings[el.dataset.key] = el.checked; saveSettings();
-    if (['sanEntry', 'englishNotation', 'learnMode'].includes(el.dataset.key)) { resetEntry(); S.entryMsg = ''; }
+    if (['sanEntry', 'englishNotation', 'learnMode'].includes(el.dataset.key)) { resetEntry(); S.entryMsg = ''; S.entryErr = false; }
   }
 });
 // Formularze (Enter i przycisk „submit”); prawdziwe <form> pozwalają iPhone'owi zapisać hasło w Pęku kluczy.
@@ -2679,34 +2817,35 @@ app.addEventListener('submit', async (e) => {
     case 'club-join': await submitJoin(); break;
     case 'friend-add': {
       const nick = (document.getElementById('friend-nick')?.value || '').trim();
-      if (!nick) { toast('Wpisz nick gracza.'); break; }
-      if (await social(() => S.provider.friendInvite(nick), `Wysłano zaproszenie do ${nick}.`)) {
+      if (!nick) { toast(t('Wpisz nick gracza.')); break; }
+      if (await social(() => S.provider.friendInvite(nick), t('Wysłano zaproszenie do {nick}.', { nick }))) {
         const i = document.getElementById('friend-nick'); if (i) i.value = '';
       }
       break;
     }
+    case 'delete-account': await submitDeleteAccount(); break;
     case 'qr-code': {
       const code = (document.getElementById('qr-code')?.value || '').trim();
-      if (code.length < 6) { toast('Kod ma 6 znaków — przepisz go z ekranu komputera.'); break; }
+      if (code.length < 6) { toast(t('Kod ma 6 znaków — przepisz go z ekranu komputera.')); break; }
       closeScanner(); render();
       await qrConfirm(code);
       break;
     }
     case 'invite-nick': {
       const nick = (document.getElementById('invite-nick')?.value || '').trim();
-      if (!nick) { toast('Wpisz nick konta.'); break; }
-      try { const r = await S.provider.inviteNick(nick); toast(`Zaproszono ${r.nick}.`); await loadCoach(); } catch (err) { toast(err.message, 5000); }
+      if (!nick) { toast(t('Wpisz nick konta.')); break; }
+      try { const r = await S.provider.inviteNick(nick); toast(t('Zaproszono {nick}.', { nick: r.nick })); await loadCoach(); } catch (err) { toast(err.message, 5000); }
       break;
     }
     case 'prompt': { const m = S.modal; const v = document.getElementById('prompt-input')?.value || ''; S.modal = null; render(); if (m?.onOk) await m.onOk(v); break; }
     case 'secure': {
       const v = (k) => document.getElementById(k)?.value ?? '';
       const password = v('sec-pass');
-      if (password && password.length < 8) { toast('Hasło musi mieć co najmniej 8 znaków.'); break; }
+      if (password && password.length < 8) { toast(t('Hasło musi mieć co najmniej 8 znaków.')); break; }
       const btn = f.querySelector('[type=submit]'); if (btn) btn.disabled = true;
       try {
         await S.provider.setPassword({ password: password || undefined, oldPassword: v('sec-old') || undefined, email: v('sec-email').trim() });
-        S.modal = null; toast('Zapisano. Możesz logować się nickiem i hasłem na każdym urządzeniu.', 5000); render();
+        S.modal = null; toast(t('Zapisano. Możesz logować się nickiem i hasłem na każdym urządzeniu.'), 5000); render();
       } catch (err) { if (btn) btn.disabled = false; toast(err.message, 5000); }
       break;
     }
@@ -2715,7 +2854,7 @@ app.addEventListener('submit', async (e) => {
 });
 // Akcja na liście znajomych: błąd jako komunikat, sukces opcjonalnym tekstem.
 async function social(fn, okText) {
-  try { await fn(); if (okText) toast(okText); render(); return true; } catch (err) { toast(err.message, 5000); return false; }
+  try { await fn(); if (okText) toast(t(okText)); render(); return true; } catch (err) { toast(err.message, 5000); return false; }
 }
 app.addEventListener('input', (e) => {
   if (e.target.id === 'friend-input') { S.form.friend = e.target.value; saveForm(); }

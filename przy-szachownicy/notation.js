@@ -1,8 +1,8 @@
-// Polska notacja i opisy ruchów (do wyświetlania i czytania na głos).
+// Notacja i opisy ruchów (do wyświetlania). Czytanie na głos: speech.js. Teksty przez t() (i18n.js).
+import { t } from './i18n.js';
 
 const PL_LETTER = { K: 'K', Q: 'H', R: 'W', B: 'G', N: 'S' };
-const PL_NAME = { k: 'król', q: 'hetman', r: 'wieża', b: 'goniec', n: 'skoczek', p: 'pion' };
-const PL_ACC = { q: 'hetmana', r: 'wieżę', b: 'gońca', n: 'skoczka' };
+const PIECE_NAME = { k: 'król', q: 'hetman', r: 'wieża', b: 'goniec', n: 'skoczek', p: 'pion' };
 
 export const PROMO_PIECES = [
   { key: 'q', label: 'H', name: 'Hetman' },
@@ -18,44 +18,22 @@ export function sanToPl(san) {
     .replace(/=([QRBN])/, (_m, p) => '=' + PL_LETTER[p]);
 }
 
-function cap(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
-
 // m = ruch chess.js w wersji verbose
 export function describeMove(m) {
   if (!m) return '';
   const flags = m.flags || '';
   let text;
-  if (flags.includes('k')) text = 'roszada krótka';
-  else if (flags.includes('q')) text = 'roszada długa';
+  if (flags.includes('k')) text = t('roszada krótka');
+  else if (flags.includes('q')) text = t('roszada długa');
   else {
     const capture = flags.includes('c') || flags.includes('e');
-    text = `${PL_NAME[m.piece]} ${m.from} ${capture ? '×' : '→'} ${m.to}`;
-    if (m.promotion) text += `, promocja: ${PL_NAME[m.promotion]}`;
+    text = `${t(PIECE_NAME[m.piece])} ${m.from} ${capture ? '×' : '→'} ${m.to}`;
+    if (m.promotion) text += ', ' + t('promocja: {piece}', { piece: t(PIECE_NAME[m.promotion]) });
   }
-  if (m.san.endsWith('#')) text += ' — mat';
-  else if (m.san.endsWith('+')) text += ' — szach';
+  if (m.san.endsWith('#')) text += ' — ' + t('mat');
+  else if (m.san.endsWith('+')) text += ' — ' + t('szach');
   return text;
 }
-
-export function speechForMove(m) {
-  if (!m) return '';
-  const flags = m.flags || '';
-  let text;
-  if (flags.includes('k')) text = 'Roszada krótka';
-  else if (flags.includes('q')) text = 'Roszada długa';
-  else {
-    const capture = flags.includes('c') || flags.includes('e');
-    text = `${cap(PL_NAME[m.piece])} ${spellSquare(m.from)} ${capture ? 'bije' : 'na'} ${spellSquare(m.to)}`;
-    if (m.promotion) text += `, promocja na ${PL_ACC[m.promotion]}`;
-  }
-  if (m.san.endsWith('#')) text += '. Mat.';
-  else if (m.san.endsWith('+')) text += '. Szach.';
-  return text;
-}
-
-// "g8" -> "gie 8" – syntezatory lepiej czytają litery osobno
-const LETTER_SPOKEN = { a: 'a', b: 'be', c: 'ce', d: 'de', e: 'e', f: 'ef', g: 'gie', h: 'ha' };
-function spellSquare(sq) { return `${LETTER_SPOKEN[sq[0]]} ${sq[1]}`; }
 
 const STATUS_PL = {
   mate: 'Mat',
@@ -71,12 +49,13 @@ const STATUS_PL = {
   variantEnd: 'Koniec partii',
   unknownFinish: 'Koniec partii',
 };
-export function statusPl(s) { return STATUS_PL[s] || s; }
+export function statusPl(s) { return STATUS_PL[s] ? t(STATUS_PL[s]) : s; }
 
-export const SPEED_PL = {
+const SPEED_PL = {
   ultraBullet: 'UltraBullet', bullet: 'Bullet', blitz: 'Blitz', rapid: 'Rapid',
   classical: 'Klasyczna', correspondence: 'Korespondencyjna', unlimited: 'Bez limitu',
 };
+export function speedPl(s) { return SPEED_PL[s] ? t(SPEED_PL[s]) : (s || ''); }
 
 export function formatMs(ms) {
   if (ms == null || isNaN(ms)) return '—';

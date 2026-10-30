@@ -1,8 +1,8 @@
 // Service worker: zapamiętuje pliki aplikacji, nie dotyka zapytań do Lichess.
-const VERSION = 'ps-v15';
+const VERSION = 'ps-v16';
 const SHELL = [
   './', './index.html', './style.css', './app.js', './config.js', './notation.js', './ndjson.js',
-  './lichess.js', './demo.js', './rooms.js', './chess.js', './manifest.webmanifest', './prywatnosc.html',
+  './lichess.js', './demo.js', './rooms.js', './chess.js', './i18n.js', './speech.js', './lang/en.json', './flags/pl.svg', './flags/gb.svg', './manifest.webmanifest', './prywatnosc.html',
   './icon.svg', './logo.svg', './icon-192.png', './icon-512.png', './apple-touch-icon.png',
 ];
 

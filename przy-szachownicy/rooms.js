@@ -1,5 +1,6 @@
 // Dostawca partii: kluby (prywatne pokoje) i poczekalnia ogólna — bez konta Lichess.
 // Jedno połączenie WebSocket z serwerem pokoju; serwer liczy zegar i sprawdza ruchy.
+import { t } from './i18n.js';
 import { CONFIG } from './config.js';
 
 // Poczekalnia ogólna to stały pokój o tym identyfikatorze. Urządzenie pamięta konto i listę klubów („Moje kluby”).
@@ -74,11 +75,11 @@ async function http(method, path, body) {
       method, headers: body ? { 'Content-Type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined,
     });
   } catch {
-    throw new Error('Brak połączenia z serwerem.');
+    throw new Error(t('Brak połączenia z serwerem.'));
   }
   let data = null;
   try { data = await res.json(); } catch {}
-  if (!res.ok) throw Object.assign(new Error(data?.error || `Błąd serwera (${res.status})`), { status: res.status, data });
+  if (!res.ok) throw Object.assign(new Error(data?.error ? t(data.error) : t('Błąd serwera ({status})', { status: res.status })), { status: res.status, data });
   return data;
 }
 
@@ -168,7 +169,7 @@ export async function passkeyRegister() {
       },
     });
   } catch (e) {
-    if (e?.name === 'InvalidStateError') throw new Error('To urządzenie ma już klucz dostępu do tego konta.');
+    if (e?.name === 'InvalidStateError') throw new Error(t('To urządzenie ma już klucz dostępu do tego konta.'));
     if (cancelled(e)) return null;
     throw e;
   }
@@ -305,13 +306,13 @@ export class RoomsProvider {
     this.ws = null;
     this.welcome = null;
     if (ws) { try { ws.close(1000); } catch {} }
-    for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new Error('Rozłączono.')); }
+    for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new Error(t('Rozłączono.'))); }
     this.pending.clear();
   }
   _authLost() {
     this._shutdown();
     this._forget();
-    const err = new Error('Nie rozpoznano Cię w tym pokoju — dołącz ponownie z linku.');
+    const err = new Error(t('Nie rozpoznano Cię w tym pokoju — dołącz ponownie z linku.'));
     this.readyWaiters.splice(0).forEach((w) => w.reject(err));
     this.onEvent({ type: 'authLost' });
   }
@@ -320,7 +321,7 @@ export class RoomsProvider {
     for (const [id, p] of this.pending) {
       if (p.retry) { p.sent = false; continue; }
       clearTimeout(p.timer);
-      p.reject(new Error('Brak połączenia z serwerem — spróbuj ponownie.'));
+      p.reject(new Error(t('Brak połączenia z serwerem — spróbuj ponownie.')));
       this.pending.delete(id);
     }
   }
@@ -333,7 +334,7 @@ export class RoomsProvider {
       this.readyWaiters.push(w);
       setTimeout(() => {
         const i = this.readyWaiters.indexOf(w);
-        if (i >= 0) { this.readyWaiters.splice(i, 1); reject(new Error('Nie udało się połączyć z serwerem pokoi.')); }
+        if (i >= 0) { this.readyWaiters.splice(i, 1); reject(new Error(t('Nie udało się połączyć z serwerem pokoi.'))); }
       }, timeout);
     });
   }
@@ -343,7 +344,7 @@ export class RoomsProvider {
     return new Promise((resolve, reject) => {
       const reqId = ++this.seq;
       const p = { resolve, reject, msg: { t, reqId, ...data }, retry, sent: false };
-      p.timer = setTimeout(() => { this.pending.delete(reqId); reject(new Error('Serwer nie odpowiada — spróbuj ponownie.')); }, timeout);
+      p.timer = setTimeout(() => { this.pending.delete(reqId); reject(new Error(t('Serwer nie odpowiada — spróbuj ponownie.'))); }, timeout);
       this.pending.set(reqId, p);
       this._send(p);
     });
@@ -409,7 +410,7 @@ export class RoomsProvider {
         if (!p) return;
         this.pending.delete(m.reqId);
         clearTimeout(p.timer);
-        if (m.ok) p.resolve(m); else p.reject(new Error(m.error || 'Błąd serwera.'));
+        if (m.ok) p.resolve(m); else p.reject(new Error(m.error ? t(m.error) : t('Błąd serwera.')));
         break;
       }
       case 'event':
@@ -491,7 +492,7 @@ export class RoomsProvider {
   // Szukanie rywala w poczekalni. Serwer paruje sam (to samo tempo, najbliższy ranking).
   // Gdy ktoś już czeka na to tempo, para powstaje od razu: { matched: true }.
   async seek({ time, increment, days, rated }) {
-    if (days) throw new Error('Partie korespondencyjne w pokojach będą później.');
+    if (days) throw new Error(t('Partie korespondencyjne w pokojach będą później.'));
     if (this.activeSeek) { this.activeSeek.resolve('canceled'); this.activeSeek = null; }
     let resolve;
     const done = new Promise((r) => { resolve = r; });
@@ -521,10 +522,10 @@ export class RoomsProvider {
     return r;
   }
   async seekAccept(id) { return (await this.req('seekAccept', { id })).gameId; }
-  async challengeAI() { throw new Error('W pokoju nie ma gry z komputerem.'); }
+  async challengeAI() { throw new Error(t('W pokoju nie ma gry z komputerem.')); }
 
   async challenge(memberId, { time, increment, days, rated, color }) {
-    if (days) throw new Error('Partie korespondencyjne w klubach będą później.');
+    if (days) throw new Error(t('Partie korespondencyjne w klubach będą później.'));
     const r = await this.req('challenge', { to: memberId, time, increment, rated: !!rated, color: color || 'random' });
     // rywal już wyzwał nas tak samo (np. obaj kliknęli „Rewanż”) — partia ruszyła od razu
     if (r.matched) return { matched: true, gameId: r.gameId, cancel: () => {}, done: Promise.resolve('accepted') };
@@ -582,6 +583,15 @@ export class RoomsProvider {
   qrInfo(code) { return this.req('qrInfo', { code }); }
   qrApprove(code) { return this.req('qrApprove', { code }); }
   logoutAll() { return this.req('logoutAll'); }
+  async friendLinkCreate() { const r = await this.req('friendLinkCreate'); return appLink({}) + '#znajomy=' + r.token; }
+  friendLinkInfo(token) { return this.req('friendLinkInfo', { token }); }
+  friendLinkUse(token) { return this._social('friendLinkUse', { token }); }
+  async ownedClubs() { return (await this.req('ownedClubs')).clubs; }
+  // Usunięcie konta (RODO): decisions = { [roomId]: 'delete' | memberId następcy }
+  async deleteAccount(password, decisions) {
+    await this.req('deleteAccount', { password, decisions });
+    this._shutdown(); forgetAccount(); forgetAllClubs();
+  }
   async passkeysRemove() { await this.req('passkeysRemove'); if (this.welcome) this.welcome.me.passkeys = 0; }
 
   // --- zarządzanie klubem (założyciel; usuwanie także administratorzy) ---

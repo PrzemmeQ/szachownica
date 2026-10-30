@@ -93,6 +93,44 @@ export const socialMethods = {
     this.notifySocial(String(toId || ''));
     return { social: this.socialOf(me) };
   },
+  // Zaproszenie linkiem (WhatsApp, SMS…): jednorazowe, ważne 7 dni. Kto je otworzy, od razu zostaje znajomym.
+  async cmdFriendLinkCreate(me) {
+    const day = Date.now() - 86400000;
+    this.sql.exec('DELETE FROM invite_log WHERE at < ?', day);
+    if (this.sql.exec('SELECT COUNT(*) AS c FROM invite_log WHERE from_id = ?', me).one().c >= INVITES_PER_DAY) {
+      this.fail(`Możesz wysłać najwyżej ${INVITES_PER_DAY} zaproszeń dziennie.`);
+    }
+    this.sql.exec('CREATE TABLE IF NOT EXISTS friend_links (hash TEXT PRIMARY KEY, from_id TEXT NOT NULL, expires_at INTEGER NOT NULL)');
+    this.sql.exec('DELETE FROM friend_links WHERE expires_at < ?', Date.now());
+    const token = this.randomCode(20);
+    this.sql.exec('INSERT INTO friend_links (hash, from_id, expires_at) VALUES (?, ?, ?)', await this.sha256(token), me, Date.now() + 7 * 86400000);
+    this.sql.exec('INSERT INTO invite_log (from_id, at) VALUES (?, ?)', me, Date.now());
+    return { token };
+  },
+  async friendLinkRow(token) {
+    this.sql.exec('CREATE TABLE IF NOT EXISTS friend_links (hash TEXT PRIMARY KEY, from_id TEXT NOT NULL, expires_at INTEGER NOT NULL)');
+    const row = this.sql.exec('SELECT * FROM friend_links WHERE hash = ? AND expires_at > ?', await this.sha256(String(token || '')), Date.now()).toArray()[0];
+    const from = row && this.member(row.from_id);
+    if (!row || !from || from.removed) this.fail('Ten link do znajomych jest nieaktualny — został już użyty albo wygasł.');
+    return { row, from };
+  },
+  async cmdFriendLinkInfo(me, token) {
+    const { from } = await this.friendLinkRow(token);
+    return { nick: from.nick, self: from.id === me, already: this.isFriend(me, from.id) };
+  },
+  async cmdFriendLinkUse(me, token) {
+    const { row, from } = await this.friendLinkRow(token);
+    if (from.id === me) this.fail('To Twój własny link — wyślij go znajomemu.');
+    this.sql.exec('DELETE FROM friend_links WHERE hash = ?', row.hash);
+    // zablokowana osoba: po cichu nic się nie dzieje
+    if (this.isBlocked(me, from.id)) return { nick: from.nick, social: this.socialOf(me) };
+    const [a, b] = this.pairKey(me, from.id);
+    this.sql.exec('INSERT OR IGNORE INTO friends (a, b, since) VALUES (?, ?, ?)', a, b, Date.now());
+    this.sql.exec('DELETE FROM friend_invites WHERE (from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?)', me, from.id, from.id, me);
+    this.toMember(from.id, { t: 'event', ev: { type: 'friendJoined', nick: this.member(me).nick } });
+    this.notifySocial(from.id);
+    return { nick: from.nick, social: this.socialOf(me) };
+  },
   cmdFriendRemove(me, otherId) {
     const [a, b] = this.pairKey(me, String(otherId || ''));
     this.sql.exec('DELETE FROM friends WHERE a = ? AND b = ?', a, b);

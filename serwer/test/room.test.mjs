@@ -14,9 +14,10 @@ const KEY = { Authorization: 'Bearer klucz-testowy-statystyk' };
 
 async function register(prefix = 'G') {
   const nick = prefix + uniq();
-  const r = await api(srv.base, 'POST', '/api/account/register', { nick, password: 'haslo-testowe-' + uniq() });
+  const password = 'haslo-testowe-' + uniq();
+  const r = await api(srv.base, 'POST', '/api/account/register', { nick, password });
   assert.equal(r.status, 200, JSON.stringify(r.data));
-  return { nick, id: r.data.memberId, token: r.data.token };
+  return { nick, id: r.data.memberId, token: r.data.token, password };
 }
 // Klub zakłada konto; domyślnie z wyłączonym zatwierdzaniem (szybkie dołączanie w testach).
 async function createClub(name, nick, owner, { approve = false } = {}) {
@@ -427,6 +428,59 @@ test('Moje kluby przy koncie; logowanie komputera telefonem (QR i krótki kod); 
   assert.equal((await new Client(srv.base, c.room, c.token).connect()).t, 'authFailed');
   assert.ok((await P.req('accountInfo')).ok);
   P.close();
+});
+
+test('znajomi przez link (jednorazowy); usunięcie konta (RODO): klub przekazany albo usunięty, partie z „usunięty gracz”', async () => {
+  // link do znajomych
+  const [a, b, c] = [await register('La'), await register('Lb'), await register('Lc')];
+  const A = await connect('publiczny', a.token), B = await connect('publiczny', b.token), C = await connect('publiczny', c.token);
+  const { token } = await A.req('friendLinkCreate');
+  assert.match((await A.req('friendLinkUse', { token })).error, /własny link/);
+  assert.equal((await B.req('friendLinkInfo', { token })).nick, a.nick);
+  const mark = A.mark();
+  const used = await B.req('friendLinkUse', { token });
+  assert.equal(used.social.friends[0].nick, a.nick);
+  assert.equal((await A.wait((m) => m.t === 'event' && m.ev.type === 'friendJoined', 5000, mark)).ev.nick, b.nick);
+  assert.match((await C.req('friendLinkUse', { token })).error, /nieaktualny/); // jednorazowy
+
+  // A zakłada dwa kluby: jeden przekaże C, drugi usunie; B jest członkiem obu
+  const k1 = await createClub('Klub przekazany', undefined, a);
+  const k2 = await createClub('Klub do usunięcia', undefined, a);
+  const jb1 = await joinClub(k1.code, { account: b });
+  const jc1 = await joinClub(k1.code, { account: c });
+  const jb2 = await joinClub(k2.code, { account: b });
+  // partia w klubie, żeby sprawdzić anonimizację
+  const W = await connect(k1.room, k1.token), Bl = await connect(k1.room, jb1.data.token);
+  const ch = await W.req('challenge', { to: jb1.data.memberId, time: 10, increment: 0, color: 'white' });
+  const gameId = (await Bl.req('accept', { id: ch.id })).gameId;
+  await W.req('watch', { gameId }); await Bl.req('watch', { gameId });
+  await playMoves(gameId, W, Bl, ['e2e4', 'e7e5']);
+  await Bl.req('resign', { gameId });
+  const B2 = await connect(k2.room, jb2.data.token);
+
+  const owned = (await A.req('ownedClubs')).clubs;
+  assert.deepEqual(owned.map((x) => x.name).sort(), ['Klub do usunięcia', 'Klub przekazany']);
+  assert.deepEqual(owned.find((x) => x.room === k1.room).members.map((x) => x.nick), [b.nick, c.nick].sort((x, y) => x.localeCompare(y, 'pl')));
+  assert.match((await A.req('deleteAccount', { password: 'zle' })).error, /Złe hasło/);
+  assert.match((await A.req('deleteAccount', { password: a.password, decisions: { [k1.room]: jc1.data.memberId } })).error, /Zdecyduj/);
+  const markB2 = B2.mark();
+  const del = await A.req('deleteAccount', { password: a.password, decisions: { [k1.room]: jc1.data.memberId, [k2.room]: 'delete' } });
+  assert.ok(del.ok, del.error);
+
+  // konto nie istnieje, nick wolny
+  assert.equal((await api(srv.base, 'POST', '/api/account/login', { nick: a.nick, password: a.password })).status, 400);
+  assert.equal((await new Client(srv.base, 'publiczny', a.token).connect()).t, 'authFailed');
+  assert.equal((await B.req('social')).social.friends.length, 0);
+  // klub 1: C jest założycielem, partia z „usunięty gracz”
+  const Cc = await connect(k1.room, jc1.data.token);
+  assert.equal(Cc.welcome.room.role, 'owner');
+  assert.equal(Cc.welcome.members.some((x) => x.nick === a.nick), false);
+  assert.match((await Cc.req('gamePgn', { gameId })).pgn, /\[White "usunięty gracz"\]/);
+  // klub 2: usunięty razem z kodem
+  await B2.wait((m) => m.t === 'authFailed', 5000, markB2);
+  assert.match((await joinClub(k2.code, { account: c })).data.error, /Nie ma klubu/);
+  assert.equal((await B.req('myRooms')).rooms.some((r) => r.room === k2.room), false);
+  for (const x of [B, C, W, Bl, Cc]) x.close();
 });
 
 test('limity zakładania; ochrona: zalewanie, wewnętrzne akcje niedostępne', async () => {

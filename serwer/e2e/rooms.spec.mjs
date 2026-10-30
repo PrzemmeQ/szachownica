@@ -28,6 +28,8 @@ async function phone(browser) {
   await ctx.addInitScript(() => {
     // pytanie o Face ID / Windows Hello po zalogowaniu sprawdza osobny test
     try { localStorage.setItem('ps_passkey_asked', '1'); } catch {}
+    // systemowe okno udostępniania zastępujemy zapisem (link do znajomych)
+    try { Object.defineProperty(navigator, 'share', { configurable: true, value: async (d) => { window.__shared = d; } }); } catch {}
     window.__spoken = [];
     if ('speechSynthesis' in window) {
       speechSynthesis.speak = (u) => { window.__spoken.push(u.text); };
@@ -241,7 +243,7 @@ test('wariant A bez ROOMS_API: ekran startowy bez zmian, demo działa', async ({
 test('demo działa też, gdy kluby są włączone', async ({ browser }) => {
   const { ctx, page } = await phone(browser);
   await page.goto(FRONT + '/');
-  await expect(page.getByRole('button', { name: 'Zaloguj przez Lichess' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Zagraj na Lichess' })).toBeVisible();
   await page.getByRole('button', { name: 'Wypróbuj z komputerem (demo)' }).click();
   await page.getByRole('button', { name: 'Zagraj z komputerem' }).click();
   await expect(page.locator('.g-meta')).toBeVisible();
@@ -354,7 +356,7 @@ test('Lichess: z ekranu głównego i z powrotem bez wylogowania; szukanie ±100 
   // z tokenem Lichess i tak start na ekranie głównym
   await page.goto(FRONT + '/');
   await expect(page.getByRole('button', { name: 'Załóż konto' })).toBeVisible();
-  await page.getByRole('button', { name: 'Graj przez Lichess' }).click();
+  await page.getByRole('button', { name: 'Zagraj na Lichess' }).click();
   await expect(page.locator('.who')).toHaveText('Tester');
   await expect(page.locator('.note')).toContainText('Własne kluby, znajomi i ranking bez konta Lichess');
   await expect(page.getByText('Grałbyś z rankingiem')).toHaveCount(0);
@@ -368,14 +370,14 @@ test('Lichess: z ekranu głównego i z powrotem bez wylogowania; szukanie ±100 
 
   await page.locator('header button[data-action="to-menu"]').click();
   await page.reload();
-  await expect(page.getByRole('button', { name: 'Graj przez Lichess' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Zagraj na Lichess' })).toBeVisible();
   const nick = uniq('Lic');
   await page.getByRole('button', { name: 'Załóż konto' }).click();
   await page.locator('#room-nick').fill(nick);
   await page.locator('#acct-pass').fill(PASS);
   await page.getByRole('button', { name: 'Załóż konto' }).click();
   await expect(page.locator('button[data-action="account-menu"]')).toContainText(nick);
-  await page.getByRole('button', { name: 'Graj przez Lichess' }).click();
+  await page.getByRole('button', { name: 'Zagraj na Lichess' }).click();
   await expect(page.locator('.who')).toHaveText('Tester');
   await expect(page.locator('.note', { hasText: 'Własne kluby' })).toHaveCount(0); // ma już konto
   await ctx.close();
@@ -418,7 +420,7 @@ test('konto: ekran główny, formularz z zapisem hasła, logowanie komputera tel
   // bez konta: na górze „Załóż konto” i „Zaloguj się”, reszta drobnym drukiem
   await expect(A.page.locator('.logo-img')).toBeVisible();
   await expect(A.page.getByRole('button', { name: /Szybka gra/ })).toHaveCount(0);
-  await expect(A.page.locator('.start-others')).toContainText('Bez konta');
+  await expect(A.page.locator('.start-others')).toContainText('Masz konto Lichess?');
   await expect(A.page.getByText('Mam kod przeniesienia')).toHaveCount(0);
   await A.page.getByRole('button', { name: 'Załóż konto' }).click();
   await expect(A.page.getByRole('heading', { name: 'Załóż konto' })).toBeVisible();
@@ -784,4 +786,82 @@ test('panel trenera: konto przy zakładaniu, hasło klubu, prośby, admin, podgl
   await C.page.goto(link);
   await expect(C.page.locator('.error')).toContainText('Nie ma klubu o takim kodzie');
   for (const P of [T, A, B, C]) await P.ctx.close();
+});
+
+test('link do znajomych (WhatsApp), język angielski, usunięcie konta (RODO) z decyzją o klubie', async ({ browser }) => {
+  const A = await phone(browser);
+  const nickA = uniq('Link'); const nickB = uniq('Nowy');
+  await register(A.page, nickA);
+  // A: „Zaproś linkiem” → systemowe udostępnianie z linkiem #znajomy=…
+  await A.page.locator('button.tab[data-action="mode"][data-id="member"]').click();
+  await A.page.getByRole('button', { name: /Zaproś linkiem/ }).click();
+  await expect.poll(() => A.page.evaluate(() => window.__shared?.url || '')).toContain('#znajomy=');
+  const link = await A.page.evaluate(() => window.__shared.url);
+  expect(await A.page.evaluate(() => window.__shared.text)).toContain('Zagraj ze mną w szachy');
+
+  // B bez konta: link → rejestracja → pytanie → znajomi
+  const B = await phone(browser);
+  await B.page.goto(link.replace(/^https?:\/\/[^/]+/, FRONT));
+  await expect(B.page.getByRole('heading', { name: 'Załóż konto' })).toBeVisible();
+  await B.page.locator('#room-nick').fill(nickB);
+  await B.page.locator('#acct-pass').fill(PASS);
+  await B.page.getByRole('button', { name: 'Załóż konto' }).click();
+  await expect(B.page.locator('.dialog h2')).toHaveText(`Dodać ${nickA} do znajomych?`);
+  await B.page.getByRole('button', { name: 'Tak, dodaj' }).click();
+  await expect(B.page.locator('#toast')).toContainText(`${nickA} jest teraz Twoim znajomym`);
+  await expect(A.page.locator('#toast')).toContainText(`${nickB} dołączył(a) do Twoich znajomych`);
+  await expect(A.page.locator('.friend-row', { hasText: nickB })).toBeVisible();
+  // link działa raz
+  const C = await phone(browser);
+  await register(C.page, uniq('Trzeci'));
+  await C.page.goto('about:blank'); // sam #… nie przeładowuje strony
+  await C.page.goto(link.replace(/^https?:\/\/[^/]+/, FRONT));
+  await expect(C.page.locator('#toast')).toContainText('Ten link do znajomych jest nieaktualny');
+
+  // język: flaga Polski → lista → English; teksty po angielsku, wybór zapamiętany
+  await B.page.getByRole('button', { name: 'Menu' }).click();
+  await expect(B.page.locator('.lang-btn')).toContainText('Polski');
+  await expect(B.page.locator('.lang-btn img')).toHaveAttribute('src', 'flags/pl.svg');
+  await B.page.locator('.lang-btn').click();
+  await expect(B.page.locator('.lang-opt')).toHaveText(['English', 'Polski']); // alfabetycznie
+  await B.page.locator('.lang-opt', { hasText: 'English' }).click();
+  await expect(B.page.getByRole('button', { name: /Quick game/ })).toBeVisible();
+  await expect(B.page.getByRole('heading', { name: 'My clubs' })).toBeVisible();
+  await expect(B.page.getByRole('button', { name: 'Play on Lichess' })).toBeVisible();
+  await B.page.reload();
+  await expect(B.page.getByRole('button', { name: /Quick game/ })).toBeVisible();
+  await B.page.locator('.lang-btn').click();
+  await B.page.locator('.lang-opt', { hasText: 'Polski' }).click();
+  await expect(B.page.getByRole('button', { name: /Szybka gra/ })).toBeVisible();
+
+  // A: klub, potem usunięcie konta — przy klubie trzeba zdecydować (usunąć albo przekazać)
+  await A.page.getByRole('button', { name: 'Menu' }).click();
+  await createClub(A.page, 'Klub do skasowania');
+  await A.page.getByRole('button', { name: 'Menu' }).click();
+  await A.page.getByRole('button', { name: /Szybka gra/ }).click();
+  await A.page.locator('button[aria-label="Konto"]').click();
+  await A.page.getByRole('button', { name: 'Usuń konto…' }).click();
+  await expect(A.page.locator('.dialog')).toContainText('usunięty gracz');
+  const sel = A.page.locator('.dialog select');
+  await expect(sel).toHaveCount(1);
+  await A.page.locator('#del-pass').fill(PASS);
+  await A.page.getByRole('button', { name: 'Usuń konto na zawsze' }).click();
+  await expect(A.page.locator('#toast')).toContainText('Wybierz, co z klubem');
+  await sel.selectOption('delete');
+  await A.page.locator('#del-pass').fill('zle-haslo-xx');
+  await A.page.getByRole('button', { name: 'Usuń konto na zawsze' }).click();
+  await expect(A.page.locator('#toast')).toContainText('Złe hasło');
+  await A.page.locator('#del-pass').fill(PASS);
+  await A.page.getByRole('button', { name: 'Usuń konto na zawsze' }).click();
+  await expect(A.page.locator('#toast')).toContainText('Konto zostało usunięte');
+  await expect(A.page.getByRole('button', { name: 'Załóż konto' })).toBeVisible();
+  // u B znajomy zniknął; logowanie na usunięte konto nie działa
+  await B.page.getByRole('button', { name: /Szybka gra/ }).click();
+  await expect(B.page.locator('.friend-row', { hasText: nickA })).toHaveCount(0);
+  await A.page.getByRole('button', { name: 'Zaloguj się' }).click();
+  await A.page.locator('#room-nick').fill(nickA);
+  await A.page.locator('#acct-pass').fill(PASS);
+  await A.page.locator('form[data-form="account"]').getByRole('button', { name: 'Zaloguj się' }).click();
+  await expect(A.page.locator('#toast')).toContainText('Nieprawidłowy nick lub hasło');
+  for (const P of [A, B, C]) await P.ctx.close();
 });

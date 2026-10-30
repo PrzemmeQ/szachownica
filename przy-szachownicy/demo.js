@@ -1,4 +1,5 @@
 // Dostawca demo: partia z prostym komputerem w przeglądarce, bez logowania i bez rankingu.
+import { t } from './i18n.js';
 import { Chess } from './chess.js';
 
 const VALUE = { p: 1, n: 3, b: 3, r: 5, q: 9, k: 0 };
@@ -44,7 +45,7 @@ export class DemoProvider {
   async logout() { this.games.forEach((g) => clearInterval(g.timer)); this.games.clear(); }
 
   async account() {
-    return { id: 'gosc', name: 'Gość (demo)', ratings: {} };
+    return { id: 'gosc', name: t('Gość (demo)'), ratings: {} };
   }
 
   async ongoing() {
@@ -182,9 +183,9 @@ export class DemoProvider {
 
   async move(id, uci) {
     const g = this.games.get(id);
-    if (!g || g.status !== 'started') throw new Error('Partia nie trwa.');
-    if (g.chess.turn() !== g.myColor[0]) throw new Error('To nie Twój ruch.');
-    try { this._apply(g, uci); } catch { throw new Error('Ruch niedozwolony.'); }
+    if (!g || g.status !== 'started') throw new Error(t('Partia nie trwa.'));
+    if (g.chess.turn() !== g.myColor[0]) throw new Error(t('To nie Twój ruch.'));
+    try { this._apply(g, uci); } catch { throw new Error(t('Ruch niedozwolony.')); }
     this._emit(g);
     if (g.status === 'started') this._scheduleBot(g);
   }
@@ -216,7 +217,7 @@ export class DemoProvider {
     const mine = g.myColor[0];
     const plies = g.chess.turn() === mine ? 2 : 1;
     const myMoves = g.uci.filter((_, i) => (i % 2 === 0 ? 'w' : 'b') === mine).length;
-    if (!myMoves || g.uci.length < plies) throw new Error('Nie ma czego cofnąć.');
+    if (!myMoves || g.uci.length < plies) throw new Error(t('Nie ma czego cofnąć.'));
     for (let i = 0; i < plies; i++) { g.chess.undo(); g.uci.pop(); }
     g.lastAt = Date.now();
     this._emit(g);

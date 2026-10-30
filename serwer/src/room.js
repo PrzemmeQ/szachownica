@@ -10,6 +10,7 @@ import { clubMethods } from './clubs.js';
 import { socialMethods } from './social.js';
 import { memberMethods } from './members.js';
 import { loginMethods } from './login.js';
+import { deleteMethods } from './delete.js';
 
 const ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
 export const ROOM_ID_RE = /^[abcdefghjkmnpqrstuvwxyz23456789]{12}$/;
@@ -455,6 +456,8 @@ export class Room extends DurableObject {
       // tylko z poczekalni ogólnej (sprawdzenie kodu i blokady jest tam)
       if (action === 'info' && internal) return json({ name: this.kv('name'), needsPassword: !!this.kv('pass_hash') });
       if (action === 'join' && internal) return await this.httpJoin(body);
+      if (action === 'owner-info' && internal) return json(this.ownerInfo(String(body.accountId || '')));
+      if (action === 'account-delete' && internal) { await this.accountDelete(body.accountId, body.decision); return json({ ok: true }); }
       if (action === 'revoke-account' && internal) { // wylogowanie wszystkich urządzeń konta
         for (const m of this.sql.exec('SELECT id FROM members WHERE account_id = ?', String(body.accountId || '')).toArray()) {
           this.sql.exec('DELETE FROM tokens WHERE member_id = ?', m.id);
@@ -522,6 +525,7 @@ export class Room extends DurableObject {
       case 'acct-room-add': this.acctAddRoom(body.accountId, body.roomId, body.name); return { ok: true };
       case 'acct-room-remove': this.acctRemoveRoom(body.accountId, body.roomId); return { ok: true };
       case 'acct-room-status': this.acctRoomStatus(body); return { ok: true };
+      case 'acct-room-unregister': this.sql.exec('DELETE FROM room_dir WHERE room_id = ?', String(body.roomId || '')); return { ok: true };
       case 'acct-find': return this.acctFind(body.nick);
       case 'acct-ratings': return this.acctRatings(body.ids);
       case 'acct-rate': return this.acctRate(body);
@@ -675,6 +679,11 @@ export class Room extends DurableObject {
       switch (msg.t) {
         case 'setPassword': return this.acctSetPassword(me, msg, a.th);
         case 'accountInfo': return this.accountInfo(me);
+        case 'friendLinkCreate': return this.cmdFriendLinkCreate(me);
+        case 'friendLinkInfo': return this.cmdFriendLinkInfo(me, msg.token);
+        case 'friendLinkUse': return this.cmdFriendLinkUse(me, msg.token);
+        case 'ownedClubs': return this.cmdOwnedClubs(me);
+        case 'deleteAccount': return this.cmdDeleteAccount(me, msg);
         case 'qrInfo': return this.cmdQrInfo(msg.code);
         case 'qrApprove': return this.cmdQrApprove(me, msg.code);
         case 'logoutAll': return this.cmdLogoutAll(me, a.th);
@@ -1261,7 +1270,7 @@ export class Room extends DurableObject {
   }
 }
 
-Object.assign(Room.prototype, accountMethods, statsMethods, clubMethods, socialMethods, memberMethods, loginMethods);
+Object.assign(Room.prototype, accountMethods, statsMethods, clubMethods, socialMethods, memberMethods, loginMethods, deleteMethods);
 
 function hasMatingMaterial(chess, c) {
   let minors = 0;

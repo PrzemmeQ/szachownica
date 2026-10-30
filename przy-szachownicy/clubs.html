@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>For chess clubs and schools — Przy Szachownicy</title>
+  <meta name="description" content="Online chess on a real board for clubs and schools: private club with a code, rating, coach panel, game records. No Lichess accounts, no ads.">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+  <style>
+    main { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; line-height: 1.55; }
+    .hero h1 { font-size: 1.9rem; line-height: 1.2; margin: 12px 0 10px; }
+    .hero p { font-size: 1.08rem; }
+    .cta { display: flex; flex-wrap: wrap; gap: 10px; margin: 18px 0 8px; }
+    .cta .btn { text-decoration: none; }
+    h2 { font-size: 1.2rem; margin: 30px 0 10px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; }
+    .grid .card h3 { font-size: 1rem; margin: 0 0 4px; }
+    .grid .card p { margin: 0; color: var(--muted); font-size: 0.94rem; }
+    ol.steps { padding-left: 1.3em; }
+    ol.steps li { margin: 6px 0; }
+    details { border-top: 1px solid var(--line); padding: 10px 0; }
+    details summary { cursor: pointer; font-weight: 600; }
+    details p { margin: 8px 0 0; color: var(--muted); }
+  </style>
+</head>
+<body>
+<main>
+  <p><a href="./">← App</a> · <a href="kluby.html">Polski</a></p>
+  <section class="hero">
+    <img class="logo-img" src="logo.svg" alt="" width="72" height="72">
+    <h1>Online chess on a real board — for your club</h1>
+    <p>Students play at home on a wooden board against their clubmates. The phone just reads out the opponent's move and takes theirs — no board on screen, no ads and no chess-site accounts.</p>
+    <div class="cta">
+      <a class="btn primary big" href="./#nowy-pokoj">Create a club</a>
+      <a class="btn big" href="./">See the app</a>
+    </div>
+    <p class="muted small">Works in the browser on phones, tablets and computers. Nothing to install.</p>
+  </section>
+
+  <h2>Why clubs use it</h2>
+  <div class="grid">
+    <div class="card"><h3>A real board</h3><p>Kids practise like at a tournament: pieces in hand, position on the table, not on a screen.</p></div>
+    <div class="card"><h3>Less screen</h3><p>A calm app without animations, ads or bait notifications. Parents appreciate it.</p></div>
+    <div class="card"><h3>Private club</h3><p>Join with a club code (e.g. HETMA-7Q4MX), optionally also a password — and the coach or an admin approves every new member. You can also add a student by nickname, change the code and remove members.</p></div>
+    <div class="card"><h3>Coach panel</h3><p>The coach sees each student's results, watches games live and downloads records for analysis (PGN, Lichess).</p></div>
+    <div class="card"><h3>Tournament notation</h3><p>Moves are entered like on a score sheet (Nf3, exd5, O-O) — learning notation along the way.</p></div>
+    <div class="card"><h3>From 10 minutes</h3><p>Time to play the move and enter it. Mistakes can be taken back with the opponent's consent.</p></div>
+  </div>
+
+  <h2>How to start</h2>
+  <ol class="steps">
+    <li><strong>The coach creates a club</strong> — club name and own nickname. Takes a minute.</li>
+    <li><strong>Sends the code or link</strong> to students (e.g. in the parents' group) or adds them by nickname. A student creates an account and asks to join, the coach accepts; the club is saved in “My clubs”.</li>
+    <li><strong>Students challenge each other</strong> in the club or look for an opponent in the club lobby. Rated games count towards the shared rating.</li>
+    <li><strong>The coach checks the panel</strong>: who plays, with what results, which games are worth discussing in class.</li>
+  </ol>
+  <div class="cta"><a class="btn primary" href="./#nowy-pokoj">Create a club</a></div>
+
+  <h2>Questions</h2>
+  <details><summary>How much does it cost?</summary><p>Nothing during testing. If the app catches on, clubs will get clear information about any paid plan well in advance. Playing via Lichess will always stay free.</p></details>
+  <details><summary>Do kids need an account or an email?</summary><p>An account is needed, but no email: just a nickname and password (half a minute). That way the coach knows who asks to join, removing someone from the club is effective, and games count towards the rating. The account works on any device.</p></details>
+  <details><summary>What data do you collect?</summary><p>Only nickname, club membership, games and rating. No addresses, photos, ads or tracking. Data is stored in the European Union. <a href="privacy.html">Privacy policy</a>.</p></details>
+  <details><summary>How do you know a student plays at a board and not with an engine?</summary><p>There's no way to check — that's why clubs are private and meant for groups that know each other. The coach sees the games and can discuss them.</p></details>
+  <details><summary>Which devices does it work on?</summary><p>Any phone, tablet or computer with an up-to-date browser. The app can be added to the home screen like a normal app. Bluetooth keyboards work too.</p></details>
+  <details><summary>Can you play via Lichess?</summary><p>Yes — anyone with a Lichess account can play there through the same app, on a real board, with their Lichess rating.</p></details>
+</main>
+</body>
+</html>

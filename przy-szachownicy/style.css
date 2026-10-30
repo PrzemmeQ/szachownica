@@ -300,3 +300,13 @@ code { font-family: var(--mono); font-size: 0.9em; }
 
 .chat-row { margin: 10px 0; display: grid; gap: 6px; }
 .chip.small { font-size: 0.82rem; padding: 6px 10px; }
+
+/* --- Lichess na dole, wybór języka --- */
+.lichess-btn { margin: 4px auto 6px; min-width: 220px; }
+.links-row { margin-top: 10px; }
+.lang-picker { position: relative; display: inline-block; margin-top: 12px; }
+.lang-btn { background: none; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; color: var(--ink); font: inherit; font-size: 0.9rem; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+.lang-btn img, .lang-opt img { border-radius: 2px; box-shadow: 0 0 0 1px #0002; }
+.lang-list { position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%); list-style: none; margin: 0; padding: 4px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 6px 20px #0003; min-width: 170px; z-index: 20; text-align: left; }
+.lang-opt { display: flex; align-items: center; gap: 8px; width: 100%; background: none; border: 0; padding: 8px 10px; border-radius: 6px; font: inherit; color: var(--ink); cursor: pointer; }
+.lang-opt:hover, .lang-opt.sel { background: var(--accent-soft); }

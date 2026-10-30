@@ -1,4 +1,5 @@
 // Dostawca partii: Lichess (Board API + OAuth PKCE, bez własnego serwera).
+import { t } from './i18n.js';
 import { CONFIG } from './config.js';
 import { readNdjson } from './ndjson.js';
 
@@ -111,13 +112,13 @@ export class LichessProvider {
     const clean = () => history.replaceState(null, '', location.pathname + location.hash);
     if (params.get('error')) {
       clean();
-      throw new Error(params.get('error') === 'access_denied' ? 'Anulowano logowanie.' : 'Logowanie nie powiodło się.');
+      throw new Error(params.get('error') === 'access_denied' ? t('Anulowano logowanie.') : t('Logowanie nie powiodło się.'));
     }
     const code = params.get('code');
     const state = params.get('state');
     const verifier = ls(LS_VERIFIER);
     clean();
-    if (!verifier || state !== ls(LS_STATE)) throw new Error('Logowanie przerwane — spróbuj ponownie.');
+    if (!verifier || state !== ls(LS_STATE)) throw new Error(t('Logowanie przerwane — spróbuj ponownie.'));
     const res = await fetch(HOST + '/api/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -129,7 +130,7 @@ export class LichessProvider {
       }),
     });
     ls(LS_VERIFIER, null); ls(LS_STATE, null);
-    if (!res.ok) throw new Error('Nie udało się uzyskać dostępu do konta Lichess.');
+    if (!res.ok) throw new Error(t('Nie udało się uzyskać dostępu do konta Lichess.'));
     const data = await res.json();
     this.setToken(data.access_token);
     return true;
@@ -159,18 +160,18 @@ export class LichessProvider {
     const res = await fetch(HOST + path, { method, headers, body: payload, signal });
     if (res.status === 401) {
       this.setToken(null);
-      const e = new Error('Sesja wygasła — zaloguj się ponownie.');
+      const e = new Error(t('Sesja wygasła — zaloguj się ponownie.'));
       e.code = 401;
       throw e;
     }
-    if (res.status === 429) throw new Error('Lichess prosi o chwilę przerwy (limit zapytań). Spróbuj za minutę.');
+    if (res.status === 429) throw new Error(t('Lichess prosi o chwilę przerwy (limit zapytań). Spróbuj za minutę.'));
     return res;
   }
   async apiJson(path, opts) {
     const res = await this.api(path, opts);
     let data = null;
     try { data = await res.json(); } catch {}
-    if (!res.ok) throw new Error(errText(data) || `Błąd Lichess (${res.status})`);
+    if (!res.ok) throw new Error(errText(data) || t('Błąd Lichess ({status})', { status: res.status }));
     return data;
   }
 
@@ -208,7 +209,7 @@ export class LichessProvider {
     this.eventsCtl = ctl;
     try {
       const res = await this.api('/api/stream/event', { signal: ctl.signal });
-      if (!res.ok) throw new Error('event stream ' + res.status);
+      if (!res.ok) throw new Error('' + t('event stream') + ' ' + res.status);
       this.onEvent({ type: 'streamStatus', ok: true });
       attempt = 0;
       await readNdjson(res, (ev) => this._handleEvent(ev));
@@ -268,7 +269,7 @@ export class LichessProvider {
       });
       if (!res.ok) {
         let d = null; try { d = await res.json(); } catch {}
-        throw new Error(errText(d) || 'Nie udało się rozpocząć szukania.');
+        throw new Error(errText(d) || t('Nie udało się rozpocząć szukania.'));
       }
       await readNdjson(res, () => {});
     })();
@@ -292,7 +293,7 @@ export class LichessProvider {
       const res = await this.api('/api/challenge/' + encodeURIComponent(username), { method: 'POST', body, signal: ctl.signal });
       if (!res.ok) {
         let d = null; try { d = await res.json(); } catch {}
-        throw new Error(errText(d) || 'Nie udało się wysłać wyzwania.');
+        throw new Error(errText(d) || t('Nie udało się wysłać wyzwania.'));
       }
       let result = null;
       await readNdjson(res, (o) => { if (o.done) result = o.done; });
@@ -323,7 +324,7 @@ export class LichessProvider {
       try {
         const res = await this.api('/api/board/game/stream/' + id, { signal: ctl.signal });
         if (res.status === 404) { onMsg({ type: 'error', message: 'Nie znaleziono partii.' }); return; }
-        if (!res.ok) throw new Error('game stream ' + res.status);
+        if (!res.ok) throw new Error('' + t('game stream') + ' ' + res.status);
         onMsg({ type: 'connection', ok: true });
         attempt = 0;
         await readNdjson(res, (m) => {
@@ -387,8 +388,8 @@ function errText(d) {
   return '';
 }
 function translateErr(s) {
-  if (/not your turn/i.test(s)) return 'To nie Twój ruch.';
-  if (/illegal|invalid move/i.test(s)) return 'Lichess odrzucił ruch jako niedozwolony.';
-  if (/no such user|not found/i.test(s)) return 'Nie znaleziono takiego gracza.';
+  if (/not your turn/i.test(s)) return t('To nie Twój ruch.');
+  if (/illegal|invalid move/i.test(s)) return t('Lichess odrzucił ruch jako niedozwolony.');
+  if (/no such user|not found/i.test(s)) return t('Nie znaleziono takiego gracza.');
   return s;
 }

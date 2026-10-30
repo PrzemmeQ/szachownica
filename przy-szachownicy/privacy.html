@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Privacy — Przy Szachownicy</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+  <style>main { max-width: 640px; margin: 0 auto; padding: 20px 16px 40px; line-height: 1.55; } h2 { font-size: 1.05rem; margin-top: 22px; }</style>
+</head>
+<body>
+<main>
+  <h1>Privacy</h1>
+  <p><a href="./">← Back to the app</a> · <a href="prywatnosc.html">Polski</a></p>
+  <p class="small muted">This is a translation. If in doubt, the <a href="prywatnosc.html">Polish version</a> prevails.</p>
+
+  <h2>Playing via Lichess</h2>
+  <p>When you sign in with Lichess, the app connects directly to lichess.org. We have no server of our own in this mode and don't see your data. Account access (the token) stays only on your device.</p>
+
+  <h2>Clubs and lobby (playing without a Lichess account)</h2>
+  <p>In clubs and the general lobby, games go through our server. We store only what's needed to play:</p>
+  <ul>
+    <li>the club name and code and the nickname you give; if the owner sets a club password — its secure hash,</li>
+    <li>club membership, role (owner, admin, member) and a secure hash of the device key (the key itself stays only on your device),</li>
+    <li>join requests (nickname and date; deleted after a decision or after 7 days), invites from the owner/admin, the number of declined requests and the list of people blocked in the club,</li>
+    <li>games (moves, times, result) and rating — one shared by the lobby and all clubs,</li>
+    <li>last activity time (to show who's online).</li>
+  </ul>
+  <p><strong>Account:</strong> if you create an account, we store your nickname and a secure password hash (PBKDF2 — we never know the password itself). We store an email only if you give it, and use it only to send a password reset link (via Resend). The account also remembers which clubs you belong to.</p>
+  <p><strong>Passwordless sign-in:</strong> if you turn on Face ID / fingerprint sign-in (a passkey), we store only the public part of the key and a usage counter — we never receive your fingerprint or face image; your device checks them. When signing in a computer with your phone (QR code), we keep a one-time code and a general device description (e.g. “Windows · Chrome”) for at most 2 minutes.</p>
+  <p><strong>Friends:</strong> the account stores your friends list, sent and received invites, the people you've blocked, and recent opponents (from games). A blocked person isn't told about the block. Only your friends and recent opponents see that you're online. A friend link (e.g. sent via WhatsApp) works once and is valid for 7 days; we store only its hash.</p>
+  <p><strong>Abuse protection:</strong> when creating an account or club and when signing in, the server stores a hash of your internet address (with a salt changed daily) for at most an hour. The address can't be read from the hash; it's used only for limits (e.g. 10 new accounts per hour from one network) and to block password guessing. For wrong club codes or passwords we store an attempt counter and block time with the account. We don't store IP addresses or location.</p>
+  <p><strong>Statistics:</strong> we count how many games and clubs are created each day and on how many days a player played (stored as an ID, without a nickname). This only serves to judge whether the app is useful to anyone. Only the app's author sees the statistics.</p>
+  <p>We don't collect location. There are no ads or tracking. The server runs on Cloudflare and data is stored in the European Union.</p>
+  <p>Every club member sees the nicknames, ratings and game history of the other members of that club. The owner and admins also see member statistics and join requests (the requester's nickname) and can watch games live.</p>
+
+  <h2>General lobby</h2>
+  <p>In the general lobby you play with an account. Your nickname and rating are visible in the rating list (top players) and to your opponents. There's no list of all online players. Only you (and your opponents in games with you) see your game history.</p>
+
+  <h2>Your device</h2>
+  <p>The app stores settings, account sign-in data, the chosen language and keys to your clubs in browser storage (localStorage). The camera (QR scanner) works only on your device — the image is never sent anywhere. You can remove this data in the club or account menu (“Remove from this device”, “Sign out”) or by clearing site data.</p>
+
+  <h2>Deleting your account and data</h2>
+  <p>You can delete your account yourself: account menu → “Delete account…” (confirmed with your password). We immediately delete your nickname, password hash, email, passkeys, sign-ins on all devices, friends, invites, blocks, rating and club memberships. Games played stay with opponents and in clubs, but under the nickname “deleted player” — without data that identifies you. If you own a club, you decide whether to delete it (it disappears with all its data) or transfer it to a member of your choice.</p>
+  <p>The server (Cloudflare) keeps a history of data changes for 30 days to recover from failures — your data disappears from it within 30 days of deletion.</p>
+  <p>For other matters (e.g. deleting a single game), write via the project page on GitHub (github.com/przemmeq/szachownica).</p>
+</main>
+</body>
+</html>

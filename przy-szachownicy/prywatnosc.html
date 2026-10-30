@@ -27,7 +27,7 @@
   </ul>
   <p><strong>Konto:</strong> jeśli zakładasz konto, przechowujemy nick i zabezpieczony skrót hasła (PBKDF2 — samego hasła nie znamy). E-mail zapisujemy tylko wtedy, gdy sam go podasz, i używamy go wyłącznie do wysłania linku do zmiany hasła (przez usługę Resend). Konto pamięta też, do jakich klubów należysz.</p>
   <p><strong>Logowanie bez hasła:</strong> jeśli włączysz logowanie Face ID / odciskiem palca (klucz dostępu), zapisujemy tylko publiczną część klucza i licznik użyć — odcisku palca ani zdjęcia twarzy nigdy nie dostajemy, sprawdza je Twoje urządzenie. Przy logowaniu komputera telefonem (kod QR) przez najwyżej 2 minuty przechowujemy jednorazowy kod i ogólny opis urządzenia (np. „Windows · Chrome”).</p>
-  <p><strong>Znajomi:</strong> konto przechowuje listę Twoich znajomych, wysłane i otrzymane zaproszenia, listę osób, które zablokowałeś, oraz ostatnich rywali (z partii). Zablokowana osoba nie dowiaduje się o blokadzie. To, że jesteś online, widzą tylko Twoi znajomi i ostatni rywale.</p>
+  <p><strong>Znajomi:</strong> konto przechowuje listę Twoich znajomych, wysłane i otrzymane zaproszenia, listę osób, które zablokowałeś, oraz ostatnich rywali (z partii). Zablokowana osoba nie dowiaduje się o blokadzie. To, że jesteś online, widzą tylko Twoi znajomi i ostatni rywale. Link do znajomych (np. wysłany WhatsAppem) jest jednorazowy i ważny 7 dni; przechowujemy tylko jego skrót.</p>
   <p><strong>Ochrona przed nadużyciami:</strong> przy zakładaniu konta lub klubu i przy logowaniu serwer zapisuje na najwyżej godzinę skrót adresu internetowego (z solą zmienianą codziennie). Ze skrótu nie da się odczytać adresu; służy tylko do limitów (np. 10 nowych kont na godzinę z jednej sieci) i blokady zgadywania haseł. Za błędne kody lub hasła klubów zapisujemy licznik prób i czas blokady przy koncie. Samych adresów IP ani lokalizacji nie zapisujemy.</p>
   <p><strong>Statystyki:</strong> liczymy, ile partii i klubów powstaje każdego dnia oraz w ilu dniach grał dany gracz (zapisany jako identyfikator, bez nicku). Służy to tylko ocenie, czy aplikacja jest komuś potrzebna. Statystyki widzi wyłącznie autor aplikacji.</p>
   <p>Nie zbieramy lokalizacji. Nie ma reklam ani śledzenia. Serwer działa na Cloudflare, a dane są przechowywane w Unii Europejskiej.</p>
@@ -39,8 +39,12 @@
   <h2>Twoje urządzenie</h2>
   <p>Aplikacja zapisuje w pamięci przeglądarki (localStorage) ustawienia, dane logowania do konta i klucze do Twoich klubów. Aparat (skaner kodu QR) działa tylko na Twoim urządzeniu — obraz nigdzie nie jest wysyłany. Usuniesz je w menu klubu lub konta („Usuń z tego urządzenia”, „Wyloguj”) albo czyszcząc dane strony.</p>
 
-  <h2>Usunięcie danych</h2>
-  <p>Chcesz usunąć swoje konto, nick lub partie? Napisz przez stronę projektu na GitHubie (github.com/przemmeq/szachownica).</p>
+  <h2>Usunięcie konta i danych</h2>
+  <p>Konto usuniesz sam: menu konta → „Usuń konto…” (potwierdzenie hasłem). Od razu usuwamy nick, skrót hasła, e-mail, klucze dostępu, logowania na wszystkich urządzeniach, znajomych, zaproszenia, blokady, ranking i członkostwo w klubach. Rozegrane partie zostają u rywali i w klubach, ale z nickiem „usunięty gracz” — bez danych, które by Cię identyfikowały. Jeśli jesteś założycielem klubu, decydujesz, czy klub usunąć (znika razem ze wszystkimi danymi), czy przekazać wybranemu członkowi.</p>
+  <p>Serwer (Cloudflare) przechowuje historię zmian danych przez 30 dni, żeby można było naprawić awarię — z tej kopii Twoje dane znikną w ciągu 30 dni od usunięcia.</p>
+  <p>W innych sprawach (np. usunięcie pojedynczej partii) napisz przez stronę projektu na GitHubie (github.com/przemmeq/szachownica).</p>
+
+  <p class="small"><a href="privacy.html">English version</a></p>
 </main>
 </body>
 </html>
