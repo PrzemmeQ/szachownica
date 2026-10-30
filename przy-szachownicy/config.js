@@ -16,7 +16,7 @@ export const CONFIG = {
 
   // Adres serwera pokoi (wariant B, Cloudflare Workers), np. https://przy-szachownicy.twojanazwa.workers.dev
   // Pusty = przycisk „Graj w pokoju” jest ukryty.
-  ROOMS_API: '',
+  ROOMS_API: 'https://przy-szachownicy.przemmeq.workers.dev',
 
   // true = tylko tryb demo (bez logowania), np. dla podglądu w miejscach, które blokują połączenia z lichess.org.
   DEMO_ONLY: false,

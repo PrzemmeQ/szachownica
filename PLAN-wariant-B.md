@@ -65,8 +65,8 @@ w kształtach z sekcji 2 handoffu (`gameStart`, `gameFinish`, `challenge`, `chal
 
 Zbudowane i sprawdzone lokalnie: `serwer/` (8 testów serwera) i front (`rooms.js`, widoki w `app.js`,
 `prywatnosc.html`; 3 testy Playwright: pełny przebieg B1 z 20 s bez sieci + regresja A i demo).
-Do zrobienia: konto Cloudflare → `npm run deploy` → `ROOMS_API` w `config.js`; potwierdzić `jurisdiction("eu")`
-na darmowym planie; test na dwóch prawdziwych telefonach.
+Wdrożone 30.10.2026: https://przy-szachownicy.przemmeq.workers.dev (`jurisdiction("eu")` działa na darmowym planie),
+`ROOMS_API` ustawione w `config.js`. Do zrobienia: test na dwóch prawdziwych telefonach.
 
 ## Kolejność
 
