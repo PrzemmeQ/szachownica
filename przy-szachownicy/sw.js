@@ -1,5 +1,5 @@
 // Service worker: zapamiętuje pliki aplikacji, nie dotyka zapytań do Lichess.
-const VERSION = 'ps-v8';
+const VERSION = 'ps-v9';
 const SHELL = [
   './', './index.html', './style.css', './app.js', './config.js', './notation.js', './ndjson.js',
   './lichess.js', './demo.js', './rooms.js', './chess.js', './manifest.webmanifest', './prywatnosc.html',

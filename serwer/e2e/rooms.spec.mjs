@@ -33,11 +33,13 @@ async function phone(browser) {
   return { ctx, page };
 }
 
-// Tryb prosty (domyślny): tylko pole docelowe; gdy aplikacja pyta, którą bierką — wybiera tę z pola from.
-async function play(page, from, to) {
-  for (const ch of to) await page.locator(`#entry button.key[data-k="${ch}"]`).click();
-  const chip = page.locator(`#entry button.chip[data-action="pick"][data-id="${from}"]`);
-  if (await chip.count()) await chip.click();
+// Wpisuje ruch notacją (domyślny tryb) przyciskami, np. „e4”, „Nf3”, „exd5”, „O-O”.
+async function typeSan(page, san) {
+  const tokens = /^O-O(-O)?$/.test(san) ? [san] : san.split('');
+  for (const t of tokens) await page.locator(`#entry button.key[data-action="san"][data-k="${t}"]`).click();
+}
+async function play(page, san) {
+  await typeSan(page, san);
   await page.getByRole('button', { name: 'Wyślij ruch' }).click();
 }
 
@@ -95,14 +97,14 @@ test('B1: pokój z linku, wyzwanie 10+5, partia, zerwanie sieci na 20 s, ranking
 
   // 5. ruchy w obie strony, ruch rywala na ekranie i czytany na głos
   await expect(A.page.locator('.status')).toHaveText('Twój ruch');
-  await play(A.page, 'e2', 'e4');
+  await play(A.page, 'e4');
   await expect(B.page.locator('.lm-san')).toHaveText('e4');
   await expect.poll(() => B.page.evaluate(() => window.__spoken.at(-1))).toBe('Pion e 2 na e 4');
-  await play(B.page, 'e7', 'e5');
+  await play(B.page, 'e5');
   await expect(A.page.locator('.lm-san')).toHaveText('e5');
   await expect.poll(() => A.page.evaluate(() => window.__spoken.at(-1))).toBe('Pion e 7 na e 5');
-  await play(A.page, 'g1', 'f3');
-  await expect(B.page.locator('.lm-san')).toHaveText('Sf3');
+  await play(A.page, 'Nf3');
+  await expect(B.page.locator('.lm-san')).toHaveText('Nf3');
   await B.page.waitForTimeout(1500);
   await expectClocksAgree(A.page, B.page);
 
@@ -117,8 +119,8 @@ test('B1: pokój z linku, wyzwanie 10+5, partia, zerwanie sieci na 20 s, ranking
   await expectClocksAgree(A.page, B.page);
   const bTime = clockMs(await B.page.locator('#clock-me').textContent());
   expect(bTime).toBeLessThan(600000 - 20000); // czas w trakcie zerwania został policzony
-  await play(B.page, 'b8', 'c6');
-  await expect(A.page.locator('.lm-san')).toHaveText('Sc6');
+  await play(B.page, 'Nc6');
+  await expect(A.page.locator('.lm-san')).toHaveText('Nc6');
   await expectClocksAgree(A.page, B.page);
 
   // 7. B się poddaje
@@ -159,7 +161,7 @@ test('wariant A bez ROOMS_API: ekran startowy bez zmian, demo działa', async ({
   await expect(page.locator('.tabs .tab.sel')).toHaveText('Komputer');
   await page.locator('button.chip[data-action="color"][data-id="white"]').click();
   await page.getByRole('button', { name: 'Zagraj z komputerem' }).click();
-  await play(page, 'd2', 'd4');
+  await play(page, 'd4');
   await expect(page.locator('.lm-san')).not.toHaveText('—', { timeout: 10000 });
   await ctx.close();
 });
@@ -212,10 +214,10 @@ test('poczekalnia ogólna: lista czekających i automatyczne parowanie (blitz 5+
   const aWhite = (await A.page.locator('.status').textContent()) === 'Twój ruch';
   const W = aWhite ? A.page : B.page;
   const Bl = aWhite ? B.page : A.page;
-  await play(W, 'd2', 'd4');
+  await play(W, 'd4');
   await expect(Bl.locator('.lm-san')).toHaveText('d4');
-  await play(Bl, 'g8', 'f6');
-  await expect(W.locator('.lm-san')).toHaveText('Sf6');
+  await play(Bl, 'Nf6');
+  await expect(W.locator('.lm-san')).toHaveText('Nf6');
   await W.getByRole('button', { name: 'Poddaj' }).click();
   await W.locator('.dialog').getByRole('button', { name: 'Poddaj' }).click();
   await expect(Bl.locator('.result-title')).toHaveText('Wygrana');
@@ -382,34 +384,74 @@ test('konto: rejestracja, pokój na koncie, logowanie na nowym telefonie przywra
   await C.ctx.close();
 });
 
-test('wpisywanie: tryb prosty (pytanie o bierkę) i przełączenie na „skąd → dokąd”', async ({ browser }) => {
-  const { ctx, page } = await phone(browser);
-  await page.goto(FRONT_A + '/');
-  await page.getByRole('button', { name: 'Wypróbuj bez logowania' }).click();
-  await page.locator('button.chip[data-action="color"][data-id="white"]').click();
-  await page.getByRole('button', { name: 'Zagraj z komputerem' }).click();
-  await expect(page.locator('.slot-label')).toHaveText('na pole');
+test('wpisywanie notacją: podpowiedzi, ruch niejednoznaczny (Nbd2), polskie litery, tryb „skąd → dokąd”', async ({ browser }) => {
+  // dwa telefony w pokoju — ruchy obu stron są przewidywalne (w demo komputer gra losowo)
+  const A = await phone(browser);
+  const B = await phone(browser);
+  await A.page.goto(FRONT + '/');
+  await A.page.getByRole('button', { name: /Pokój ze znajomymi/ }).click();
+  await A.page.locator('#room-name').fill('Notacja');
+  await A.page.locator('#room-nick').fill('Biały');
+  await A.page.getByRole('button', { name: 'Utwórz pokój' }).click();
+  const invite = await A.page.locator('#invite-link').inputValue();
+  await A.page.getByRole('button', { name: 'Gotowe' }).click();
+  await B.page.goto(invite);
+  await B.page.locator('#room-nick').fill('Czarny');
+  await B.page.getByRole('button', { name: 'Dołącz' }).click();
+  await A.page.locator('button.tab[data-action="mode"][data-id="member"]').click();
+  await A.page.locator('button.chip[data-action="color"][data-id="white"]').click();
+  await A.page.getByRole('button', { name: 'Wyślij wyzwanie' }).click();
+  await B.page.getByRole('button', { name: 'Przyjmij' }).click();
+  const W = A.page;
+  const Bl = B.page;
+  await expect(W.locator('.status')).toHaveText('Twój ruch');
 
-  // f3: może pójść pion f2 albo skoczek g1 → pytanie
-  for (const ch of 'f3') await page.locator(`#entry button.key[data-k="${ch}"]`).click();
-  await expect(page.locator('#entry')).toContainText('Którą zagrałeś?');
-  await page.locator('#entry button.chip[data-action="pick"][data-id="g1"]').click();
-  await page.getByRole('button', { name: 'Wyślij ruch' }).click();
-  await expect(page.locator('.hlist')).toContainText('Sf3');
+  // podpowiedzi w trakcie wpisywania i opis gotowego ruchu
+  await typeSan(W, 'N');
+  await expect(W.locator('.entry-msg')).toContainText('Pasuje:');
+  await expect(W.locator('.entry-msg')).toContainText('Nf3');
+  await typeSan(W, 'f3');
+  await expect(W.locator('.san-box')).toHaveText('Nf3');
+  await expect(W.locator('.entry-msg')).toContainText('skoczek g1 → f3');
+  await W.getByRole('button', { name: 'Wyślij ruch' }).click();
+  await expect(Bl.locator('.lm-san')).toHaveText('Nf3');
+  await play(Bl, 'd5');
+  await expect(W.locator('.lm-san')).toHaveText('d5');
 
-  // pole, na które nic nie może pójść
-  await expect(page.locator('.status')).toHaveText('Twój ruch', { timeout: 10000 });
-  for (const ch of 'e6') await page.locator(`#entry button.key[data-k="${ch}"]`).click();
-  await expect(page.locator('.entry-msg')).toContainText('Żadna Twoja bierka nie może teraz pójść na e6');
-  await page.getByRole('button', { name: '⌫ Cofnij' }).click();
-  await page.getByRole('button', { name: '⌫ Cofnij' }).click();
+  // ruch niemożliwy
+  await typeSan(W, 'e6');
+  await expect(W.locator('.entry-msg')).toContainText('Nie ma takiego ruchu');
+  await expect(W.getByRole('button', { name: 'Wyślij ruch' })).toBeDisabled();
+  await W.getByRole('button', { name: '⌫ Cofnij' }).click();
+  await W.getByRole('button', { name: '⌫ Cofnij' }).click();
 
-  // przełączenie na tryb dokładny
-  await page.getByRole('button', { name: /przełącz na „skąd → dokąd”/ }).click();
-  await expect(page.locator('.slot-label')).toHaveCount(0);
-  await expect(page.locator('.slots .slot')).toHaveCount(4);
-  for (const ch of 'e2e4') await page.locator(`#entry button.key[data-k="${ch}"]`).click();
-  await page.getByRole('button', { name: 'Wyślij ruch' }).click();
-  await expect(page.locator('.hlist')).toContainText('e4');
-  await ctx.close();
+  await play(W, 'd4');
+  await expect(Bl.locator('.lm-san')).toHaveText('d4');
+  await play(Bl, 'e6');
+  await expect(W.locator('.lm-san')).toHaveText('e6');
+
+  // Nd2: mogą skoczek b1 i skoczek f3 → podpowiedź, jak dopisać kolumnę (bez pytania „którą”)
+  await typeSan(W, 'Nd2');
+  await expect(W.locator('.entry-msg')).toContainText('Nbd2');
+  await expect(W.locator('.entry-msg')).toContainText('Nfd2');
+  await expect(W.getByRole('button', { name: 'Wyślij ruch' })).toBeDisabled();
+  for (let i = 0; i < 3; i++) await W.getByRole('button', { name: '⌫ Cofnij' }).click();
+  await play(W, 'Nbd2');
+  await expect(Bl.locator('.lm-san')).toHaveText('Nbd2');
+
+  // polskie litery figur (ustawienie): wyświetlanie i przyciski
+  await Bl.locator('.g-top button[data-action="game-menu"]').click();
+  await Bl.getByRole('button', { name: 'Ustawienia' }).click();
+  await Bl.locator('input[data-key="englishNotation"]').uncheck();
+  await Bl.getByRole('button', { name: 'Gotowe' }).click();
+  await expect(Bl.locator('.lm-san')).toHaveText('Sbd2');
+  await expect(Bl.locator('#entry button.key.piece[data-k="N"]')).toContainText('S');
+
+  // tryb „skąd → dokąd”
+  await Bl.getByRole('button', { name: /przełącz na „skąd → dokąd”/ }).click();
+  await expect(Bl.locator('.slots .slot')).toHaveCount(4);
+  for (const ch of 'c7c5') await Bl.locator(`#entry button.key[data-k="${ch}"]`).click();
+  await Bl.getByRole('button', { name: 'Wyślij ruch' }).click();
+  await expect(W.locator('.lm-san')).toHaveText('c5');
+  await A.ctx.close(); await B.ctx.close();
 });

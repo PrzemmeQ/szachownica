@@ -14,10 +14,14 @@ import {
 // Ustawienia użytkownika
 // ---------------------------------------------------------------------------
 const SETTINGS_KEY = 'ps_settings';
-const DEFAULT_SETTINGS = { speech: true, vibrate: true, sound: true, autoSend: false, emergencyBoard: true, simpleEntry: true };
+const DEFAULT_SETTINGS = { speech: true, vibrate: true, sound: true, autoSend: false, emergencyBoard: true, sanEntry: true, englishNotation: true };
 function loadSettings() {
-  try { return { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}') }; }
-  catch { return { ...DEFAULT_SETTINGS }; }
+  try {
+    const s = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
+    if (s.simpleEntry === false && s.sanEntry === undefined) s.sanEntry = false; // dawny tryb „skąd → dokąd”
+    delete s.simpleEntry;
+    return { ...DEFAULT_SETTINGS, ...s };
+  } catch { return { ...DEFAULT_SETTINGS }; }
 }
 function saveSettings() { try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(S.settings)); } catch {} }
 function lsGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
@@ -54,6 +58,7 @@ const S = {
   waiting: null, // { text, cancel?, kind }
   game: null,
   input: [],
+  san: '', // wpis notacją, np. „Nbd7”
   promo: null,
   sending: false,
   entryMsg: '',
@@ -679,53 +684,101 @@ function resultText(G) {
 }
 
 // --- wpisywanie ruchu --------------------------------------------------------
-// Tryb prosty: wpisujesz tylko pole docelowe (np. e4); gdy może tam pójść kilka bierek, aplikacja pyta którą.
-// Tryb dokładny: skąd → dokąd (np. e2 e4).
+// Notacja (domyślnie): oficjalny zapis turniejowy (SAN, angielskie litery), np. e4, Nf3, exd5, Nbd7, e8=Q, O-O.
+//   Przy niejednoznacznym ruchu aplikacja nie dopytuje — podpowiada, jak dopisać kolumnę lub rząd (Nbd7).
+// Pola: skąd → dokąd (np. e2 e4).
 const PIECE_NAME = { p: 'Pion', n: 'Skoczek', b: 'Goniec', r: 'Wieża', q: 'Hetman', k: 'Król' };
-function simpleEntry() { return S.settings.simpleEntry !== false; }
-function slotCount() { return simpleEntry() ? 2 : 4; }
+// [litera w zapisie, polska nazwa, polska litera]
+const SAN_PIECES = [['K', 'król', 'K'], ['Q', 'hetman', 'H'], ['R', 'wieża', 'W'], ['B', 'goniec', 'G'], ['N', 'skoczek', 'S']];
+const PL_TO_EN = { K: 'K', H: 'Q', W: 'R', G: 'B', S: 'N' };
+function sanEntry() { return S.settings.sanEntry !== false; }
+function englishLetters() { return S.settings.englishNotation !== false; }
+function fmtSan(san) { return englishLetters() ? san : sanToPl(san); }
 function nextSlotKind() { return S.input.length % 2 === 0 ? 'file' : 'rank'; }
-function resetEntry() { S.input = []; S.promo = null; S.pick = null; S.chosenFrom = null; }
+function resetEntry() { S.input = []; S.promo = null; S.san = ''; }
 
-// Po skompletowaniu wpisu: pytanie o bierkę, promocję albo (opcjonalnie) wysłanie od razu.
-function afterComplete() {
-  const check = validateInput();
-  if (!check.ok) { if (check.pick) S.pick = check.pick; else S.entryMsg = check.msg; }
-  else if (check.promotion) S.promo = { from: check.from, to: check.to };
-  else if (S.settings.autoSend) { renderEntry(); sendMove(); return true; }
-  return false;
+// --- notacja ---
+// Klucz porównania: bez znaków bicia, szacha, „=” i myślników; 0/o w roszadzie = O.
+const sanKey = (s) => String(s).replace(/[x+#=!?\-\s]/g, '').replace(/[0o]/g, 'O');
+const SAN_RE = /^([KQRBN])?([a-h])?([1-8])?([a-h][1-8])([QRBN])?$/;
+
+// Dopasowanie wpisu do ruchów dozwolonych w pozycji.
+// state: empty | ok (move) | partial (hints) | ambiguous (msg, hints) | promo (msg) | bad (msg)
+function sanMatch(input) {
+  const G = S.game;
+  const key = sanKey(input || '');
+  if (!key) return { state: 'empty' };
+  const legal = G.chess.moves({ verbose: true });
+  const exact = legal.filter((m) => sanKey(m.san) === key);
+  if (exact.length === 1) return { state: 'ok', move: exact[0] };
+  const prefix = [...new Set(legal.filter((m) => sanKey(m.san).startsWith(key)).map((m) => m.san))];
+  if (/^O+$/.test(key)) {
+    return prefix.length ? { state: 'partial', hints: prefix } : { state: 'bad', msg: 'Roszada nie jest teraz możliwa.' };
+  }
+  const p = key.match(SAN_RE);
+  const none = () => (prefix.length ? { state: 'partial', hints: prefix } : { state: 'bad', msg: 'Nie ma takiego ruchu w tej pozycji.' });
+  if (!p) return none();
+  const [, piece, file, rank, to, promo] = p;
+  // pobłażliwie: zbędne dookreślenie (Ngf3) albo bicie pionem bez kolumny (d5 zamiast exd5) też przejdzie
+  const c = legal.filter((m) => m.piece === (piece ? piece.toLowerCase() : 'p') && m.to === to
+    && (!file || m.from[0] === file) && (!rank || m.from[1] === rank)
+    && (!promo || m.promotion === promo.toLowerCase()));
+  if (!c.length) return none();
+  const sans = [...new Set(c.map((m) => m.san))];
+  if (new Set(c.map((m) => m.from)).size > 1) {
+    return { state: 'ambiguous', hints: sans, msg: `Na ${to} mogą pójść: ${sans.map(fmtSan).join(', ')} — dopisz kolumnę lub rząd, skąd rusza figura.` };
+  }
+  if (c.length > 1) return { state: 'promo', msg: `Dopisz figurę promocji: ${to}=Q (hetman), =R (wieża), =B (goniec), =N (skoczek).` };
+  return { state: 'ok', move: c[0] };
 }
 
+function pressSan(tok) {
+  const G = S.game;
+  if (!G || !myTurn(G) || S.sending) return;
+  if (tok === 'O-O' || tok === 'O-O-O') S.san = tok;
+  else if (S.san.length < 8) S.san += tok;
+  S.entryMsg = '';
+  const r = sanMatch(S.san);
+  // „wysyłaj od razu”: tylko gdy wpis nie jest początkiem dłuższego ruchu (np. O-O i O-O-O)
+  if (r.state === 'ok' && S.settings.autoSend) {
+    const k = sanKey(S.san);
+    if (!G.chess.moves().some((s) => sanKey(s) !== k && sanKey(s).startsWith(k))) { renderEntry(); sendMove(); return; }
+  }
+  renderEntry();
+}
+
+// --- pola: skąd → dokąd ---
 function pressKey(ch) {
   const G = S.game;
-  if (!G || !myTurn(G) || S.sending || S.promo || S.pick) return;
-  if (S.input.length >= slotCount()) return;
+  if (!G || !myTurn(G) || S.sending || S.promo) return;
+  if (S.input.length >= 4) return;
   const kind = nextSlotKind();
   if (kind === 'file' && !FILES.includes(ch)) return;
   if (kind === 'rank' && !RANKS.includes(ch)) return;
   S.input.push(ch);
   S.entryMsg = '';
-  if (!simpleEntry() && S.input.length === 2) {
+  if (S.input.length === 2) {
     const from = S.input.join('');
     const own = G.chess.get(from);
     if (!own || own.color !== G.myColor[0]) S.entryMsg = 'Na tym polu nie ma Twojej bierki.';
     else if (!G.chess.moves({ square: from, verbose: true }).length) S.entryMsg = 'Ta bierka nie ma teraz ruchu.';
   }
-  if (S.input.length === slotCount() && afterComplete()) return;
-  renderEntry();
-}
-function pickPiece(from) {
-  if (!S.pick || S.sending) return;
-  S.chosenFrom = from;
-  S.pick = null;
-  if (afterComplete()) return;
+  if (S.input.length === 4) {
+    const check = validateInput();
+    if (!check.ok) S.entryMsg = check.msg;
+    else if (check.promotion) S.promo = { from: check.from, to: check.to };
+    else if (S.settings.autoSend) { renderEntry(); sendMove(); return; }
+  }
   renderEntry();
 }
 function backspace() {
   if (S.sending) return;
-  if (S.promo) { S.promo = null; }
-  S.pick = null; S.chosenFrom = null;
-  S.input.pop();
+  if (sanEntry()) {
+    S.san = /O-O(-O)?$/.test(S.san) ? '' : S.san.slice(0, -1);
+  } else {
+    if (S.promo) { S.promo = null; }
+    S.input.pop();
+  }
   S.entryMsg = '';
   renderEntry();
 }
@@ -733,16 +786,6 @@ function clearInput() { if (S.sending) return; resetEntry(); S.entryMsg = ''; re
 
 function validateInput() {
   const G = S.game;
-  if (simpleEntry()) {
-    const to = S.input.join('');
-    const cands = G.chess.moves({ verbose: true }).filter((m) => m.to === to);
-    if (!cands.length) return { ok: false, msg: `Żadna Twoja bierka nie może teraz pójść na ${to}.` };
-    const byFrom = [...new Map(cands.map((m) => [m.from, m])).values()];
-    const chosen = byFrom.find((m) => m.from === S.chosenFrom);
-    const m = chosen || (byFrom.length === 1 ? byFrom[0] : null);
-    if (!m) return { ok: false, pick: byFrom.map((x) => ({ from: x.from, piece: x.piece, capture: !!x.captured })) };
-    return { ok: true, from: m.from, to, promotion: cands.some((x) => x.from === m.from && x.promotion) };
-  }
   const from = S.input.slice(0, 2).join('');
   const to = S.input.slice(2, 4).join('');
   const cands = G.chess.moves({ square: from, verbose: true }).filter((m) => m.to === to);
@@ -757,14 +800,18 @@ function validateInput() {
 async function sendMove(promoPiece) {
   const G = S.game;
   if (!G || !myTurn(G) || S.sending) return;
-  if (S.input.length !== slotCount()) {
-    S.entryMsg = simpleEntry() ? 'Wpisz pole, na które idzie bierka, np. e4.' : 'Wpisz pole startowe i docelowe, np. e2 e4.';
-    renderEntry(); return;
+  let uci;
+  if (sanEntry()) {
+    const r = sanMatch(S.san);
+    if (r.state !== 'ok') { S.entryMsg = r.msg || 'Zapisz ruch, np. e4 albo Nf3.'; renderEntry(); return; }
+    uci = r.move.from + r.move.to + (r.move.promotion || '');
+  } else {
+    if (S.input.length !== 4) { S.entryMsg = 'Wpisz pole startowe i docelowe, np. e2 e4.'; renderEntry(); return; }
+    const check = validateInput();
+    if (!check.ok) { S.entryMsg = check.msg; renderEntry(); return; }
+    if (check.promotion && !promoPiece) { S.promo = { from: check.from, to: check.to }; renderEntry(); return; }
+    uci = check.from + check.to + (promoPiece || '');
   }
-  const check = validateInput();
-  if (!check.ok) { if (check.pick) S.pick = check.pick; else S.entryMsg = check.msg; renderEntry(); return; }
-  if (check.promotion && !promoPiece) { S.promo = { from: check.from, to: check.to }; renderEntry(); return; }
-  const uci = check.from + check.to + (promoPiece || '');
   S.sending = true; S.entryMsg = 'Wysyłanie…'; S.promo = null;
   renderEntry();
   try {
@@ -1273,7 +1320,7 @@ function viewGame() {
   for (let i = G.history.length - 1; i >= 0; i--) { if (G.history[i].color !== G.myColor[0]) { lastOpp = { m: G.history[i], idx: i }; break; } }
   const lastBlock = lastOpp
     ? `<div class="lm-label">Ruch rywala · ${Math.floor(lastOpp.idx / 2) + 1}.${lastOpp.m.color === 'b' ? '..' : ''}</div>
-       <div class="lm-san">${esc(sanToPl(lastOpp.m.san))}</div>
+       <div class="lm-san">${esc(fmtSan(lastOpp.m.san))}</div>
        <div class="lm-desc">${esc(describeMove(lastOpp.m))}</div>
        <button class="link small" data-action="repeat">Powtórz na głos</button>`
     : `<div class="lm-label">Ruch rywala</div>
@@ -1339,16 +1386,58 @@ function viewGame() {
 function viewEntry() {
   const G = S.game;
   const enabled = myTurn(G) && !S.sending;
-  const simple = simpleEntry();
-  const n = slotCount();
-  const waitingChoice = !!(S.promo || S.pick);
-  const slots = (simple ? '<span class="slot-label">na pole</span>' : '') + [...Array(n).keys()].map((i) => {
+  return sanEntry() ? viewEntrySan(G, enabled) : viewEntrySquares(G, enabled);
+}
+
+function viewEntrySan(G, enabled) {
+  const r = sanMatch(S.san);
+  let line;
+  let cls = 'entry-msg';
+  if (S.entryMsg) {
+    line = esc(S.entryMsg);
+    if (/Nie udało|odrzucił|nie Twój|niedozwolony/i.test(S.entryMsg)) cls += ' err';
+  } else if (r.state === 'ok') {
+    line = `<span><strong>${esc(fmtSan(r.move.san))}</strong> — ${esc(describeMove(r.move))}</span>`;
+  } else if (r.state === 'partial') {
+    line = `<span class="muted small">Pasuje: ${esc(r.hints.slice(0, 10).map(fmtSan).join(', '))}${r.hints.length > 10 ? '…' : ''}</span>`;
+  } else if (r.state === 'ambiguous' || r.state === 'promo') {
+    line = esc(r.msg); cls += ' warn';
+  } else if (r.state === 'bad') {
+    line = esc(r.msg); cls += ' err';
+  } else {
+    line = `<span class="muted small">${G.history.length < 2 && myTurn(G)
+      ? 'Zagraj na szachownicy i zapisz ruch, np. e4 albo Nf3.'
+      : 'Figura + pole (Nf3), pion: pole (e4) lub bicie (exd5). Roszada: O-O.'}</span>`;
+  }
+  const on = enabled ? '' : 'disabled';
+  const key = (k, label, extra = '') => `<button class="key ${extra}" data-action="san" data-k="${k}" ${on}>${label}</button>`;
+  const pieceKeys = SAN_PIECES.map(([en, name, pl]) => key(en, `${englishLetters() ? en : pl}<span class="key-sub">${name}</span>`, 'piece')).join('');
+  const fileKeys = FILES.map((f) => key(f, f)).join('');
+  const rankKeys = RANKS.map((n) => key(n, n)).join('');
+  const extra = [['x', 'x<span class="key-sub">bicie</span>'], ['=', '=<span class="key-sub">promocja</span>'], ['O-O', 'O-O<span class="key-sub">krótka</span>'], ['O-O-O', 'O-O-O<span class="key-sub">długa</span>']]
+    .map(([k, l]) => key(k, l, 'piece')).join('');
+  return `
+    <div class="san-box ${S.san ? '' : 'empty'}" aria-live="polite">${S.san ? esc(fmtSan(S.san)) : 'np. e4, Nf3, exd5, O-O'}</div>
+    <div class="${cls}" aria-live="polite">${line}</div>
+    <div class="keys keys5">${pieceKeys}</div>
+    <div class="keys">${fileKeys}</div>
+    <div class="keys">${rankKeys}</div>
+    <div class="keys keys4">${extra}</div>
+    <div class="entry-actions">
+      <button class="btn" data-action="backspace" ${S.san.length && !S.sending ? '' : 'disabled'}>⌫ Cofnij</button>
+      <button class="btn primary" data-action="send" ${enabled && r.state === 'ok' ? '' : 'disabled'}>Wyślij ruch</button>
+    </div>
+    <div class="entry-mode"><button class="link small" data-action="entry-mode">Wpisujesz notacją · przełącz na „skąd → dokąd”</button></div>`;
+}
+
+function viewEntrySquares(G, enabled) {
+  const slots = [0, 1, 2, 3].map((i) => {
     const v = S.input[i];
-    const cur = enabled && !waitingChoice && i === S.input.length;
-    return `<span class="slot ${v ? 'filled' : ''} ${cur ? 'cur' : ''}">${v || ''}</span>${!simple && i === 1 ? '<span class="arrow">→</span>' : ''}`;
+    const cur = enabled && !S.promo && i === S.input.length;
+    return `<span class="slot ${v ? 'filled' : ''} ${cur ? 'cur' : ''}">${v || ''}</span>${i === 1 ? '<span class="arrow">→</span>' : ''}`;
   }).join('');
   const kind = nextSlotKind();
-  const keyOn = (k) => enabled && !waitingChoice && S.input.length < n && kind === k;
+  const keyOn = (k) => enabled && !S.promo && S.input.length < 4 && kind === k;
   const fileKeys = FILES.map((f) => `<button class="key" data-action="key" data-k="${f}" ${keyOn('file') ? '' : 'disabled'}>${f}</button>`).join('');
   const rankKeys = RANKS.map((r) => `<button class="key" data-action="key" data-k="${r}" ${keyOn('rank') ? '' : 'disabled'}>${r}</button>`).join('');
   const promo = S.promo ? `
@@ -1356,33 +1445,21 @@ function viewEntry() {
       <div class="small">Promocja piona na:</div>
       <div class="chips">${PROMO_PIECES.map((p) => `<button class="chip big" data-action="promo" data-id="${p.key}">${p.label} <span class="muted small">${p.name}</span></button>`).join('')}</div>
     </div>` : '';
-  const pick = S.pick ? `
-    <div class="promo">
-      <div class="small">Na ${esc(S.input.join(''))} może pójść kilka bierek. Którą zagrałeś?</div>
-      <div class="chips">${S.pick.map((p) => `<button class="chip big" data-action="pick" data-id="${p.from}">${PIECE_NAME[p.piece]} <span class="muted small">z ${p.from}</span></button>`).join('')}</div>
-    </div>` : '';
-  const msgClass = /niedozwolony|nie ma|Żadna|Nie udało|odrzucił|nie Twój/i.test(S.entryMsg) ? 'entry-msg err' : 'entry-msg';
-  let hint;
-  if (simple) {
-    hint = G.history.length < 2 && myTurn(G)
-      ? 'Zagraj na szachownicy i wpisz pole, na które poszła Twoja bierka (np. e4).'
-      : 'Roszada: wpisz pole króla, np. g1.';
-  } else {
-    hint = G.history.length < 2 && myTurn(G)
-      ? 'Zagraj na szachownicy i wpisz ruch: pole startowe, potem docelowe (np. e2 e4).'
-      : 'Roszada: wpisz ruch króla, np. e1 g1.';
-  }
+  const msgClass = /niedozwolony|nie ma|Nie udało|odrzucił|nie Twój/i.test(S.entryMsg) ? 'entry-msg err' : 'entry-msg';
+  const hint = G.history.length < 2 && myTurn(G) && !S.entryMsg
+    ? 'Zagraj na szachownicy i wpisz ruch: pole startowe, potem docelowe (np. e2 e4).'
+    : 'Roszada: wpisz ruch króla, np. e1 g1.';
   return `
     <div class="slots" aria-live="polite">${slots}</div>
     <div class="${msgClass}" aria-live="polite">${esc(S.entryMsg) || `<span class="muted small">${hint}</span>`}</div>
-    ${promo}${pick}
+    ${promo}
     <div class="keys">${fileKeys}</div>
     <div class="keys">${rankKeys}</div>
     <div class="entry-actions">
       <button class="btn" data-action="backspace" ${S.input.length && !S.sending ? '' : 'disabled'}>⌫ Cofnij</button>
-      <button class="btn primary" data-action="send" ${enabled && S.input.length === n && !waitingChoice ? '' : 'disabled'}>Wyślij ruch</button>
+      <button class="btn primary" data-action="send" ${enabled && S.input.length === 4 && !S.promo ? '' : 'disabled'}>Wyślij ruch</button>
     </div>
-    <div class="entry-mode"><button class="link small" data-action="entry-mode">${simple ? 'Wpisujesz tylko pole docelowe · przełącz na „skąd → dokąd”' : 'Wpisujesz „skąd → dokąd” · przełącz na tylko pole docelowe'}</button></div>`;
+    <div class="entry-mode"><button class="link small" data-action="entry-mode">Wpisujesz „skąd → dokąd” · przełącz na notację (np. Nf3)</button></div>`;
 }
 
 function renderEntry() {
@@ -1411,7 +1488,7 @@ function viewHistory(G) {
   for (let i = 0; i < G.history.length; i += 2) {
     const w = G.history[i];
     const b = G.history[i + 1];
-    rows.push(`<li><span class="hn">${i / 2 + 1}.</span><span class="hm">${esc(sanToPl(w.san))}</span><span class="hm">${b ? esc(sanToPl(b.san)) : ''}</span></li>`);
+    rows.push(`<li><span class="hn">${i / 2 + 1}.</span><span class="hm">${esc(fmtSan(w.san))}</span><span class="hm">${b ? esc(fmtSan(b.san)) : ''}</span></li>`);
   }
   return `
     <details class="history" ${S.historyOpen ? 'open' : ''} data-action="history-toggle">
@@ -1455,7 +1532,8 @@ function viewModal() {
       ${t('speech', 'Czytaj ruch rywala na głos', 'Po polsku, jeśli urządzenie ma polski głos.')}
       ${t('sound', 'Krótki dźwięk przy ruchu rywala')}
       ${t('vibrate', 'Wibracja przy ruchu rywala', 'Działa na Androidzie.')}
-      ${t('simpleEntry', 'Tryb prosty: wpisuję tylko pole docelowe', 'Np. e4 zamiast e2 e4. Gdy na pole może pójść kilka bierek, aplikacja zapyta którą. Wyłączone = „skąd → dokąd”.')}
+      ${t('sanEntry', 'Wpisuję ruch notacją (np. Nf3, exd5, O-O)', 'Oficjalny zapis turniejowy. Wyłączone = pole startowe i docelowe (e2 e4).')}
+      ${t('englishNotation', 'Angielskie litery figur: K Q R B N', 'Jak na turniejach i w Lichess. Wyłączone = polskie: K H W G S (ruch rywala, zapis partii, przyciski).')}
       ${t('autoSend', 'Wysyłaj ruch od razu po wpisaniu', 'Bez przycisku „Wyślij”. Szybciej, ale łatwiej o pomyłkę.')}
       ${t('emergencyBoard', 'Awaryjny podgląd pozycji w menu partii', 'Na wypadek pomyłki przy przestawianiu bierek.')}
       <div class="row-actions end"><button class="btn primary" data-action="modal-close">Gotowe</button></div>`;
@@ -1733,12 +1811,12 @@ app.addEventListener('click', async (e) => {
     case 'backspace': backspace(); break;
     case 'send': await sendMove(); break;
     case 'promo': await sendMove(id); break;
-    case 'pick': pickPiece(id); break;
+    case 'san': pressSan(el.dataset.k); break;
     case 'entry-mode':
       if (S.sending) break;
-      S.settings.simpleEntry = !simpleEntry(); saveSettings();
+      S.settings.sanEntry = !sanEntry(); saveSettings();
       resetEntry(); S.entryMsg = '';
-      toast(simpleEntry() ? 'Tryb prosty: wpisz tylko pole docelowe.' : 'Tryb dokładny: wpisz pole startowe i docelowe.');
+      toast(sanEntry() ? 'Notacja: zapisz ruch, np. e4 albo Nf3.' : 'Skąd → dokąd: wpisz pole startowe i docelowe.');
       renderEntry();
       break;
     case 'repeat': {
@@ -1792,7 +1870,7 @@ app.addEventListener('change', (e) => {
   if (el.dataset.action === 'rated') { S.form.rated = el.checked; saveForm(); }
   if (el.dataset.action === 'setting') {
     S.settings[el.dataset.key] = el.checked; saveSettings();
-    if (el.dataset.key === 'simpleEntry') { resetEntry(); S.entryMsg = ''; }
+    if (el.dataset.key === 'sanEntry' || el.dataset.key === 'englishNotation') { resetEntry(); S.entryMsg = ''; }
   }
 });
 app.addEventListener('input', (e) => {
@@ -1830,6 +1908,20 @@ document.addEventListener('keydown', (e) => {
   if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   const k = e.key.toLowerCase();
+  if (sanEntry()) {
+    // notacja z klawiatury: wielkie litery = figury (K Q R B N, także polskie H W G S), małe a–h = kolumny
+    const ch = e.key;
+    let tok = null;
+    if (/^[KQRBN]$/.test(ch)) tok = ch;
+    else if (/^[HWGS]$/.test(ch)) tok = PL_TO_EN[ch];
+    else if (/^[a-h1-8x=-]$/.test(ch)) tok = ch;
+    else if (/^[oO0]$/.test(ch)) tok = 'O';
+    if (tok) { e.preventDefault(); pressSan(tok); return; }
+    if (k === 'backspace') { e.preventDefault(); backspace(); }
+    else if (k === 'escape') { e.preventDefault(); clearInput(); }
+    else if (k === 'enter') { e.preventDefault(); sendMove(); }
+    return;
+  }
   if (S.promo) {
     const map = { h: 'q', q: 'q', w: 'r', r: 'r', g: 'b', s: 'n', n: 'n' };
     if (map[k]) { e.preventDefault(); sendMove(map[k]); return; }
