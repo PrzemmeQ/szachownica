@@ -140,8 +140,8 @@ test('B1: pokój z linku, wyzwanie 10+5, partia, zerwanie sieci na 20 s, ranking
   await expect(hist).toContainText('Ania');
   await expect(hist).toContainText('1–0');
   await expect(hist).toContainText('Poddanie');
-  // blitz osobno: tam nadal brak rankingu
-  await A.page.locator('button.tab[data-action="rank-speed"][data-id="blitz"]').click();
+  // klasyczne osobno: tam nadal brak rankingu
+  await A.page.locator('button.tab[data-action="rank-speed"][data-id="classical"]').click();
   await expect(aRow.locator('.rank-r')).toHaveText('—');
 
   // 9. po przeładowaniu urządzenie pamięta pokój
@@ -176,7 +176,7 @@ test('demo działa też, gdy pokoje są włączone', async ({ browser }) => {
   await ctx.close();
 });
 
-test('poczekalnia ogólna: lista czekających i automatyczne parowanie (blitz 5+3)', async ({ browser }) => {
+test('poczekalnia ogólna: lista czekających i automatyczne parowanie (10+0); brak temp poniżej 10 minut', async ({ browser }) => {
   const A = await phone(browser);
   const B = await phone(browser);
   const nickA = 'Ola' + Math.random().toString(36).slice(2, 6);
@@ -193,20 +193,22 @@ test('poczekalnia ogólna: lista czekających i automatyczne parowanie (blitz 5+
     await expect(P.page.locator('.tabs .tab.sel').first()).toHaveText('Poczekalnia');
   }
 
-  // A szuka blitza 5+3 (przez Lichess blitz z losowym rywalem jest niemożliwy — tu działa)
-  await A.page.locator('button.chip[data-action="preset"][data-id="b5_3"]').click();
+  // tempa od 10 minut: nie ma 3+2 ani 5+3
+  await expect(A.page.locator('button.chip[data-action="preset"]', { hasText: '3+2' })).toHaveCount(0);
+  await expect(A.page.locator('button.chip[data-action="preset"]', { hasText: '5+3' })).toHaveCount(0);
+  await A.page.locator('button.chip[data-action="preset"][data-id="r10_0"]').click();
   await A.page.getByRole('button', { name: 'Szukaj rywala' }).click();
-  await expect(A.page.getByText('Szukam rywala · Blitz 5+3')).toBeVisible();
+  await expect(A.page.getByText('Szukam rywala · Rapid 10+0')).toBeVisible();
 
   // B widzi A na liście czekających
   const row = B.page.locator('.seek-list li', { hasText: nickA });
-  await expect(row).toContainText('Blitz 5+3');
+  await expect(row).toContainText('Rapid 10+0');
 
   // B wybiera to samo tempo i szuka → para od razu
-  await B.page.locator('button.chip[data-action="preset"][data-id="b5_3"]').click();
+  await B.page.locator('button.chip[data-action="preset"][data-id="r10_0"]').click();
   await B.page.getByRole('button', { name: 'Szukaj rywala' }).click();
-  await expect(A.page.locator('.g-meta')).toContainText('Blitz 5+3');
-  await expect(B.page.locator('.g-meta')).toContainText('Blitz 5+3');
+  await expect(A.page.locator('.g-meta')).toContainText('Rapid 10+0');
+  await expect(B.page.locator('.g-meta')).toContainText('Rapid 10+0');
   await expect(A.page.locator('.overlay')).toHaveCount(0);
   await expect(B.page.locator('.overlay')).toHaveCount(0);
 
@@ -222,11 +224,11 @@ test('poczekalnia ogólna: lista czekających i automatyczne parowanie (blitz 5+
   await W.locator('.dialog').getByRole('button', { name: 'Poddaj' }).click();
   await expect(Bl.locator('.result-title')).toHaveText('Wygrana');
 
-  // ranking ogólny (blitz) i własna historia
+  // ranking ogólny (rapid) i własna historia
   await Bl.getByRole('button', { name: 'Wróć do listy partii' }).click();
   await expect(Bl.getByRole('heading', { name: 'Ranking ogólny' })).toBeVisible();
   await Bl.locator('details.room-hist summary').click();
-  await expect(Bl.locator('.hist-list li').first()).toContainText('Blitz 5+3');
+  await expect(Bl.locator('.hist-list li').first()).toContainText('Rapid 10+0');
 
   await A.ctx.close(); await B.ctx.close();
 });

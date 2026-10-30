@@ -67,7 +67,7 @@ export class Room extends DurableObject {
     // limity czasowe (ms); w trybie testowym krótsze
     this.L = this.test
       ? { noStart: 15000, gone: 2000, claim: 2000, challenge: 10000, sweep: 3000, stale: 8000, hello: 5000, minTime: 0.05 }
-      : { noStart: 60000, gone: 30000, claim: 60000, challenge: 120000, sweep: 20000, stale: 45000, hello: 10000, minTime: 0.5 };
+      : { noStart: 60000, gone: 30000, claim: 60000, challenge: 120000, sweep: 20000, stale: 45000, hello: 10000, minTime: 10 };
     this.chessCache = new Map();
     this.goneSent = new Map();
     this.migrate();
@@ -594,7 +594,9 @@ export class Room extends DurableObject {
     if (msg.days) fail('Partie korespondencyjne w pokojach będą później.');
     const time = Number(msg.time);
     const inc = Number(msg.increment ?? 0);
-    if (!(time >= this.L.minTime && time <= 180)) fail('Nieprawidłowy czas partii.');
+    // najkrócej 10 minut: przy prawdziwej szachownicy ruch trzeba zagrać i jeszcze wpisać (testy mają krótsze tempa)
+    if (time < this.L.minTime) fail(this.test ? 'Nieprawidłowy czas partii.' : 'Najkrótsze tempo to 10 minut — żeby był czas na wpisanie ruchu.');
+    if (!(time <= 180)) fail('Nieprawidłowy czas partii.');
     if (!(Number.isInteger(inc) && inc >= 0 && inc <= 180)) fail('Nieprawidłowy dodatek czasu.');
     return { time, inc, time_ms: Math.round(time * 60000), inc_ms: inc * 1000 };
   }

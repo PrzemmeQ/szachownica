@@ -31,8 +31,7 @@ function lsSet(k, v) { try { localStorage.setItem(k, v); } catch {} }
 // Tempa gry
 // ---------------------------------------------------------------------------
 const PRESETS = [
-  { id: 'b3_2', group: 'Blitz', label: '3+2', time: 3, increment: 2, directOnly: true },
-  { id: 'b5_3', group: 'Blitz', label: '5+3', time: 5, increment: 3, directOnly: true },
+  // Najkrócej 10 minut: przy prawdziwej szachownicy trzeba zagrać ruch i jeszcze go wpisać.
   { id: 'r10_0', group: 'Rapid', label: '10+0', time: 10, increment: 0 },
   { id: 'r10_5', group: 'Rapid', label: '10+5', time: 10, increment: 5 },
   { id: 'r15_10', group: 'Rapid', label: '15+10', time: 15, increment: 10 },
@@ -111,7 +110,7 @@ function playerLabel(p) {
 // Nick: litery łacińskie (z polskimi), cyfry — jak na serwerze (bez liter z innych alfabetów).
 const NICK_RE = /^[A-Za-z0-9ĄĆĘŁŃÓŚŹŻąćęłńóśźż][A-Za-z0-9ĄĆĘŁŃÓŚŹŻąćęłńóśźż _.-]{1,19}$/;
 const NICK_ERR = 'Nick: 2–20 znaków — litery (także polskie), cyfry, spacja, _ . -';
-function presetById(id) { return PRESETS.find((p) => p.id === id) || PRESETS[3]; }
+function presetById(id) { return PRESETS.find((p) => p.id === id) || PRESETS.find((p) => p.id === 'r10_5'); }
 
 // --- dźwięk, mowa, wibracja, blokada ekranu --------------------------------
 let audioCtx = null;
@@ -487,7 +486,6 @@ async function startNewGame() {
   const opts = { time: p.time, increment: p.increment, days: p.days, rated: f.rated, color: f.color };
   try {
     if (f.mode === 'seek') {
-      if (p.directOnly && !S.provider.features?.rooms) { toast('Blitz z losowym rywalem nie działa przez API Lichess. Wybierz rapid lub dłużej.'); return; }
       S.waiting = { text: 'Łączenie…', kind: 'pending' }; render();
       const h = await S.provider.seek({ ...opts, color: undefined });
       if (h.matched) {
@@ -886,7 +884,7 @@ function viewStart() {
       ${viewLichessLogin(true)}
       <button class="btn big" data-action="demo">Wypróbuj bez logowania</button>
     </div>
-    <p class="muted small">Przez Lichess: losowi rywale w tempie rapid, klasycznym i korespondencyjnym. Blitz tylko ze znajomym lub z komputerem.</p>
+    <p class="muted small">Tempa od 10 minut — żeby był czas zagrać ruch na szachownicy i go wpisać. Przez Lichess: rapid, klasyczne i korespondencja.</p>
     ${viewBanner()}
   </main>`;
   }
@@ -1022,7 +1020,7 @@ function viewRoomJoin() {
   </main>`;
 }
 
-const RATING_SPEEDS = [['blitz', 'Blitz'], ['rapid', 'Rapid'], ['classical', 'Klasyczne']];
+const RATING_SPEEDS = [['rapid', 'Rapid'], ['classical', 'Klasyczne']]; // blitzu nie ma (tempa od 10 minut)
 function roomRatings(r) {
   return { blitz: r?.blitz?.rating, rapid: r?.rapid?.rating, classical: r?.classical?.rating };
 }
@@ -1172,7 +1170,7 @@ function viewNewGame() {
       : rooms ? [['member', 'Członek pokoju'], ['seek', 'Poczekalnia']]
         : [['seek', 'Losowy'], ['friend', 'Znajomy'], ['ai', 'Komputer']];
   if (!modes.find(([k]) => k === f.mode)) f.mode = modes[0][0];
-  const allowed = PRESETS.filter((p) => !(f.mode === 'seek' && p.directOnly && !rooms) && !(rooms && p.days));
+  const allowed = PRESETS.filter((p) => !(rooms && p.days));
   if (!allowed.find((p) => p.id === f.preset)) f.preset = 'r10_5';
   const groups = [...new Set(allowed.map((p) => p.group))];
   const presetsHtml = groups.map((g) => `
