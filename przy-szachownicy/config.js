@@ -14,6 +14,10 @@ export const CONFIG = {
   // GLOS, EMAIL, TRYB (instrukcja w README). Pusty = głosowanie nie jest podpięte.
   FEEDBACK_FORM_LINK: '',
 
+  // Adres serwera pokoi (wariant B, Cloudflare Workers), np. https://przy-szachownicy.twojanazwa.workers.dev
+  // Pusty = przycisk „Graj w pokoju” jest ukryty.
+  ROOMS_API: '',
+
   // true = tylko tryb demo (bez logowania), np. dla podglądu w miejscach, które blokują połączenia z lichess.org.
   DEMO_ONLY: false,
 };

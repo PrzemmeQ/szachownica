@@ -3,6 +3,9 @@ import { Chess } from './chess.js';
 import { LichessProvider } from './lichess.js';
 import { DemoProvider } from './demo.js';
 import {
+  RoomsProvider, roomsEnabled, savedRoom, forgetRoom, roomInfo, createRoom, joinRoom, claimTransfer,
+} from './rooms.js';
+import {
   sanToPl, describeMove, speechForMove, statusPl, SPEED_PL, formatMs, PROMO_PIECES,
 } from './notation.js';
 
@@ -43,7 +46,7 @@ const RANKS = ['1', '2', '3', '4', '5', '6', '7', '8'];
 const S = {
   provider: null,
   user: null,
-  view: 'loading', // loading | start | lobby | game
+  view: 'loading', // loading | start | room-new | room-join | lobby | game
   online: true,
   ongoing: [],
   challenges: new Map(),
@@ -65,6 +68,14 @@ const S = {
   voted: lsGet('ps_vote') ? 'done' : null,
   voteEmail: '',
   streamOpenedAt: 0,
+  // wariant B: pokoje
+  roomForm: { name: '', nick: lsGet('ps_room_nick') || '' },
+  joinRoom: null, // { code, name, error }
+  rankSpeed: 'rapid',
+  roomHistory: null,
+  historyLoading: false,
+  roomHistoryOpen: false,
+  transfer: null, // { url, expiresIn }
 };
 
 const app = document.getElementById('app');
@@ -159,6 +170,7 @@ document.addEventListener('visibilitychange', () => {
 // ---------------------------------------------------------------------------
 async function boot() {
   render();
+  if (roomsEnabled() && await bootRoom()) return;
   const lichess = new LichessProvider();
   if (!CONFIG.DEMO_ONLY) {
     try {
@@ -175,16 +187,56 @@ async function boot() {
   render();
 }
 
+// Wariant B: wejście z linku (?pokoj=KOD, ?pokoj=KOD&przenies=KOD) albo z zapamiętanego pokoju.
+// Zwraca true, jeśli zajął się startem.
+async function bootRoom() {
+  const params = new URLSearchParams(location.search);
+  const code = (params.get('pokoj') || '').trim().toLowerCase();
+  const transfer = (params.get('przenies') || '').trim().toLowerCase();
+  const clean = () => history.replaceState(null, '', location.pathname + location.hash);
+  if (code && transfer) {
+    clean();
+    S.view = 'loading'; render();
+    try {
+      const saved = await claimTransfer(code, transfer);
+      lsSet('ps_last', 'rooms');
+      await enterWith(new RoomsProvider(saved));
+    } catch (e) {
+      S.startError = e.message; S.view = 'start'; render();
+    }
+    return true;
+  }
+  if (code) {
+    clean();
+    const saved = savedRoom();
+    if (saved && saved.room === code) { lsSet('ps_last', 'rooms'); await enterWith(new RoomsProvider(saved)); return true; }
+    S.joinRoom = { code, name: null, error: '' };
+    S.view = 'room-join';
+    render();
+    try { S.joinRoom.name = (await roomInfo(code)).name; } catch (e) { S.joinRoom.error = e.message; }
+    render();
+    return true;
+  }
+  if (params.has('code') || params.has('error')) return false; // powrót z logowania Lichess
+  const saved = savedRoom();
+  if (saved && (lsGet('ps_last') === 'rooms' || !new LichessProvider().hasToken())) {
+    await enterWith(new RoomsProvider(saved));
+    return true;
+  }
+  return false;
+}
+
 async function enterWith(provider) {
   S.provider = provider;
   S.view = 'loading';
   render();
+  lsSet('ps_last', provider.name);
   try {
     S.user = await provider.account();
     provider.userId = S.user.id;
   } catch (e) {
     S.provider = null;
-    S.startError = e.message || 'Nie udało się połączyć z Lichess.';
+    S.startError = e.message || (provider.name === 'rooms' ? 'Nie udało się połączyć z serwerem pokoi.' : 'Nie udało się połączyć z Lichess.');
     S.view = 'start';
     render();
     return;
@@ -206,9 +258,57 @@ async function logout() {
   closeGame();
   const p = S.provider;
   S.provider = null; S.user = null; S.ongoing = []; S.challenges.clear();
+  S.roomHistory = null; S.transfer = null;
   S.view = 'start';
   render();
   if (p) await p.logout();
+}
+
+// Pokój: wyjście do ekranu startowego bez zapominania pokoju (nick zostaje na tym urządzeniu).
+function leaveRoom() {
+  closeGame();
+  const p = S.provider;
+  S.provider = null; S.user = null; S.ongoing = []; S.challenges.clear();
+  S.roomHistory = null; S.transfer = null;
+  lsSet('ps_last', '');
+  S.view = 'start';
+  if (p) { p.stopEvents(); p.disconnect(); }
+  render();
+}
+
+async function submitRoom(kind) {
+  unlockMedia();
+  const f = S.roomForm;
+  const nick = f.nick.trim();
+  if (!/^[\p{L}\p{N}][\p{L}\p{N} _.-]{1,19}$/u.test(nick)) { toast('Nick: 2–20 znaków — litery, cyfry, spacja, _ . -'); return; }
+  if (kind === 'new' && !f.name.trim()) { toast('Wpisz nazwę pokoju.'); return; }
+  lsSet('ps_room_nick', nick);
+  S.waiting = { text: kind === 'new' ? 'Tworzę pokój…' : 'Dołączam…', kind: 'pending' }; render();
+  try {
+    const saved = kind === 'new' ? await createRoom(f.name.trim(), nick) : await joinRoom(S.joinRoom.code, nick);
+    S.waiting = null; S.joinRoom = null; S.startError = '';
+    await enterWith(new RoomsProvider(saved));
+    if (kind === 'new' && S.provider) S.modal = { kind: 'room' };
+    render();
+  } catch (e) {
+    S.waiting = null; toast(e.message, 5000); render();
+  }
+}
+
+async function shareLink(url, title) {
+  if (navigator.share) {
+    try { await navigator.share({ title, url }); return; } catch (e) { if (e.name === 'AbortError') return; }
+  }
+  try { await navigator.clipboard.writeText(url); toast('Skopiowano link.'); }
+  catch { toast('Skopiuj link ręcznie.'); }
+}
+
+async function loadRoomHistory() {
+  if (!S.provider?.features?.rooms) return;
+  S.historyLoading = true;
+  try { S.roomHistory = await S.provider.history(); } catch (e) { toast(e.message); }
+  S.historyLoading = false;
+  if (S.view === 'lobby') render();
 }
 
 // ---------------------------------------------------------------------------
@@ -219,11 +319,21 @@ function onProviderEvent(ev) {
   switch (ev.type) {
     case 'streamStatus':
       S.online = ev.ok;
+      if (ev.ok && ev.resetChallenges) {
+        S.challenges.clear();
+        if (!quiet) refreshOngoing();
+      }
       if (S.view === 'lobby') render();
       break;
     case 'authLost':
-      toast('Sesja Lichess wygasła — zaloguj się ponownie.');
+      toast(S.provider?.name === 'rooms'
+        ? 'Nie rozpoznano Cię w pokoju — dołącz ponownie z linku zaproszenia.'
+        : 'Sesja Lichess wygasła — zaloguj się ponownie.', 6000);
       logout();
+      break;
+    case 'members':
+      if (S.provider?.me) S.user = { ...S.user, ratings: roomRatings(S.provider.me.ratings) };
+      if (S.view === 'lobby') render();
       break;
     case 'gameStart': {
       const g = ev.game;
@@ -243,6 +353,7 @@ function onProviderEvent(ev) {
     }
     case 'gameFinish':
       S.ongoing = S.ongoing.filter((x) => x.id !== ev.game.id);
+      if (S.roomHistory) loadRoomHistory();
       if (S.view === 'lobby') render();
       break;
     case 'challenge':
@@ -310,6 +421,12 @@ async function startNewGame() {
         return;
       }
       waitFor(h, `Czekam, aż ${name} przyjmie wyzwanie`);
+    } else if (f.mode === 'member') {
+      const opp = (S.provider.members || []).find((m) => m.id === f.opponent);
+      if (!opp) { toast('Wybierz rywala z pokoju.'); return; }
+      S.waiting = { text: 'Wysyłanie wyzwania…', kind: 'pending' }; render();
+      const h = await S.provider.challenge(opp.id, opts);
+      waitFor(h, `Czekam, aż ${opp.nick} przyjmie wyzwanie${opp.online ? '' : ' (teraz poza pokojem)'}`);
     } else {
       S.waiting = { text: 'Uruchamiam partię z komputerem…', kind: 'pending' }; render();
       const { gameId } = await S.provider.challengeAI({ ...opts, level: f.level });
@@ -552,6 +669,8 @@ function render() {
   let html = '';
   if (S.view === 'loading') html = viewLoading();
   else if (S.view === 'start') html = viewStart();
+  else if (S.view === 'room-new') html = viewRoomNew();
+  else if (S.view === 'room-join') html = viewRoomJoin();
   else if (S.view === 'lobby') html = viewLobby();
   else if (S.view === 'game') html = viewGame();
   html += viewWaiting() + viewModal();
@@ -586,13 +705,79 @@ function viewStart() {
     <div class="stack">
       ${login}
       <button class="btn big" data-action="demo">Wypróbuj bez logowania</button>
+      ${roomsEnabled() ? viewRoomButtons() : ''}
     </div>
     <p class="muted small">Przez Lichess: losowi rywale w tempie rapid, klasycznym i korespondencyjnym. Blitz tylko ze znajomym lub z komputerem.</p>
-    ${viewBanner()}
+    ${roomsEnabled() ? '' : viewBanner()}
   </main>`;
 }
 
+function viewRoomButtons() {
+  const saved = savedRoom();
+  return `
+      ${saved ? `<button class="btn big" data-action="room-resume">Wróć do pokoju „${esc(saved.name)}”</button>` : ''}
+      <button class="btn big" data-action="room-new">Graj w pokoju (bez Lichess)</button>`;
+}
+
+const PRIVACY_LINK = `<a href="prywatnosc.html" target="_blank" rel="noopener">Prywatność</a>`;
+
+function viewRoomNew() {
+  const f = S.roomForm;
+  return `
+  <main class="start">
+    <header class="g-top"><button class="btn small" data-action="to-start">← Wróć</button></header>
+    <h1>Nowy pokój</h1>
+    <p class="lead">Zamknięty pokój dla znajomych, klubu albo szkółki. Ranking liczy się tylko w pokoju. Bez konta i bez hasła.</p>
+    <label class="field">Nazwa pokoju
+      <input id="room-name" type="text" maxlength="40" autocomplete="off" value="${esc(f.name)}" placeholder="np. Klub Hetman — środy">
+    </label>
+    <label class="field">Twój nick w pokoju
+      <input id="room-nick" type="text" maxlength="20" autocomplete="nickname" autocapitalize="off" spellcheck="false" value="${esc(f.nick)}" placeholder="np. Ania">
+    </label>
+    <div class="stack">
+      <button class="btn primary big" data-action="room-create">Utwórz pokój</button>
+    </div>
+    <p class="muted small">Po utworzeniu dostaniesz link do wysłania. Kto ma link, dołącza samym nickiem. Masz już link? Po prostu go otwórz.</p>
+    <p class="muted small">Zapisujemy tylko nick, przynależność do pokoju i partie. ${PRIVACY_LINK}</p>
+  </main>`;
+}
+
+function viewRoomJoin() {
+  const j = S.joinRoom || {};
+  const f = S.roomForm;
+  const saved = savedRoom();
+  const body = j.error
+    ? `<p class="error">${esc(j.error)}</p>`
+    : `<p class="lead">${j.name ? `Zaproszenie do pokoju <strong>${esc(j.name)}</strong>.` : 'Sprawdzam zaproszenie…'}</p>
+       <label class="field">Twój nick w pokoju
+         <input id="room-nick" type="text" maxlength="20" autocomplete="nickname" autocapitalize="off" spellcheck="false" value="${esc(f.nick)}" placeholder="np. Bartek">
+       </label>
+       ${saved ? `<p class="note small">Na tym urządzeniu jesteś w pokoju „${esc(saved.name)}”. Po dołączeniu tutaj tamten pokój zniknie z tego urządzenia.</p>` : ''}
+       <div class="stack"><button class="btn primary big" data-action="room-join" ${j.name ? '' : 'disabled'}>Dołącz</button></div>
+       <p class="muted small">Bez konta i bez hasła — urządzenie zapamięta Cię w pokoju. ${PRIVACY_LINK}</p>`;
+  return `
+  <main class="start">
+    <header class="g-top"><button class="btn small" data-action="to-start">← Wróć</button></header>
+    <h1>Dołącz do pokoju</h1>
+    ${body}
+  </main>`;
+}
+
+const RATING_SPEEDS = [['blitz', 'Blitz'], ['rapid', 'Rapid'], ['classical', 'Klasyczne']];
+function roomRatings(r) {
+  return { blitz: r?.blitz?.rating, rapid: r?.rapid?.rating, classical: r?.classical?.rating };
+}
+function roomRating(r) {
+  if (!r) return '—';
+  return `${r.rating}${r.provisional ? '?' : ''}`;
+}
+
 function ratingsLine() {
+  if (S.provider?.features?.rooms) {
+    const r = S.provider.me?.ratings || {};
+    return RATING_SPEEDS.filter(([k]) => r[k]?.games).map(([k, l]) => `${l} ${roomRating(r[k])}`).join(' · ')
+      || 'Ranking pojawi się po pierwszej partii rankingowej';
+  }
   const r = S.user?.ratings || {};
   const parts = [];
   if (r.rapid) parts.push(`Rapid ${r.rapid}`);
@@ -626,19 +811,23 @@ function viewLobby() {
         </div>`).join('')}
     </section>` : '';
 
+  const rooms = !!S.provider?.features?.rooms;
   return `
   <main class="lobby">
     <header class="topbar">
       <div>
-        <div class="who">${esc(S.user?.name || '')}${demo ? ' <span class="pill">demo</span>' : ''}</div>
+        <div class="who">${esc(S.user?.name || '')}${demo ? ' <span class="pill">demo</span>' : ''}${rooms ? ` <span class="muted">· ${esc(S.provider.roomName)}</span>` : ''}</div>
         <div class="muted small">${esc(ratingsLine()) || (demo ? 'Tryb demo — bez rankingu' : '')}</div>
       </div>
       <div class="topbar-actions">
         <span class="dot ${S.online ? 'on' : 'off'}" title="${S.online ? 'Połączono' : 'Łączenie…'}"></span>
+        ${rooms ? `<button class="icon-btn" data-action="room-menu" aria-label="Pokój">⌂</button>` : ''}
         <button class="icon-btn" data-action="settings" aria-label="Ustawienia">⚙︎</button>
-        <button class="icon-btn" data-action="logout" aria-label="Wyloguj">⏻</button>
+        <button class="icon-btn" data-action="logout" aria-label="${rooms ? 'Wyjdź z pokoju' : 'Wyloguj'}">⏻</button>
       </div>
     </header>
+
+    ${!S.online && rooms ? `<div class="notice">Brak połączenia z pokojem — łączę ponownie…</div>` : ''}
 
     ${challenges}
 
@@ -649,18 +838,76 @@ function viewLobby() {
 
     ${viewNewGame()}
 
-    ${viewBanner()}
+    ${rooms ? viewRoomRanking() + viewRoomHistory() : viewBanner()}
   </main>`;
+}
+
+// --- wariant B: pokój ---------------------------------------------------------
+function viewRoomRanking() {
+  const members = S.provider.members || [];
+  const sp = S.rankSpeed;
+  const meId = S.user?.id;
+  const sorted = [...members].sort((a, b) => {
+    const ga = a.ratings?.[sp]?.games ? 1 : 0;
+    const gb = b.ratings?.[sp]?.games ? 1 : 0;
+    if (ga !== gb) return gb - ga;
+    return (b.ratings?.[sp]?.rating || 0) - (a.ratings?.[sp]?.rating || 0) || a.nick.localeCompare(b.nick, 'pl');
+  });
+  const rows = sorted.map((m, i) => {
+    const r = m.ratings?.[sp];
+    return `
+      <li class="rank-row ${m.id === meId ? 'me' : ''}">
+        <span class="rank-n">${r?.games ? i + 1 + '.' : ''}</span>
+        <span class="dot ${m.online ? 'on' : 'off'}" title="${m.online ? 'w pokoju' : 'poza pokojem'}"></span>
+        <span class="rank-nick">${esc(m.nick)}${m.id === meId ? ' <span class="muted small">(Ty)</span>' : ''}</span>
+        <span class="rank-r">${r?.games ? esc(roomRating(r)) : '<span class="muted small">—</span>'}</span>
+        <span class="rank-g muted small">${r?.games || 0} p.</span>
+      </li>`;
+  }).join('');
+  return `
+  <section class="card">
+    <h2>Ranking pokoju</h2>
+    <div class="tabs">${RATING_SPEEDS.map(([k, l]) => `<button class="tab ${sp === k ? 'sel' : ''}" data-action="rank-speed" data-id="${k}">${l}</button>`).join('')}</div>
+    <ol class="rank-list">${rows}</ol>
+    <p class="muted small">„?” — ranking jeszcze niepewny (mało partii). Liczą się tylko partie rankingowe.</p>
+    <button class="btn small" data-action="room-menu">Zaproś do pokoju</button>
+  </section>`;
+}
+
+const RESULT_PL = { white: '1–0', black: '0–1' };
+function viewRoomHistory() {
+  const h = S.roomHistory;
+  let body;
+  if (!h) body = `<p class="muted small">${S.historyLoading ? 'Wczytywanie…' : ''}</p>`;
+  else if (!h.length) body = `<p class="muted small">Jeszcze nie rozegrano żadnej partii.</p>`;
+  else {
+    body = `<ul class="hist-list">${h.map((g) => {
+      const res = g.status === 'aborted' || g.status === 'noStart' ? 'przerw.' : RESULT_PL[g.winner] || '½–½';
+      const diff = (d) => (d == null ? '' : ` <span class="muted small">${d > 0 ? '+' : ''}${d}</span>`);
+      return `<li>
+        <span class="hist-players">${esc(g.white)}${diff(g.diffW)} – ${esc(g.black)}${diff(g.diffB)}</span>
+        <span class="hist-res">${res}</span>
+        <span class="muted small">${esc(SPEED_PL[g.speed] || g.speed)} ${esc(g.label)} · ${esc(statusPl(g.status))}${g.rated ? '' : ' · towarzyska'} · ${new Date(g.endedAt).toLocaleDateString('pl-PL')}</span>
+      </li>`;
+    }).join('')}</ul>`;
+  }
+  return `
+  <details class="card room-hist" data-action="room-history" ${S.roomHistoryOpen ? 'open' : ''}>
+    <summary>Historia partii w pokoju</summary>
+    ${body}
+  </details>`;
 }
 
 function viewNewGame() {
   const f = S.form;
   const demo = S.provider?.isDemo;
+  const rooms = !!S.provider?.features?.rooms;
   const modes = demo
     ? [['ai', 'Komputer']]
-    : [['seek', 'Losowy'], ['friend', 'Znajomy'], ['ai', 'Komputer']];
-  if (demo && f.mode !== 'ai') f.mode = 'ai';
-  const allowed = PRESETS.filter((p) => !(f.mode === 'seek' && p.directOnly));
+    : rooms ? [['member', 'Członek pokoju']]
+      : [['seek', 'Losowy'], ['friend', 'Znajomy'], ['ai', 'Komputer']];
+  if (!modes.find(([k]) => k === f.mode)) f.mode = modes[0][0];
+  const allowed = PRESETS.filter((p) => !(f.mode === 'seek' && p.directOnly) && !(rooms && p.days));
   if (!allowed.find((p) => p.id === f.preset)) f.preset = 'r10_5';
   const groups = [...new Set(allowed.map((p) => p.group))];
   const presetsHtml = groups.map((g) => `
@@ -676,6 +923,17 @@ function viewNewGame() {
     <label class="field">Nick znajomego na Lichess
       <input id="friend-input" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" value="${esc(f.friend)}" placeholder="np. jan_kowalski">
     </label>` : '';
+  let member = '';
+  if (f.mode === 'member') {
+    const others = (S.provider.members || []).filter((m) => m.id !== S.user?.id)
+      .sort((a, b) => (b.online ? 1 : 0) - (a.online ? 1 : 0) || a.nick.localeCompare(b.nick, 'pl'));
+    if (!others.find((m) => m.id === f.opponent)) f.opponent = others.find((m) => m.online)?.id || others[0]?.id || '';
+    member = others.length ? `
+    <div class="field">Rywal
+      <div class="chips">${others.map((m) => `<button class="chip ${f.opponent === m.id ? 'sel' : ''}" data-action="opponent" data-id="${esc(m.id)}"><span class="dot ${m.online ? 'on' : 'off'}"></span> ${esc(m.nick)}</button>`).join('')}</div>
+    </div>`
+      : `<p class="note small">W pokoju nie ma jeszcze nikogo poza Tobą. <button class="link" data-action="room-menu">Zaproś kogoś</button></p>`;
+  }
   const level = f.mode === 'ai' && !demo ? `
     <div class="field">Poziom komputera
       <div class="chips">${[1, 2, 3, 4, 5, 6, 7, 8].map((l) => `<button class="chip ${f.level === l ? 'sel' : ''}" data-action="level" data-id="${l}">${l}</button>`).join('')}</div>
@@ -686,13 +944,14 @@ function viewNewGame() {
     </div>` : '';
   const rated = f.mode !== 'ai' ? `
     <label class="toggle"><input type="checkbox" data-action="rated" ${f.rated ? 'checked' : ''}> Partia rankingowa</label>` : '';
-  const label = f.mode === 'seek' ? 'Szukaj rywala' : f.mode === 'friend' ? 'Wyślij wyzwanie' : 'Zagraj z komputerem';
+  const label = f.mode === 'seek' ? 'Szukaj rywala' : f.mode === 'friend' || f.mode === 'member' ? 'Wyślij wyzwanie' : 'Zagraj z komputerem';
 
   return `
   <section class="card">
     <h2>Nowa partia</h2>
-    <div class="tabs">${modes.map(([k, l]) => `<button class="tab ${f.mode === k ? 'sel' : ''}" data-action="mode" data-id="${k}">${l}</button>`).join('')}</div>
+    ${rooms ? '' : `<div class="tabs">${modes.map(([k, l]) => `<button class="tab ${f.mode === k ? 'sel' : ''}" data-action="mode" data-id="${k}">${l}</button>`).join('')}</div>`}
     ${friend}
+    ${member}
     ${presetsHtml}
     ${level}
     ${color}
@@ -975,6 +1234,28 @@ function viewModal() {
         <button class="btn" data-action="modal-close">Anuluj</button>
         <button class="btn primary" data-action="token-save">Zaloguj</button>
       </div>`;
+  } else if (m.kind === 'room') {
+    const p = S.provider;
+    const link = p.inviteLink();
+    const t = S.transfer;
+    body = `
+      <h2>Pokój „${esc(p.roomName)}”</h2>
+      <p class="small">Wyślij ten link osobom, z którymi chcesz grać. Dołączają samym nickiem — bez konta i hasła.</p>
+      <input class="link-box" id="invite-link" type="text" readonly value="${esc(link)}">
+      <div class="row-actions">
+        <button class="btn small primary" data-action="share-invite">Udostępnij link</button>
+      </div>
+      <p class="muted small">Link otwiera pokój każdemu, kto go ma — wysyłaj go tylko swoim.</p>
+      <h3>Inne urządzenie</h3>
+      <p class="small">Chcesz grać na drugim telefonie lub komputerze pod tym samym nickiem? Otwórz tam jednorazowy link (ważny 10 minut).</p>
+      ${t ? `<input class="link-box" type="text" readonly value="${esc(t.url)}">
+        <div class="row-actions"><button class="btn small" data-action="share-transfer">Udostępnij link przeniesienia</button></div>
+        <p class="muted small">Nie wysyłaj go nikomu innemu — kto go otworzy, gra jako Ty.</p>`
+    : `<div class="row-actions"><button class="btn small" data-action="make-transfer">Utwórz link przeniesienia</button></div>`}
+      <div class="row-actions end">
+        <button class="btn small danger" data-action="room-forget">Usuń pokój z tego urządzenia</button>
+        <button class="btn primary" data-action="modal-close">Gotowe</button>
+      </div>`;
   }
   return `<div class="overlay" data-action="overlay"><div class="dialog wide" role="dialog" aria-modal="true">${body}</div></div>`;
 }
@@ -1043,7 +1324,7 @@ app.addEventListener('click', async (e) => {
   const a = el.dataset.action;
   const id = el.dataset.id;
   if (a === 'overlay') { if (e.target === el) { S.modal = null; render(); } return; }
-  if (a === 'history-toggle' || a === 'rated' || a === 'setting') return; // obsługiwane przez 'change'/'toggle'
+  if (a === 'history-toggle' || a === 'room-history' || a === 'rated' || a === 'setting') return; // obsługiwane przez 'change'/'toggle'
   switch (a) {
     case 'login':
       try { await new LichessProvider().login(); } catch (err) { S.startError = 'Nie udało się rozpocząć logowania: ' + err.message; render(); }
@@ -1060,8 +1341,38 @@ app.addEventListener('click', async (e) => {
     }
     case 'demo': S.startError = ''; await enterWith(new DemoProvider()); break;
     case 'logout':
+      if (S.provider?.features?.rooms) {
+        confirmModal({ title: 'Wyjść z pokoju?', text: 'Pokój zostanie zapamiętany na tym urządzeniu — wrócisz jednym przyciskiem.', okLabel: 'Wyjdź', onOk: leaveRoom });
+        break;
+      }
       confirmModal({ title: 'Wylogować?', text: S.provider?.isDemo ? 'Zakończysz tryb demo.' : 'Aplikacja straci dostęp do Twojego konta Lichess na tym urządzeniu.', okLabel: 'Wyloguj', onOk: logout });
       break;
+    // --- wariant B: pokoje ---
+    case 'room-new': S.startError = ''; S.view = 'room-new'; render(); break;
+    case 'to-start': S.joinRoom = null; S.view = 'start'; render(); break;
+    case 'room-create': await submitRoom('new'); break;
+    case 'room-join': await submitRoom('join'); break;
+    case 'room-resume': {
+      const saved = savedRoom();
+      S.startError = '';
+      if (saved) await enterWith(new RoomsProvider(saved));
+      break;
+    }
+    case 'room-menu': S.transfer = null; S.modal = { kind: 'room' }; render(); break;
+    case 'share-invite': await shareLink(S.provider.inviteLink(), `Pokój „${S.provider.roomName}” — ${CONFIG.APP_NAME}`); break;
+    case 'make-transfer':
+      try { S.transfer = await S.provider.transferLink(); render(); } catch (err) { toast(err.message); }
+      break;
+    case 'share-transfer': if (S.transfer) await shareLink(S.transfer.url, CONFIG.APP_NAME); break;
+    case 'room-forget':
+      confirmModal({
+        title: 'Usunąć pokój z tego urządzenia?',
+        text: 'Twój nick zostanie w pokoju, ale z tego urządzenia nie wrócisz na niego (nawet przez link zaproszenia). Jeśli chcesz grać dalej na innym urządzeniu, najpierw utwórz link przeniesienia.',
+        okLabel: 'Usuń z urządzenia', danger: true, onOk: logout,
+      });
+      break;
+    case 'rank-speed': S.rankSpeed = id; render(); break;
+    case 'opponent': S.form.opponent = id; saveForm(); render(); break;
     case 'settings': S.modal = { kind: 'settings' }; render(); break;
     case 'modal-close': S.modal = null; render(); break;
     case 'modal-ok': { const fn = S.modal?.onOk; S.modal = null; render(); if (fn) await fn(); break; }
@@ -1137,13 +1448,25 @@ app.addEventListener('change', (e) => {
 app.addEventListener('input', (e) => {
   if (e.target.id === 'friend-input') { S.form.friend = e.target.value; saveForm(); }
   if (e.target.id === 'vote-email') S.voteEmail = e.target.value;
+  if (e.target.id === 'room-name') S.roomForm.name = e.target.value;
+  if (e.target.id === 'room-nick') S.roomForm.nick = e.target.value;
 });
 app.addEventListener('toggle', (e) => {
+  if (e.target.dataset?.action === 'room-history') {
+    S.roomHistoryOpen = e.target.open;
+    if (e.target.open && !S.roomHistory && !S.historyLoading) loadRoomHistory();
+    return;
+  }
   if (e.target.classList?.contains('history')) S.historyOpen = e.target.open;
 }, true);
 
 document.addEventListener('keydown', (e) => {
   if (S.modal) { if (e.key === 'Escape') { S.modal = null; render(); } return; }
+  if (e.key === 'Enter' && (e.target.id === 'room-nick' || e.target.id === 'room-name')) {
+    e.preventDefault();
+    submitRoom(S.view === 'room-join' ? 'join' : 'new');
+    return;
+  }
   if (S.view !== 'game' || !S.game) return;
   if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
   if (e.ctrlKey || e.metaKey || e.altKey) return;

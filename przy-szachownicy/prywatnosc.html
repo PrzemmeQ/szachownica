@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Prywatność — Przy Szachownicy</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+  <style>main { max-width: 640px; margin: 0 auto; padding: 20px 16px 40px; line-height: 1.55; } h2 { font-size: 1.05rem; margin-top: 22px; }</style>
+</head>
+<body>
+<main>
+  <h1>Prywatność</h1>
+  <p><a href="./">← Wróć do aplikacji</a></p>
+
+  <h2>Gra przez Lichess</h2>
+  <p>Gdy logujesz się przez Lichess, aplikacja łączy się bezpośrednio z lichess.org. Nie mamy własnego serwera w tym trybie i nie widzimy Twoich danych. Dostęp do konta (token) zostaje tylko na Twoim urządzeniu.</p>
+
+  <h2>Pokoje (gra bez konta Lichess)</h2>
+  <p>W pokojach partie przechodzą przez nasz serwer. Przechowujemy tylko to, co jest potrzebne do gry:</p>
+  <ul>
+    <li>nazwę pokoju i nick, który sam podajesz,</li>
+    <li>przynależność do pokoju i zabezpieczony skrót klucza urządzenia (sam klucz jest tylko na Twoim urządzeniu),</li>
+    <li>partie rozegrane w pokoju (ruchy, czasy, wynik) i ranking,</li>
+    <li>czas ostatniej obecności w pokoju (żeby pokazać, kto jest online).</li>
+  </ul>
+  <p>Nie zbieramy e-maili, haseł, adresów IP ani lokalizacji. Nie ma reklam ani śledzenia. Serwer działa na Cloudflare, a dane pokoi są przechowywane w Unii Europejskiej.</p>
+  <p>Każdy członek pokoju widzi nicki, ranking i historię partii innych członków tego pokoju.</p>
+
+  <h2>Twoje urządzenie</h2>
+  <p>Aplikacja zapisuje w pamięci przeglądarki (localStorage) ustawienia i klucz do pokoju. Usuniesz je w menu pokoju („Usuń pokój z tego urządzenia”) albo czyszcząc dane strony.</p>
+
+  <h2>Usunięcie danych</h2>
+  <p>Chcesz usunąć swój nick i partie z pokoju? Napisz przez stronę projektu na GitHubie (github.com/przemmeq/szachownica).</p>
+</main>
+</body>
+</html>

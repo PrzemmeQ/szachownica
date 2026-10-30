@@ -213,3 +213,22 @@ code { font-family: var(--mono); font-size: 0.9em; }
 .vote { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 6px 0 8px; }
 .vote-btn { font-size: 1.05rem; padding: 12px; }
 .start .banner { margin-top: 22px; }
+
+/* wariant B: pokoje */
+.chip .dot { margin-right: 2px; vertical-align: middle; }
+.rank-list { list-style: none; padding: 0; margin: 0 0 8px; }
+.rank-row { display: grid; grid-template-columns: 2em auto 1fr auto 3.2em; align-items: center; gap: 6px; padding: 8px 0; border-top: 1px solid var(--line); }
+.rank-row:first-child { border-top: 0; }
+.rank-row.me .rank-nick { font-weight: 700; }
+.rank-n { color: var(--muted); font-variant-numeric: tabular-nums; }
+.rank-nick { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rank-r { font-weight: 600; font-variant-numeric: tabular-nums; }
+.rank-g { text-align: right; }
+.room-hist summary { cursor: pointer; font-weight: 600; }
+.hist-list { list-style: none; padding: 0; margin: 8px 0 0; }
+.hist-list li { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; padding: 8px 0; border-top: 1px solid var(--line); }
+.hist-list li:first-child { border-top: 0; }
+.hist-list li > .small { grid-column: 1 / -1; }
+.hist-res { font-weight: 700; font-variant-numeric: tabular-nums; }
+.link-box { display: block; width: 100%; font: inherit; font-size: 0.9rem; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin: 6px 0 10px; }
+.dialog h3 { font-size: 1rem; margin: 18px 0 4px; }
