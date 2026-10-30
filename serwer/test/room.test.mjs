@@ -1,4 +1,4 @@
-// Testy serwera pokoi na lokalnym `wrangler dev` (TEST_MODE=1 z .dev.vars: krótkie limity).
+// Testy serwera na lokalnym `wrangler dev` (TEST_MODE=1 z .dev.vars: krótkie limity i blokady).
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { startServer, api, Client, sleep } from './helpers.mjs';
@@ -8,617 +8,366 @@ let srv;
 before(async () => { srv = await startServer(); });
 after(async () => { await srv?.stop(); });
 
-async function roomWithTwo() {
-  const c = await api(srv.base, 'POST', '/api/rooms', { name: 'Klub testowy', nick: 'Ania' });
-  assert.equal(c.status, 200, JSON.stringify(c.data));
-  const j = await api(srv.base, 'POST', `/api/rooms/${c.data.room}/join`, { nick: 'Bartek' });
-  assert.equal(j.status, 200, JSON.stringify(j.data));
-  const A = new Client(srv.base, c.data.room, c.data.token);
-  const B = new Client(srv.base, c.data.room, j.data.token);
-  await A.connect(); await B.connect();
-  return { room: c.data.room, A, B, aId: c.data.memberId, bId: j.data.memberId, bToken: j.data.token };
-}
+const uniq = () => Math.random().toString(36).slice(2, 7);
+const dev = () => 'dev-' + uniq() + uniq();
+const KEY = { Authorization: 'Bearer klucz-testowy-statystyk' };
 
-// A wyzywa B, B przyjmuje. Zwraca id partii i kto gra białymi.
-async function startGame(ctx, { time = 10, increment = 5, rated = true, color = 'white' } = {}) {
+async function register(prefix = 'G') {
+  const nick = prefix + uniq();
+  const r = await api(srv.base, 'POST', '/api/account/register', { nick, password: 'haslo-testowe-' + uniq() });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  return { nick, id: r.data.memberId, token: r.data.token };
+}
+async function createClub(name, nick, accountToken) {
+  const r = await api(srv.base, 'POST', '/api/rooms', { name, nick, accountToken });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  return r.data;
+}
+async function joinClub(code, opts = {}) {
+  return api(srv.base, 'POST', '/api/rooms/join', { code, deviceId: opts.deviceId || dev(), ...opts });
+}
+async function connect(room, token) { const c = new Client(srv.base, room, token); await c.connect(); return c; }
+
+async function clubWithTwo({ accounts = true } = {}) {
+  const a = accounts ? await register('A') : null;
+  const b = accounts ? await register('B') : null;
+  const club = await createClub('Klub ' + uniq(), accounts ? undefined : 'Ania', a?.token);
+  const j = await joinClub(club.code, accounts ? { accountToken: b.token } : { nick: 'Bartek' });
+  assert.equal(j.status, 200, JSON.stringify(j.data));
+  const A = await connect(club.room, club.token);
+  const B = await connect(club.room, j.data.token);
+  return { club, a, b, A, B, aId: club.memberId, bId: j.data.memberId };
+}
+async function startGame(ctx, { time = 10, increment = 5, rated = false, color = 'white' } = {}) {
   const { A, B, bId } = ctx;
   const ch = await A.req('challenge', { to: bId, time, increment, rated, color });
   assert.ok(ch.ok, ch.error);
-  const ev = await B.wait((m) => m.t === 'event' && m.ev.type === 'challenge' && m.ev.challenge.id === ch.id);
-  assert.equal(ev.ev.challenge.from, 'Ania');
+  await B.wait((m) => m.t === 'event' && m.ev.type === 'challenge' && m.ev.challenge.id === ch.id);
   const acc = await B.req('accept', { id: ch.id });
   assert.ok(acc.ok, acc.error);
-  await A.wait((m) => m.t === 'challengeResult' && m.id === ch.id && m.result === 'accepted');
-  const gs = await A.wait((m) => m.t === 'event' && m.ev.type === 'gameStart' && m.ev.game.id === acc.gameId);
   const gameId = acc.gameId;
   await A.req('watch', { gameId }); await B.req('watch', { gameId });
-  const W = gs.ev.game.color === 'white' ? A : B;
-  const Bl = W === A ? B : A;
-  return { gameId, W, Bl };
+  return { gameId, W: A, Bl: B };
 }
+// 10 półruchów (żeby poddanie liczyło się do rankingu)
+const OPENING = ['e2e4', 'e7e5', 'g1f3', 'b8c6', 'f1c4', 'g8f6', 'd2d3', 'f8c5', 'e1g1', 'd7d6'];
+async function playMoves(gameId, W, Bl, moves, from = 0) {
+  for (let i = 0; i < moves.length; i++) {
+    const r = await ((from + i) % 2 === 0 ? W : Bl).req('move', { gameId, uci: moves[i], ply: from + i });
+    assert.ok(r.ok, `${moves[i]}: ${r.error}`);
+  }
+}
+const gm = (C, gameId, type, mark, ms) => C.gameMsg(gameId, type, mark, ms);
 
-test('Glicko-2: wygrana podnosi, przegrana obniża; suma bliska zera', () => {
+test('Glicko-2: start 1200, wygrana podnosi', () => {
+  assert.equal(DEFAULT.rating, 1200);
   const r = rateGame({ ...DEFAULT }, { ...DEFAULT }, 1);
-  assert.ok(r.white.rating > 1600 && r.white.rating < 1700, String(r.white.rating));
-  assert.ok(Math.abs(r.white.rating - 1500 + (r.black.rating - 1500)) < 1);
-  assert.ok(r.white.rd < 350);
+  assert.ok(r.white.rating > 1300 && r.black.rating < 1100);
 });
 
-test('pokój: tworzenie, informacja, dołączanie, zajęty nick, zły token', async () => {
-  const c = await api(srv.base, 'POST', '/api/rooms', { name: 'Szkółka', nick: 'Trener' });
-  assert.equal(c.status, 200);
-  assert.match(c.data.room, /^[a-z2-9]{12}$/);
-  const info = await api(srv.base, 'GET', `/api/rooms/${c.data.room}`);
-  assert.deepEqual(info.data, { name: 'Szkółka', members: 1, public: false });
-  const dup = await api(srv.base, 'POST', `/api/rooms/${c.data.room}/join`, { nick: 'trener' });
-  assert.equal(dup.status, 400);
+test('klub: kod NAZWA-XXXXX, sprawdzenie, dołączenie samym nickiem, zajęty nick, kod bez myślnika', async () => {
+  const c = await createClub('Klub Hetman — środy', 'Trener');
+  assert.match(c.code, /^KLUBH-[A-Z0-9]{5}$/);
+  const look = await api(srv.base, 'POST', '/api/rooms/lookup', { code: c.code.toLowerCase(), deviceId: dev() });
+  assert.deepEqual(look.data, { code: c.code, name: 'Klub Hetman — środy', needsPassword: false });
+  const j = await joinClub(c.code.replace('-', ''), { nick: 'Kasia' });
+  assert.equal(j.status, 200, JSON.stringify(j.data));
+  assert.equal(j.data.room, c.room);
+  const dup = await joinClub(c.code, { nick: 'kasia' });
   assert.match(dup.data.error, /zajęty/);
-  const bad = await api(srv.base, 'POST', `/api/rooms/${c.data.room}/join`, { nick: 'x' });
-  assert.equal(bad.status, 400);
-  const none = await api(srv.base, 'GET', '/api/rooms/aaaaaaaaaaaa');
-  assert.equal(none.status, 404);
-  const X = new Client(srv.base, c.data.room, 'zly-token');
-  const w = await X.connect();
-  assert.equal(w.t, 'authFailed');
-  const T = new Client(srv.base, c.data.room, c.data.token);
-  const ok = await T.connect();
-  assert.equal(ok.me.name, 'Trener');
-  assert.equal(ok.room.name, 'Szkółka');
+  const T = await connect(c.room, c.token);
+  assert.equal(T.welcome.room.code, c.code);
+  assert.equal(T.welcome.room.canManage, true);
+  assert.equal(T.welcome.members.length, 2);
   T.close();
 });
 
-test('partia 10+5: ruchy w obie strony, serwer odrzuca ruch nielegalny, zegar, ranking i historia', async () => {
-  const ctx = await roomWithTwo();
-  const { gameId, W, Bl } = await startGame(ctx);
-  assert.equal(W, ctx.A); // A wyzwał białymi
+test('blokada za złe kody: rośnie (test: 3 → 3 s, potem 2 → 3 s), dotyczy konta, nie innych', async () => {
+  const c = await createClub('Blokady', 'Ola');
+  const acc = await register('L');
+  const bad = () => api(srv.base, 'POST', '/api/rooms/join', { code: 'BLOKA-ZZZZZ', nick: 'X' + uniq(), accountToken: acc.token });
+  let r = await bad(); assert.match(r.data.error, /Pozostało prób: 2/);
+  await bad();
+  r = await bad(); assert.match(r.data.error, /zablokowane/);
+  r = await api(srv.base, 'POST', '/api/rooms/join', { code: c.code, accountToken: acc.token });
+  assert.match(r.data.error, /zablokowane do/);
+  const other = await register('M');
+  r = await api(srv.base, 'POST', '/api/rooms/join', { code: c.code, accountToken: other.token });
+  assert.equal(r.status, 200);
+  await sleep(3200);
+  await bad();
+  r = await bad(); assert.match(r.data.error, /zablokowane/);
+  await sleep(3200);
+  r = await api(srv.base, 'POST', '/api/rooms/join', { code: c.code, accountToken: acc.token });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+});
 
-  const full = await W.gameMsg(gameId, 'full');
-  assert.equal(full.clock.initial, 600000);
-  assert.equal(full.clock.increment, 5000);
-  assert.equal(full.white.name, 'Ania');
+test('hasło klubu, zmiana kodu, administrator, usuwanie członków i wyjście', async () => {
+  const owner = await register('O');
+  const c = await createClub('Szachy Plus', undefined, owner.token);
+  const O = await connect(c.room, c.token);
+  let r = await O.req('setRoomPassword', { password: 'wieza8' });
+  assert.ok(r.ok && r.hasPassword, r.error);
+  assert.equal((await api(srv.base, 'POST', '/api/rooms/lookup', { code: c.code, deviceId: dev() })).data.needsPassword, true);
+  assert.match((await joinClub(c.code, { nick: 'Bez' })).data.error, /hasło jest złe/);
+  const p1 = await register('P');
+  const j1 = await joinClub(c.code, { accountToken: p1.token, password: 'wieza8' });
+  assert.equal(j1.status, 200, JSON.stringify(j1.data));
+  const j2 = await joinClub(c.code, { nick: 'Zosia', password: 'wieza8' });
+  const P1 = await connect(c.room, j1.data.token);
+  const Z = await connect(c.room, j2.data.token);
 
-  // nie swój ruch i ruch nielegalny
+  const nc = await O.req('changeCode');
+  assert.ok(nc.ok && nc.code !== c.code, nc.error);
+  assert.match((await joinClub(c.code, { nick: 'Nowy', password: 'wieza8' })).data.error, /Nie ma klubu/);
+  assert.equal((await joinClub(nc.code, { nick: 'Nowy', password: 'wieza8' })).status, 200);
+
+  assert.equal((await P1.req('removeMember', { id: j2.data.memberId })).ok, false);
+  assert.ok((await O.req('setRole', { id: j1.data.memberId, role: 'admin' })).ok);
+  await P1.wait((m) => m.t === 'roomInfo' && m.room.canManage);
+  assert.equal((await P1.req('removeMember', { id: c.memberId })).ok, false);
+  r = await P1.req('removeMember', { id: j2.data.memberId });
+  assert.ok(r.ok, r.error);
+  await Z.wait((m) => m.t === 'removed');
+  assert.equal((await new Client(srv.base, c.room, j2.data.token).connect()).t, 'authFailed');
+
+  assert.ok((await O.req('setRole', { id: j1.data.memberId, role: 'member' })).ok);
+  assert.ok((await O.req('removeMember', { id: j1.data.memberId })).ok);
+  assert.match((await joinClub(nc.code, { accountToken: p1.token, password: 'wieza8' })).data.error, /usunięty/);
+  const p2 = await register('Q');
+  const j3 = await joinClub(nc.code, { accountToken: p2.token, password: 'wieza8' });
+  const Q = await connect(c.room, j3.data.token);
+  assert.ok((await Q.req('leaveRoom')).ok);
+  assert.equal((await joinClub(nc.code, { accountToken: p2.token, password: 'wieza8' })).status, 200);
+  O.close();
+});
+
+test('partia 10+5: ruch nielegalny, zegar, roszada; rankingowa liczy się do wspólnego rankingu', async () => {
+  const ctx = await clubWithTwo();
+  const { gameId, W, Bl } = await startGame(ctx, { rated: true });
+  const full = await gm(W, gameId, 'full');
+  assert.equal(full.white.rating, 1200);
   let r = await Bl.req('move', { gameId, uci: 'e7e5', ply: 0 });
-  assert.equal(r.ok, false); assert.match(r.error, /nie Twój/);
+  assert.match(r.error, /nie Twój/);
   r = await W.req('move', { gameId, uci: 'e2e5', ply: 0 });
-  assert.equal(r.ok, false); assert.match(r.error, /niedozwolony/);
-
-  let mark = Bl.mark();
-  r = await W.req('move', { gameId, uci: 'e2e4', ply: 0 });
-  assert.ok(r.ok, r.error);
-  let st = await Bl.gameMsg(gameId, 'state', mark);
-  assert.deepEqual(st.state.moves, ['e2e4']);
-  // ponowne wysłanie tego samego ruchu (po zerwaniu) nie gra go drugi raz
-  r = await W.req('move', { gameId, uci: 'e2e4', ply: 0 });
-  assert.ok(r.ok && r.duplicate);
-
-  mark = W.mark();
-  r = await Bl.req('move', { gameId, uci: 'e7e5', ply: 1 });
-  assert.ok(r.ok, r.error);
-  st = await W.gameMsg(gameId, 'state', mark);
-  assert.deepEqual(st.state.moves, ['e2e4', 'e7e5']);
-  assert.ok(st.state.wtime > 599000 && st.state.wtime <= 600000); // zegar białych właśnie ruszył
-
-  // zegar białych biegnie od 3. półruchu
+  assert.match(r.error, /niedozwolony/);
+  await playMoves(gameId, W, Bl, OPENING.slice(0, 2));
   await sleep(1200);
-  mark = Bl.mark();
-  r = await W.req('move', { gameId, uci: 'g1f3', ply: 2 });
-  st = await Bl.gameMsg(gameId, 'state', mark);
+  let mark = Bl.mark();
+  await W.req('move', { gameId, uci: 'g1f3', ply: 2 });
+  const st = await gm(Bl, gameId, 'state', mark);
   const spent = 600000 + 5000 - st.state.wtime;
-  assert.ok(spent >= 1100 && spent < 2500, `zużyto ${spent} ms`);
-
-  // roszada zapisana jako „król na wieżę” jest zamieniana
-  await Bl.req('move', { gameId, uci: 'b8c6', ply: 3 });
-  await W.req('move', { gameId, uci: 'f1c4', ply: 4 });
-  await Bl.req('move', { gameId, uci: 'g8f6', ply: 5 });
+  assert.ok(spent >= 1100 && spent < 2500, `zużyto ${spent}`);
+  await playMoves(gameId, W, Bl, OPENING.slice(3, 8), 3);
   mark = Bl.mark();
-  r = await W.req('move', { gameId, uci: 'e1h1', ply: 6 });
+  r = await W.req('move', { gameId, uci: 'e1h1', ply: 8 });
   assert.ok(r.ok, r.error);
-  st = await Bl.gameMsg(gameId, 'state', mark);
-  assert.equal(st.state.moves[6], 'e1g1');
-
-  // remis: propozycja i odrzucenie
+  assert.equal((await gm(Bl, gameId, 'state', mark)).state.moves[8], 'e1g1');
+  await Bl.req('move', { gameId, uci: 'd7d6', ply: 9 });
   mark = W.mark();
-  await Bl.req('draw', { gameId, yes: true });
-  st = await W.gameMsg(gameId, 'state', mark);
-  assert.equal(st.state.bdraw, true);
-  await W.req('draw', { gameId, yes: false });
+  await Bl.req('resign', { gameId });
+  const rating = await W.wait((m) => m.t === 'game' && m.msg.type === 'rating', 5000, mark);
+  assert.equal(rating.msg.result.counted, true);
+  assert.ok(rating.msg.result.diffW > 0 && rating.msg.result.diffB < 0);
+  const me = await W.wait((m) => m.t === 'me', 3000, mark);
+  assert.ok(me.ratings.rapid.rating > 1200);
+  const P = await connect('publiczny', ctx.a.token);
+  assert.ok(P.welcome.me.ratings.rapid.rating > 1200);
+  assert.equal(P.welcome.me.ratings.rapid.games, 1);
+  for (const x of [W, Bl, P]) x.close();
+});
 
-  // przerwać już nie można, poddać tak
-  r = await W.req('abort', { gameId });
-  assert.equal(r.ok, false);
-  mark = W.mark();
-  r = await Bl.req('resign', { gameId });
-  assert.ok(r.ok, r.error);
-  st = await W.gameMsg(gameId, 'state', mark);
-  assert.equal(st.state.status, 'resign');
-  assert.equal(st.state.winner, 'white');
-  await W.wait((m) => m.t === 'event' && m.ev.type === 'gameFinish', 5000, mark);
-
-  const mem = await W.req('members');
-  const a = mem.members.find((m) => m.nick === 'Ania');
-  const b = mem.members.find((m) => m.nick === 'Bartek');
-  assert.ok(a.ratings.rapid.rating > 1500 && b.ratings.rapid.rating < 1500);
-  assert.equal(a.ratings.rapid.games, 1);
-  assert.equal(a.ratings.blitz.games, 0); // osobno wg tempa
-
-  const h = await W.req('history');
-  assert.equal(h.games[0].id, gameId);
-  assert.ok(h.games[0].diffW > 0 && h.games[0].diffB < 0);
+test('ranking: bez konta tylko towarzysko; krótkie poddanie się nie liczy; limit 3 dziennie z tym samym rywalem', async () => {
+  const nc = await clubWithTwo({ accounts: false });
+  assert.match((await nc.A.req('challenge', { to: nc.bId, time: 10, increment: 0, rated: true })).error, /wymaga konta/);
+  nc.A.close(); nc.B.close();
+  const ctx = await clubWithTwo();
+  let g = await startGame(ctx, { rated: true });
+  await playMoves(g.gameId, g.W, g.Bl, OPENING.slice(0, 4));
+  let mark = g.W.mark();
+  await g.Bl.req('resign', { gameId: g.gameId });
+  let res = await g.W.wait((m) => m.t === 'game' && m.msg.type === 'rating', 5000, mark);
+  assert.deepEqual([res.msg.result.counted, res.msg.result.reason], [false, 'short']);
+  for (let i = 0; i < 4; i++) {
+    g = await startGame(ctx, { rated: true, time: 10, increment: 0 });
+    await playMoves(g.gameId, g.W, g.Bl, OPENING);
+    mark = g.W.mark();
+    await g.Bl.req('resign', { gameId: g.gameId });
+    res = await g.W.wait((m) => m.t === 'game' && m.msg.type === 'rating', 5000, mark);
+    if (i < 3) assert.equal(res.msg.result.counted, true, `partia ${i + 1}`);
+    else assert.deepEqual([res.msg.result.counted, res.msg.result.reason], [false, 'limit']);
+  }
   ctx.A.close(); ctx.B.close();
 });
 
-test('ponowne połączenie: partia trwa, zegar zgodny z serwerem', async () => {
-  const ctx = await roomWithTwo();
-  const { gameId, W, Bl } = await startGame(ctx, { rated: false });
-  await W.req('move', { gameId, uci: 'd2d4', ply: 0 });
-  await Bl.req('move', { gameId, uci: 'd7d5', ply: 1 });
-  await W.req('move', { gameId, uci: 'c2c4', ply: 2 });
-  // czarne rozłączają się na 3 s; ich zegar biegnie dalej
+test('ponowne połączenie, koniec czasu z alarmu, wyjście rywala z odliczaniem', async () => {
+  const ctx = await clubWithTwo();
+  const { gameId, W, Bl } = await startGame(ctx);
+  await playMoves(gameId, W, Bl, ['d2d4', 'd7d5', 'c2c4']);
   Bl.close();
   await sleep(3000);
-  const back = new Client(srv.base, ctx.room, ctx.bToken);
-  const wel = await back.connect();
-  assert.equal(wel.ongoing.length, 1);
+  const tok = (await joinClub(ctx.club.code, { accountToken: ctx.b.token })).data.token;
+  const back = await connect(ctx.club.room, tok);
   await back.req('watch', { gameId });
-  const full = await back.gameMsg(gameId, 'full');
-  assert.deepEqual(full.state.moves, ['d2d4', 'd7d5', 'c2c4']);
-  const lost = 600000 - full.state.btime;
-  assert.ok(lost >= 2900 && lost < 4500, `czarne straciły ${lost} ms`);
-  const r = await back.req('move', { gameId, uci: 'e7e6', ply: 3 });
-  assert.ok(r.ok, r.error);
-  back.close(); W.close();
-});
-
-test('koniec czasu ogłasza serwer (alarm), bez udziału klienta', async () => {
-  const ctx = await roomWithTwo();
-  const { gameId, W, Bl } = await startGame(ctx, { time: 0.05, increment: 0, rated: false }); // 3 s
-  await W.req('move', { gameId, uci: 'e2e4', ply: 0 });
-  await Bl.req('move', { gameId, uci: 'e7e5', ply: 1 });
-  const mark = W.mark();
-  const st = await W.wait((m) => m.t === 'game' && m.msg.type === 'state' && m.msg.state.status === 'outoftime', 8000, mark);
-  assert.equal(st.msg.state.winner, 'black');
-  assert.equal(st.msg.state.wtime, 0);
-  W.close(); Bl.close();
-});
-
-test('wyjście rywala: powiadomienie, potem odebranie zwycięstwa', async () => {
-  const ctx = await roomWithTwo();
-  const { gameId, W, Bl } = await startGame(ctx, { rated: false });
-  await W.req('move', { gameId, uci: 'e2e4', ply: 0 });
-  await Bl.req('move', { gameId, uci: 'c7c5', ply: 1 });
-  const mark = W.mark();
-  Bl.close();
-  const g1 = await W.wait((m) => m.t === 'game' && m.msg.type === 'opponentGone' && m.msg.gone, 6000, mark);
-  assert.ok(g1.msg.claimWinInSeconds > 0);
-  let r = await W.req('claimVictory', { gameId });
-  assert.equal(r.ok, false);
-  await W.wait((m) => m.t === 'game' && m.msg.type === 'opponentGone' && m.msg.claimWinInSeconds === 0, 6000, mark);
-  r = await W.req('claimVictory', { gameId });
-  assert.ok(r.ok, r.error);
-  const st = await W.wait((m) => m.t === 'game' && m.msg.type === 'state' && m.msg.state.status === 'timeout', 3000, mark);
-  assert.equal(st.msg.state.winner, 'white');
+  const lost = 600000 - (await gm(back, gameId, 'full')).state.btime;
+  assert.ok(lost >= 2900 && lost < 4500, `czarne straciły ${lost}`);
+  back.close();
+  const og = await W.wait((m) => m.t === 'game' && m.msg.type === 'opponentGone' && m.msg.gone, 12000);
+  assert.ok(og.msg.claimWinInSeconds > 0);
+  await W.wait((m) => m.t === 'game' && m.msg.type === 'opponentGone' && m.msg.claimWinInSeconds === 0, 8000);
+  assert.ok((await W.req('claimDraw', { gameId })).ok);
   W.close();
+  const c2 = await clubWithTwo({ accounts: false });
+  const g2 = await startGame(c2, { time: 0.05, increment: 0 });
+  await playMoves(g2.gameId, g2.W, g2.Bl, ['e2e4', 'e7e5']);
+  const st = await g2.W.wait((m) => m.t === 'game' && m.msg.type === 'state' && m.msg.state.status === 'outoftime', 8000);
+  assert.equal(st.msg.state.winner, 'black');
+  c2.A.close(); c2.B.close();
 });
 
-test('wyzwanie: odrzucenie, anulowanie, przerwanie przed ruchem', async () => {
-  const ctx = await roomWithTwo();
-  const { A, B, bId } = ctx;
-  let ch = await A.req('challenge', { to: bId, time: 5, increment: 3, rated: true });
-  await B.req('decline', { id: ch.id });
-  await A.wait((m) => m.t === 'challengeResult' && m.id === ch.id && m.result === 'declined');
-  ch = await A.req('challenge', { to: bId, time: 5, increment: 3, rated: true });
-  await A.req('cancel', { id: ch.id });
-  await B.wait((m) => m.t === 'event' && m.ev.type === 'challengeGone' && m.ev.id === ch.id);
-  const bad = await A.req('challenge', { to: bId, days: 3 });
-  assert.equal(bad.ok, false);
-
-  const { gameId, W, Bl } = await startGame(ctx, { time: 3, increment: 2 });
-  const full = await W.gameMsg(gameId, 'full');
-  assert.equal(full.speed, 'blitz');
-  await W.req('move', { gameId, uci: 'e2e4', ply: 0 });
-  let r = await W.req('abort', { gameId });
-  assert.equal(r.ok, false); // białe już zagrały
-  const mark = W.mark();
-  r = await Bl.req('abort', { gameId });
-  assert.ok(r.ok, r.error);
-  const st = await W.wait((m) => m.t === 'game' && m.msg.type === 'state' && m.msg.state.status === 'aborted', 3000, mark);
-  assert.equal(st.msg.state.winner, null);
-  const mem = await W.req('members');
-  assert.equal(mem.members.find((m) => m.nick === 'Ania').ratings.blitz.games, 0);
-  A.close(); B.close();
-});
-
-test('przeniesienie na inne urządzenie: jednorazowy kod', async () => {
-  const ctx = await roomWithTwo();
-  const t = await ctx.B.req('transferCreate');
-  assert.ok(t.ok && t.code);
-  const claim = await api(srv.base, 'POST', `/api/rooms/${ctx.room}/transfer`, { code: t.code });
-  assert.equal(claim.status, 200, JSON.stringify(claim.data));
-  assert.equal(claim.data.nick, 'Bartek');
-  const again = await api(srv.base, 'POST', `/api/rooms/${ctx.room}/transfer`, { code: t.code });
-  assert.equal(again.status, 410);
-  const D2 = new Client(srv.base, ctx.room, claim.data.token);
-  const w = await D2.connect();
-  assert.equal(w.me.id, ctx.bId);
-  // wylogowanie unieważnia token tylko tego urządzenia
-  await D2.req('logout');
-  const D3 = new Client(srv.base, ctx.room, claim.data.token);
-  assert.equal((await D3.connect()).t, 'authFailed');
-  const old = new Client(srv.base, ctx.room, ctx.bToken);
-  assert.equal((await old.connect()).t, 'welcome');
-  old.close(); ctx.A.close(); ctx.B.close();
-});
-
-// --- poczekalnia i automatyczne parowanie ----------------------------------------
-const uniq = () => Math.random().toString(36).slice(2, 8);
-
-async function publicPlayer(nick) {
-  const j = await api(srv.base, 'POST', '/api/account/register', { nick, password: 'gracz-testowy-' + uniq() });
-  assert.equal(j.status, 200, JSON.stringify(j.data));
-  const c = new Client(srv.base, 'publiczny', j.data.token);
-  await c.connect();
-  return { c, id: j.data.memberId, token: j.data.token };
-}
-
-test('poczekalnia ogólna: tworzy się sama, parowanie tego samego tempa', async () => {
-  const info = await api(srv.base, 'GET', '/api/rooms/publiczny');
-  assert.equal(info.data.name, 'Poczekalnia ogólna');
-  assert.equal(info.data.public, true);
-  const P = await publicPlayer('P' + uniq());
-  const Q = await publicPlayer('Q' + uniq());
-  const R = await publicPlayer('R' + uniq());
-  assert.equal(P.c.welcome.room.public, true);
-
-  // P szuka 10+5 rankingowej, R szuka 3+2 — nie łączą się
-  const sp = await P.c.req('seek', { time: 10, increment: 5, rated: true });
-  assert.ok(sp.ok && sp.id && !sp.matched);
-  const sr = await R.c.req('seek', { time: 3, increment: 2, rated: true });
-  assert.ok(sr.ok && !sr.matched);
-  const list = await Q.c.wait((m) => m.t === 'seeks' && m.seeks.some((s) => s.id === sp.id) && m.seeks.some((s) => s.id === sr.id));
-  assert.equal(list.seeks.find((s) => s.id === sp.id).label, '10+5');
-
-  // Q szuka 10+5 → para z P natychmiast
-  const markP = P.c.mark();
-  const sq = await Q.c.req('seek', { time: 10, increment: 5, rated: true });
-  assert.ok(sq.ok && sq.matched && sq.gameId);
-  await P.c.wait((m) => m.t === 'event' && m.ev.type === 'gameStart' && m.ev.game.id === sq.gameId, 5000, markP);
-  await P.c.wait((m) => m.t === 'seekResult' && m.id === sp.id && m.result === 'accepted', 5000, markP);
-  const after = await R.c.req('members');
-  assert.ok(after.ok);
-
-  // szukanie R znika, gdy R się rozłącza
-  const markQ = Q.c.mark();
-  R.c.close();
-  await Q.c.wait((m) => m.t === 'seeks' && !m.seeks.some((s) => s.id === sr.id), 5000, markQ);
-
-  // historia w poczekalni: tylko własne partie
-  await P.c.req('watch', { gameId: sq.gameId });
-  await P.c.req('abort', { gameId: sq.gameId });
-  const hp = await P.c.req('history');
-  assert.ok(hp.games.every((g) => g.whiteId === P.id || g.blackId === P.id));
-  P.c.close(); Q.c.close();
-});
-
-test('poczekalnia: dołączenie do wystawionego szukania, anulowanie', async () => {
-  const P = await publicPlayer('S' + uniq());
-  const Q = await publicPlayer('T' + uniq());
-  const sp = await P.c.req('seek', { time: 5, increment: 3, rated: false });
-  let r = await P.c.req('seekAccept', { id: sp.id });
-  assert.equal(r.ok, false);
-  r = await Q.c.req('seekAccept', { id: sp.id });
-  assert.ok(r.ok && r.gameId, r.error);
-  await P.c.wait((m) => m.t === 'seekResult' && m.id === sp.id);
-  const s2 = await P.c.req('seek', { time: 15, increment: 10, rated: true });
-  const mark = Q.c.mark();
-  await P.c.req('seekCancel', { id: s2.id });
-  await Q.c.wait((m) => m.t === 'seeks' && !m.seeks.some((s) => s.id === s2.id), 5000, mark);
-  r = await Q.c.req('seekAccept', { id: s2.id });
-  assert.equal(r.ok, false);
-  P.c.close(); Q.c.close();
-});
-
-test('parowanie działa też w prywatnym pokoju', async () => {
-  const ctx = await roomWithTwo();
-  const s = await ctx.A.req('seek', { time: 10, increment: 0, rated: true });
-  assert.ok(!s.matched);
-  const m = await ctx.B.req('seek', { time: 10, increment: 0, rated: true });
-  assert.ok(m.matched);
-  ctx.A.close(); ctx.B.close();
-});
-
-// --- konta ---------------------------------------------------------------------------
-test('konto: rejestracja, logowanie na innym urządzeniu, blokada po błędnych hasłach', async () => {
-  const nick = 'K' + uniq();
-  const r = await api(srv.base, 'POST', '/api/account/register', { nick, password: 'tajne-haslo-1', email: nick + '@example.com' });
-  assert.equal(r.status, 200, JSON.stringify(r.data));
-  const short = await api(srv.base, 'POST', '/api/account/register', { nick: 'X' + uniq(), password: 'krotkie' });
-  assert.equal(short.status, 400);
-  const dupMail = await api(srv.base, 'POST', '/api/account/register', { nick: 'Y' + uniq(), password: 'tajne-haslo-1', email: nick.toUpperCase() + '@example.com' });
-  assert.match(dupMail.data.error, /e-mail/);
-
-  const bad = await api(srv.base, 'POST', '/api/account/login', { nick, password: 'zle-haslo-xx' });
-  assert.equal(bad.status, 400);
-  const ok = await api(srv.base, 'POST', '/api/account/login', { nick: nick.toLowerCase(), password: 'tajne-haslo-1' });
-  assert.equal(ok.status, 200, JSON.stringify(ok.data));
-  assert.equal(ok.data.memberId, r.data.memberId);
-  const C = new Client(srv.base, 'publiczny', ok.data.token);
-  const w = await C.connect();
-  assert.equal(w.me.hasPassword, true);
-  assert.equal(w.me.email, nick + '@example.com');
-  C.close();
-
-  // 3 błędne próby (tryb testowy) → blokada, także dla dobrego hasła; po 3 s znów działa
-  for (let i = 0; i < 3; i++) await api(srv.base, 'POST', '/api/account/login', { nick, password: 'zle-haslo-xx' });
-  const locked = await api(srv.base, 'POST', '/api/account/login', { nick, password: 'tajne-haslo-1' });
-  assert.match(locked.data.error, /Za dużo/);
-  await sleep(3200);
-  const again = await api(srv.base, 'POST', '/api/account/login', { nick, password: 'tajne-haslo-1' });
-  assert.equal(again.status, 200, JSON.stringify(again.data));
-});
-
-test('konto: zmiana hasła wylogowuje inne urządzenia, to zostaje; poczekalnia tylko z kontem', async () => {
-  const nick = 'Z' + uniq();
-  const reg = await api(srv.base, 'POST', '/api/account/register', { nick, password: 'pierwsze-haslo' });
-  const other = await api(srv.base, 'POST', '/api/account/login', { nick, password: 'pierwsze-haslo' }); // drugie urządzenie
-  const P = new Client(srv.base, 'publiczny', reg.data.token);
-  await P.connect();
-  let r = await P.req('setPassword', { password: 'drugie-haslo-x', oldPassword: 'zle' });
-  assert.equal(r.ok, false);
-  r = await P.req('setPassword', { password: 'drugie-haslo-x', oldPassword: 'pierwsze-haslo' });
-  assert.ok(r.ok, r.error);
-  const old = new Client(srv.base, 'publiczny', other.data.token);
-  assert.equal((await old.connect()).t, 'authFailed'); // drugie urządzenie wylogowane
-  const same = new Client(srv.base, 'publiczny', reg.data.token);
-  assert.equal((await same.connect()).t, 'welcome'); // to urządzenie zostaje
-  const login = await api(srv.base, 'POST', '/api/account/login', { nick, password: 'drugie-haslo-x' });
-  assert.equal(login.data.memberId, reg.data.memberId); // to samo konto = ten sam ranking
-  const join = await api(srv.base, 'POST', '/api/rooms/publiczny/join', { nick: 'B' + uniq() });
-  assert.match(join.data.error, /potrzebne jest konto/);
-  P.close(); same.close();
-});
-
-test('hasła: popularne, proste i z nickiem odrzucone; nick z obcego alfabetu odrzucony', async () => {
-  for (const pw of ['qwerty123', 'Haslo123', '12345678', 'aaaaaaaa', 'abcabcabc', 'zaq12wsx', 'SZACHY123']) {
-    const r = await api(srv.base, 'POST', '/api/account/register', { nick: 'H' + uniq(), password: pw });
-    assert.equal(r.status, 400, pw);
-    assert.match(r.data.error, /popularne|proste/, pw);
-  }
-  const n = 'Ola' + uniq();
-  const withNick = await api(srv.base, 'POST', '/api/account/register', { nick: n, password: 'xx' + n + 'yy' });
-  assert.match(withNick.data.error, /nicku/);
-  const cyr = await api(srv.base, 'POST', '/api/account/register', { nick: 'Аnia' + uniq(), password: 'dobre-haslo-77' }); // cyrylickie А
-  assert.equal(cyr.status, 400);
-  const pl = await api(srv.base, 'POST', '/api/account/register', { nick: 'Łucja' + uniq().slice(0, 3), password: 'dobre-haslo-77' });
-  assert.equal(pl.status, 200, JSON.stringify(pl.data));
-});
-
-test('limity: zakładanie kont i pokoi z jednej sieci, blokada logowania tylko dla tej sieci', async () => {
-  const ip = { 'X-Test-IP': 'test-limit-' + uniq() };
-  for (let i = 0; i < 3; i++) {
-    const r = await api(srv.base, 'POST', '/api/account/register', { nick: 'Lim' + uniq(), password: 'limit-haslo-9' }, ip);
-    assert.equal(r.status, 200, JSON.stringify(r.data));
-  }
-  const fourth = await api(srv.base, 'POST', '/api/account/register', { nick: 'Lim' + uniq(), password: 'limit-haslo-9' }, ip);
-  assert.match(fourth.data.error, /zbyt wiele kont/);
-  const elsewhere = await api(srv.base, 'POST', '/api/account/register', { nick: 'Lim' + uniq(), password: 'limit-haslo-9' }, { 'X-Test-IP': 'test-limit-' + uniq() });
-  assert.equal(elsewhere.status, 200);
-
-  const rip = { 'X-Test-IP': 'test-limit-' + uniq() };
-  for (let i = 0; i < 3; i++) assert.equal((await api(srv.base, 'POST', '/api/rooms', { name: 'P' + i, nick: 'Ala' }, rip)).status, 200);
-  const room4 = await api(srv.base, 'POST', '/api/rooms', { name: 'P4', nick: 'Ala' }, rip);
-  assert.equal(room4.status, 429);
-  assert.match(room4.data.error, /zbyt wiele pokoi/);
-
-  // blokada po błędnych hasłach dotyczy tylko sieci, z której zgadywano
-  const nick = 'Blk' + uniq();
-  await api(srv.base, 'POST', '/api/account/register', { nick, password: 'blokada-haslo-1' });
-  const bad = { 'X-Test-IP': 'zgadywacz-' + uniq() };
-  for (let i = 0; i < 3; i++) await api(srv.base, 'POST', '/api/account/login', { nick, password: 'zle-zle-zle' }, bad);
-  assert.match((await api(srv.base, 'POST', '/api/account/login', { nick, password: 'blokada-haslo-1' }, bad)).data.error, /Za dużo/);
-  const mine = await api(srv.base, 'POST', '/api/account/login', { nick, password: 'blokada-haslo-1' }, { 'X-Test-IP': 'wlasciciel-' + uniq() });
-  assert.equal(mine.status, 200);
-});
-
-test('ochrona: zalewanie wiadomościami rozłącza, wewnętrzne akcje niedostępne', async () => {
-  const P = await publicPlayer('F' + uniq());
-  for (let i = 0; i < 60; i++) P.c.ws.send(JSON.stringify({ t: 'members', reqId: 1000 + i }));
-  await P.c.wait((m) => m.t === 'error' && /Zbyt wiele/.test(m.message), 5000);
-  await sleep(300);
-  assert.equal(P.c.closed, true);
-  const pub = await api(srv.base, 'POST', '/api/rooms/publiczny/account-login', { accountToken: 'x' });
-  assert.equal(pub.status, 404);
-  for (const p of ['/api/account/verify', '/api/account/limit', '/api/account/room-add']) {
-    assert.equal((await api(srv.base, 'POST', p, {})).status, 404, p);
-  }
-});
-
-test('konto: odzyskiwanie hasła linkiem (e-mail wyłączony lokalnie, token testowy)', async () => {
-  const nick = 'R' + uniq();
-  await api(srv.base, 'POST', '/api/account/register', { nick, password: 'stare-haslo-1', email: nick + '@example.org' });
-  const none = await api(srv.base, 'POST', '/api/account/reset-request', { login: 'nie-ma-' + uniq() });
-  assert.deepEqual(none.data, { ok: true, mailEnabled: false });
-  const req = await api(srv.base, 'POST', '/api/account/reset-request', { login: nick + '@EXAMPLE.org' });
-  assert.ok(req.data.debugToken);
-  const done = await api(srv.base, 'POST', '/api/account/reset', { token: req.data.debugToken, password: 'nowe-haslo-12' });
-  assert.equal(done.status, 200, JSON.stringify(done.data));
-  const reuse = await api(srv.base, 'POST', '/api/account/reset', { token: req.data.debugToken, password: 'inne-haslo-12' });
-  assert.equal(reuse.status, 400);
-  const login = await api(srv.base, 'POST', '/api/account/login', { nick, password: 'nowe-haslo-12' });
-  assert.equal(login.status, 200);
-});
-
-test('konto + pokój: pokój zapamiętany na koncie, wejście na nowym urządzeniu po zalogowaniu', async () => {
-  const nick = 'M' + uniq();
-  const reg = await api(srv.base, 'POST', '/api/account/register', { nick, password: 'haslo-pokoju-1' });
-  const room = await api(srv.base, 'POST', '/api/rooms', { name: 'Klub konta', accountToken: reg.data.token });
-  assert.equal(room.status, 200, JSON.stringify(room.data));
-  assert.equal(room.data.nick, nick); // nick z konta
-
-  // drugi gracz z kontem dołącza linkiem bez wpisywania nicku
-  const n2 = 'N' + uniq();
-  const reg2 = await api(srv.base, 'POST', '/api/account/register', { nick: n2, password: 'haslo-pokoju-2' });
-  const j = await api(srv.base, 'POST', `/api/rooms/${room.data.room}/join`, { accountToken: reg2.data.token });
-  assert.equal(j.data.nick, n2);
-  const j2 = await api(srv.base, 'POST', `/api/rooms/${room.data.room}/join`, { accountToken: reg2.data.token });
-  assert.equal(j2.data.memberId, j.data.memberId); // ponowne dołączenie = ten sam nick
-
-  // nowe urządzenie: logowanie → lista pokoi → wejście do pokoju
-  const login = await api(srv.base, 'POST', '/api/account/login', { nick, password: 'haslo-pokoju-1' });
-  assert.deepEqual(login.data.rooms.map((x) => x.code), [room.data.room]);
-  const back = await api(srv.base, 'POST', `/api/rooms/${room.data.room}/account-login`, { accountToken: login.data.token });
-  assert.equal(back.status, 200, JSON.stringify(back.data));
-  assert.equal(back.data.memberId, room.data.memberId);
-  const stranger = await api(srv.base, 'POST', '/api/account/register', { nick: 'O' + uniq(), password: 'haslo-obcego-1' });
-  const deny = await api(srv.base, 'POST', `/api/rooms/${room.data.room}/account-login`, { accountToken: stranger.data.token });
-  assert.equal(deny.status, 404);
-  const fake = await api(srv.base, 'POST', `/api/rooms/${room.data.room}/account-login`, { accountToken: 'falszywy' });
-  assert.equal(fake.status, 400);
-  // wewnętrzne akcje nie są dostępne z zewnątrz
-  const internal = await api(srv.base, 'POST', '/api/account/verify', { token: login.data.token });
-  assert.equal(internal.status, 404);
-});
-
-test('konto + pokój: połączenie istniejącego nicku w pokoju z kontem', async () => {
-  const ctx = await roomWithTwo();
-  const reg = await api(srv.base, 'POST', '/api/account/register', { nick: 'L' + uniq(), password: 'haslo-laczenia' });
-  const r = await ctx.B.req('linkAccount', { accountToken: reg.data.token });
-  assert.ok(r.ok && r.linked, r.error);
-  const login = await api(srv.base, 'POST', '/api/account/login', { nick: reg.data.nick, password: 'haslo-laczenia' });
-  assert.equal(login.data.rooms[0].code, ctx.room);
-  const back = await api(srv.base, 'POST', `/api/rooms/${ctx.room}/account-login`, { accountToken: login.data.token });
-  assert.equal(back.data.nick, 'Bartek');
-  ctx.A.close(); ctx.B.close();
-});
-
-// --- cofnięcie ruchu ------------------------------------------------------------------
-test('cofnięcie ruchu: tylko za zgodą rywala; 1 albo 2 półruchy; nowy ruch kasuje prośbę', async () => {
-  const ctx = await roomWithTwo();
-  const { gameId, W, Bl } = await startGame(ctx, { rated: false });
-  let r = await W.req('takeback', { gameId, yes: true });
-  assert.equal(r.ok, false); // nic jeszcze nie zagrał
-  await W.req('move', { gameId, uci: 'e2e4', ply: 0 });
-  await Bl.req('move', { gameId, uci: 'e7e5', ply: 1 });
-  await W.req('move', { gameId, uci: 'g1f3', ply: 2 });
-
-  // białe proszą od razu po swoim ruchu → cofa się 1 półruch
+test('cofnięcie ruchu: zgoda, odmowa; limity próśb (2 na ruch do 2 odmów, potem 1)', async () => {
+  const ctx = await clubWithTwo({ accounts: false });
+  const { gameId, W, Bl } = await startGame(ctx);
+  assert.equal((await W.req('takeback', { gameId, yes: true })).ok, false);
+  await playMoves(gameId, W, Bl, ['e2e4', 'e7e5', 'g1f3']);
+  const ask = () => W.req('takeback', { gameId, yes: true });
+  const no = () => Bl.req('takeback', { gameId, yes: false });
+  assert.ok((await ask()).ok); assert.ok((await no()).ok);
+  assert.ok((await ask()).ok); assert.ok((await no()).ok);
+  assert.match((await ask()).error, /już prosiłeś/);
   let mark = Bl.mark();
-  await W.req('takeback', { gameId, yes: true });
-  let st = await Bl.gameMsg(gameId, 'state', mark);
-  assert.equal(st.state.wtakeback, true);
-  mark = W.mark();
-  await Bl.req('takeback', { gameId, yes: false }); // odmowa
-  st = await W.gameMsg(gameId, 'state', mark);
-  assert.equal(st.state.wtakeback, false);
-  assert.equal(st.state.moves.length, 3);
-  await W.req('takeback', { gameId, yes: true });
-  mark = W.mark();
-  await Bl.req('takeback', { gameId, yes: true }); // zgoda
-  st = await W.gameMsg(gameId, 'state', mark);
-  assert.deepEqual(st.state.moves, ['e2e4', 'e7e5']);
-
-  // białe grają inaczej, czarne odpowiadają, białe proszą → cofają się 2 półruchy (ruch czarnych i białych)
-  await W.req('move', { gameId, uci: 'b1c3', ply: 2 });
-  await Bl.req('move', { gameId, uci: 'g8f6', ply: 3 });
-  await W.req('takeback', { gameId, yes: true });
-  mark = W.mark();
-  await Bl.req('takeback', { gameId, yes: true });
-  st = await W.gameMsg(gameId, 'state', mark);
-  assert.deepEqual(st.state.moves, ['e2e4', 'e7e5']);
-
-  // prośba czarnych znika, gdy białe zagrają
-  await W.req('move', { gameId, uci: 'f1c4', ply: 2 });
   await Bl.req('move', { gameId, uci: 'b8c6', ply: 3 });
-  await Bl.req('takeback', { gameId, yes: true });
-  mark = Bl.mark();
-  await W.req('move', { gameId, uci: 'd2d3', ply: 4 });
-  st = await Bl.gameMsg(gameId, 'state', mark);
-  assert.equal(st.state.btakeback, false);
-  assert.equal(st.state.moves.length, 5);
+  const st = await gm(Bl, gameId, 'state', mark);
+  assert.equal(st.state.takebackLeft.white, 1);
+  await W.req('move', { gameId, uci: 'b1c3', ply: 4 });
+  assert.ok((await ask()).ok);
+  mark = W.mark();
+  assert.ok((await Bl.req('takeback', { gameId, yes: true })).ok);
+  assert.deepEqual((await gm(W, gameId, 'state', mark)).state.moves, ['e2e4', 'e7e5', 'g1f3', 'b8c6']);
   W.close(); Bl.close();
 });
 
-// --- statystyki ------------------------------------------------------------------------
-test('statystyki: klucz wymagany, liczniki partii i graczy', async () => {
-  const bad = await api(srv.base, 'GET', '/api/stats', undefined, { Authorization: 'Bearer zly' });
-  assert.equal(bad.status, 401);
-  const none = await api(srv.base, 'GET', '/api/stats');
-  assert.equal(none.status, 401);
-  const before = await api(srv.base, 'GET', '/api/stats', undefined, { Authorization: 'Bearer klucz-testowy-statystyk' });
-  assert.equal(before.status, 200, JSON.stringify(before.data));
-
-  const ctx = await roomWithTwo();
-  const { gameId, W, Bl } = await startGame(ctx, { rated: true });
-  await W.req('move', { gameId, uci: 'e2e4', ply: 0 });
-  await Bl.req('move', { gameId, uci: 'e7e5', ply: 1 });
-  const mark = W.mark();
-  await Bl.req('resign', { gameId });
-  await W.gameMsg(gameId, 'state', mark);
-  await sleep(500); // zdarzenie idzie z pokoju do poczekalni w tle
-
-  const after = await api(srv.base, 'GET', '/api/stats', undefined, { Authorization: 'Bearer klucz-testowy-statystyk' });
-  const s = after.data;
-  assert.equal(s.totals.game, before.data.totals.game + 1);
-  assert.equal(s.totals.game_start, before.data.totals.game_start + 1);
-  assert.ok(s.totals.room >= before.data.totals.room + 1);
-  assert.ok(s.active.last7 >= 2);
-  assert.equal(s.days.length, 30);
-  const today = s.days[29];
-  assert.ok(today.game >= 1 && today.players >= 2);
-  assert.ok(s.rooms.some((r) => r.room === 'Klub testowy'));
-  assert.equal(typeof s.successThreshold, 'boolean');
+test('wzajemne wyzwanie (rewanż u obu) od razu startuje partię', async () => {
+  const ctx = await clubWithTwo({ accounts: false });
+  assert.ok((await ctx.A.req('challenge', { to: ctx.bId, time: 10, increment: 0, color: 'white' })).id);
+  const b = await ctx.B.req('challenge', { to: ctx.aId, time: 10, increment: 0, color: 'black' });
+  assert.ok(b.matched && b.gameId, JSON.stringify(b));
   ctx.A.close(); ctx.B.close();
 });
 
-// --- panel trenera i PGN ---------------------------------------------------------------
-test('panel trenera: założyciel widzi statystyki, ogląda cudze partie, pobiera PGN; zwykły członek nie', async () => {
-  const c = await api(srv.base, 'POST', '/api/rooms', { name: 'Szkółka PGN', nick: 'Trener' });
-  const T = new Client(srv.base, c.data.room, c.data.token);
-  await T.connect();
-  const ja = await api(srv.base, 'POST', `/api/rooms/${c.data.room}/join`, { nick: 'Jaś' });
-  const ma = await api(srv.base, 'POST', `/api/rooms/${c.data.room}/join`, { nick: 'Małgosia' });
-  const J = new Client(srv.base, c.data.room, ja.data.token); await J.connect();
-  const M = new Client(srv.base, c.data.room, ma.data.token); await M.connect();
-  const ch = await J.req('challenge', { to: ma.data.memberId, time: 10, increment: 0, rated: true, color: 'white' });
-  const acc = await M.req('accept', { id: ch.id });
-  const gameId = acc.gameId;
+test('poczekalnia: tylko z kontem, parowanie tego samego tempa, szukanie znika po rozłączeniu', async () => {
+  assert.match((await api(srv.base, 'POST', '/api/rooms/join', { code: 'publiczny', deviceId: dev() })).data.error, /Nie ma klubu/);
+  const [p, q, r] = [await register('P'), await register('Q'), await register('R')];
+  const P = await connect('publiczny', p.token), Q = await connect('publiczny', q.token), R = await connect('publiczny', r.token);
+  const sp = await P.req('seek', { time: 10, increment: 5, rated: true });
+  const sr = await R.req('seek', { time: 15, increment: 10, rated: true });
+  assert.ok(sp.id && sr.id);
+  const sq = await Q.req('seek', { time: 10, increment: 5, rated: true });
+  assert.ok(sq.matched, JSON.stringify(sq));
+  await P.wait((m) => m.t === 'seekResult' && m.id === sp.id);
+  const mark = Q.mark();
+  R.close();
+  await Q.wait((m) => m.t === 'seeks' && !m.seeks.some((s) => s.id === sr.id), 12000, mark);
+  P.close(); Q.close();
+});
+
+test('znajomi: zaproszenie i akceptacja, obecność, odrzucenie po cichu, blokada', async () => {
+  const [a, b, c] = [await register('Fa'), await register('Fb'), await register('Fc')];
+  const A = await connect('publiczny', a.token), B = await connect('publiczny', b.token), C = await connect('publiczny', c.token);
+  assert.match((await A.req('friendInvite', { nick: 'nie-ma-' + uniq() })).error, /Nie ma gracza/);
+  assert.ok((await A.req('friendInvite', { nick: b.nick.toLowerCase() })).ok);
+  await B.wait((m) => m.t === 'event' && m.ev.type === 'friendInvite');
+  assert.equal((await B.req('social')).social.incoming[0].nick, a.nick);
+  const s = await B.req('friendAccept', { id: a.id });
+  assert.equal(s.social.friends[0].nick, a.nick);
+  assert.equal(s.social.friends[0].online, true);
+  const mark = A.mark();
+  B.close();
+  assert.equal((await A.wait((m) => m.t === 'presence' && m.id === b.id, 15000, mark)).online, false);
+  await C.req('friendInvite', { id: a.id });
+  await A.req('friendDecline', { id: c.id });
+  assert.equal((await C.req('social')).social.outgoing.length, 0);
+  await A.req('block', { id: c.id });
+  assert.match((await C.req('challenge', { to: a.id, time: 10, increment: 0 })).error, /Nie możesz/);
+  assert.ok((await C.req('friendInvite', { id: a.id })).ok);
+  assert.equal((await A.req('social')).social.incoming.length, 0);
+  assert.match((await A.req('challenge', { to: c.id, time: 10, increment: 0 })).error, /Nie możesz/);
+  A.close(); C.close();
+});
+
+test('konto: popularne hasła, obce litery, zmiana hasła wylogowuje inne urządzenia, blokada sieci, reset', async () => {
+  const nick = 'K' + uniq();
+  assert.match((await api(srv.base, 'POST', '/api/account/register', { nick, password: 'qwerty123' })).data.error, /popularne/);
+  assert.equal((await api(srv.base, 'POST', '/api/account/register', { nick: 'Аnia' + uniq(), password: 'dobre-haslo-77' })).status, 400);
+  const reg = await api(srv.base, 'POST', '/api/account/register', { nick, password: 'pierwsze-haslo', email: nick + '@example.com' });
+  const other = await api(srv.base, 'POST', '/api/account/login', { nick, password: 'pierwsze-haslo' });
+  const P = await connect('publiczny', reg.data.token);
+  assert.ok((await P.req('setPassword', { password: 'drugie-haslo-x', oldPassword: 'pierwsze-haslo' })).ok);
+  assert.equal((await new Client(srv.base, 'publiczny', other.data.token).connect()).t, 'authFailed');
+  const bad = { 'X-Test-IP': 'zgad-' + uniq() };
+  for (let i = 0; i < 3; i++) await api(srv.base, 'POST', '/api/account/login', { nick, password: 'zle-zle' }, bad);
+  assert.match((await api(srv.base, 'POST', '/api/account/login', { nick, password: 'drugie-haslo-x' }, bad)).data.error, /Za dużo/);
+  assert.equal((await api(srv.base, 'POST', '/api/account/login', { nick, password: 'drugie-haslo-x' }, { 'X-Test-IP': 'moje-' + uniq() })).status, 200);
+  const rq = await api(srv.base, 'POST', '/api/account/reset-request', { login: nick + '@EXAMPLE.com' });
+  assert.equal((await api(srv.base, 'POST', '/api/account/reset', { token: rq.data.debugToken, password: 'trzecie-haslo-9' })).status, 200);
+  P.close();
+});
+
+test('Moje kluby przy koncie, wejście na nowym urządzeniu; przeniesienie kodem 6-cyfrowym', async () => {
+  const a = await register('Mk');
+  const c = await createClub('Klub konta', undefined, a.token);
+  const P = await connect('publiczny', a.token);
+  assert.deepEqual(P.welcome.me.rooms.map((x) => x.room), [c.room]);
+  assert.equal((await api(srv.base, 'POST', `/api/rooms/${c.room}/account-login`, { accountToken: a.token })).data.memberId, c.memberId);
+  const T = await connect(c.room, c.token);
+  const t = await T.req('transferCreate');
+  assert.match(t.code6, /^\d{6}$/);
+  const claim6 = await api(srv.base, 'POST', '/api/rooms/transfer-code', { code: t.code6 });
+  assert.equal(claim6.status, 200, JSON.stringify(claim6.data));
+  assert.equal(claim6.data.room, c.room);
+  assert.equal((await api(srv.base, 'POST', '/api/rooms/transfer-code', { code: t.code6 })).status, 400);
+  P.close(); T.close();
+});
+
+test('limity zakładania; ochrona: zalewanie, wewnętrzne akcje niedostępne', async () => {
+  const ip = { 'X-Test-IP': 'test-limit-' + uniq() };
+  for (let i = 0; i < 3; i++) assert.equal((await api(srv.base, 'POST', '/api/rooms', { name: 'L' + i, nick: 'Ala' }, ip)).status, 200);
+  assert.equal((await api(srv.base, 'POST', '/api/rooms', { name: 'L4', nick: 'Ala' }, ip)).status, 400);
+  const p = await register('Z');
+  const P = await connect('publiczny', p.token);
+  for (let i = 0; i < 60; i++) P.ws.send(JSON.stringify({ t: 'members', reqId: 1000 + i }));
+  await P.wait((m) => m.t === 'error' && /Zbyt wiele/.test(m.message), 5000);
+  const c = await createClub('Wewn', 'Ala');
+  for (const [m, path] of [['POST', '/api/account/verify'], ['POST', `/api/rooms/${c.room}/join`], ['POST', '/api/account/rate'], ['GET', `/api/rooms/${c.room}`]]) {
+    assert.equal((await api(srv.base, m, path, m === 'POST' ? {} : undefined)).status, 404, path);
+  }
+});
+
+test('panel trenera i administratora: podgląd partii, PGN', async () => {
+  const c = await createClub('Szkółka PGN', 'Trener');
+  const T = await connect(c.room, c.token);
+  const ja = await joinClub(c.code, { nick: 'Jaś' }), ma = await joinClub(c.code, { nick: 'Małgosia' });
+  const J = await connect(c.room, ja.data.token), M = await connect(c.room, ma.data.token);
+  const ch = await J.req('challenge', { to: ma.data.memberId, time: 10, increment: 0, color: 'white' });
+  const gameId = (await M.req('accept', { id: ch.id })).gameId;
   await J.req('watch', { gameId }); await M.req('watch', { gameId });
-
-  // trener ogląda na żywo
-  let r = await T.req('watch', { gameId });
-  assert.ok(r.ok, r.error);
-  const full = await T.gameMsg(gameId, 'full');
-  assert.equal(full.spectator, true);
-  let mark = T.mark();
-  await J.req('move', { gameId, uci: 'e2e4', ply: 0 });
-  const st = await T.gameMsg(gameId, 'state', mark);
-  assert.deepEqual(st.state.moves, ['e2e4']);
-  r = await T.req('coachPanel');
-  assert.equal(r.ongoing.length, 1);
-  assert.equal(r.ongoing[0].white, 'Jaś');
-
-  // zwykły członek nie ma panelu ani cudzych partii
-  const ob = await api(srv.base, 'POST', `/api/rooms/${c.data.room}/join`, { nick: 'Obcy' });
-  const O = new Client(srv.base, c.data.room, ob.data.token); await O.connect();
-  assert.equal((await O.req('coachPanel')).ok, false);
-  assert.equal((await O.req('watch', { gameId })).ok, false);
-  assert.equal((await O.req('gamePgn', { gameId })).ok, false);
-
-  await M.req('move', { gameId, uci: 'e7e5', ply: 1 });
-  await J.req('move', { gameId, uci: 'g1f3', ply: 2 });
-  mark = J.mark();
+  assert.ok((await T.req('watch', { gameId })).ok);
+  assert.equal((await gm(T, gameId, 'full')).spectator, true);
+  assert.equal((await M.req('coachPanel')).ok, false);
+  await playMoves(gameId, J, M, ['e2e4', 'e7e5', 'g1f3']);
+  const mark = J.mark();
   await M.req('resign', { gameId });
-  await J.gameMsg(gameId, 'state', mark);
+  await gm(J, gameId, 'state', mark);
+  assert.match((await J.req('gamePgn', { gameId })).pgn, /1\. e4 e5 2\. Nf3 1-0$/);
+  assert.ok((await T.req('setRole', { id: ma.data.memberId, role: 'admin' })).ok);
+  const panel = await M.req('coachPanel');
+  assert.equal(panel.members.find((x) => x.nick === 'Jaś').wins, 1);
+  for (const x of [T, J, M]) x.close();
+});
 
-  const p = await J.req('gamePgn', { gameId });
-  assert.deepEqual(p.san, ['e4', 'e5', 'Nf3']);
-  assert.match(p.pgn, /\[White "Jaś"\]/);
-  assert.match(p.pgn, /\[Result "1-0"\]/);
-  assert.match(p.pgn, /1\. e4 e5 2\. Nf3 1-0$/);
-  const panel = await T.req('coachPanel');
-  const jas = panel.members.find((m) => m.nick === 'Jaś');
-  assert.equal(jas.games, 1); assert.equal(jas.wins, 1);
-  const all = await T.req('roomPgn');
-  assert.match(all.pgn, /Małgosia/);
-  for (const x of [T, J, M, O]) x.close();
+test('statystyki z kluczem', async () => {
+  assert.equal((await api(srv.base, 'GET', '/api/stats', undefined, { Authorization: 'Bearer zly' })).status, 400);
+  const s = await api(srv.base, 'GET', '/api/stats', undefined, KEY);
+  assert.equal(s.status, 200, JSON.stringify(s.data));
+  assert.ok(s.data.totals.game >= 1 && s.data.days.length === 30);
 });

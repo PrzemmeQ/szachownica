@@ -2,7 +2,8 @@
 const SCALE = 173.7178;
 const TAU = 0.75;
 const EPS = 0.000001;
-export const DEFAULT = { rating: 1500, rd: 350, vol: 0.06 };
+// Start od 1200 (decyzja właściciela). Wzory Glicko-2 działają tak samo od dowolnego punktu startowego.
+export const DEFAULT = { rating: 1200, rd: 350, vol: 0.06 };
 const RD_MIN = 45;
 const RD_MAX = 350;
 export const PROVISIONAL_RD = 110;

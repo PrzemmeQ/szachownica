@@ -4,9 +4,13 @@
   "main": "src/index.js",
   "compatibility_date": "2026-10-01",
   "durable_objects": {
-    "bindings": [{ "name": "ROOMS", "class_name": "Room" }]
+    "bindings": [{ "name": "ROOMS", "class_name": "RoomV2" }]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Room"] }],
+  // v2: nowa klasa i usunięcie starej = wyczyszczenie wszystkich danych testowych (wspólny ranking od zera).
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Room"] },
+    { "tag": "v2", "new_sqlite_classes": ["RoomV2"], "deleted_classes": ["Room"] }
+  ],
   "vars": {
     // Strony, które mogą łączyć się z serwerem (CORS i WebSocket).
     "ALLOWED_ORIGINS": "https://przemmeq.github.io",

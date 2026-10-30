@@ -68,7 +68,10 @@ export function cleanEmail(e) {
 
 // Metody dodawane do klasy Room (this = obiekt pokoju). Wywoływane tylko w poczekalni ogólnej.
 // Limity zakładania (na godzinę): z jednego adresu i łącznie. Szkółka na jednym Wi-Fi zmieści grupę.
-const LIMITS = { register: { perIp: 10, total: 300 }, room: { perIp: 10, total: 300 }, statsfail: { perIp: 10, total: 1000 } };
+const LIMITS = {
+  register: { perIp: 10, total: 300 }, room: { perIp: 10, total: 300 }, statsfail: { perIp: 10, total: 1000 },
+  clubjoin: { perIp: 30, total: 100000 }, transferfail: { perIp: 10, total: 10000 },
+};
 
 export const accountMethods = {
   pbkdf2Iterations() { return this.test ? 1000 : PBKDF2_MAX; },
@@ -162,13 +165,46 @@ export const accountMethods = {
     return m ? { id: m.id, nick: m.nick } : null;
   },
 
-  acctAddRoom(accountId, code, name) {
+  // „Moje kluby” przy koncie: identyfikator pokoju i nazwa.
+  acctAddRoom(accountId, roomId, name) {
     if (!this.member(accountId)) return;
-    this.sql.exec('INSERT OR REPLACE INTO account_rooms (member_id, code, name, joined_at) VALUES (?, ?, ?, ?)',
-      accountId, code, name, Date.now());
+    this.sql.exec('INSERT OR REPLACE INTO account_rooms (member_id, room_id, name, joined_at) VALUES (?, ?, ?, ?)',
+      accountId, roomId, name, Date.now());
+  },
+  acctRemoveRoom(accountId, roomId) {
+    this.sql.exec('DELETE FROM account_rooms WHERE member_id = ? AND room_id = ?', accountId, roomId);
   },
   acctRooms(accountId) {
-    return this.sql.exec('SELECT code, name FROM account_rooms WHERE member_id = ? ORDER BY joined_at DESC', accountId).toArray();
+    return this.sql.exec('SELECT room_id AS room, name FROM account_rooms WHERE member_id = ? ORDER BY joined_at DESC', accountId).toArray();
+  },
+
+  // --- wspólny ranking (jeden na konto dla każdego tempa, dla poczekalni i wszystkich klubów) ---
+  acctRatings(ids) {
+    const out = {};
+    for (const id of (ids || []).slice(0, 200)) out[id] = this.ratingsOf(String(id));
+    return out;
+  },
+  // Wynik partii rankingowej. Ochrona przed nabijaniem: z tym samym rywalem najwyżej 3 partie rankingowe dziennie.
+  acctRate(body) {
+    const w = String(body.white || ''), b = String(body.black || '');
+    if (!this.member(w) || !this.member(b) || w === b) return { counted: false, reason: 'account' };
+    const sp = body.speed === 'classical' ? 'classical' : 'rapid';
+    const day = new Date().toISOString().slice(0, 10);
+    const [x, y] = w < b ? [w, b] : [b, w];
+    const n = this.sql.exec('SELECT n FROM pair_days WHERE a = ? AND b = ? AND day = ?', x, y, day).toArray()[0]?.n || 0;
+    if (n >= 3) return { counted: false, reason: 'limit' };
+    this.sql.exec(`INSERT INTO pair_days (a, b, day, n) VALUES (?, ?, ?, 1)
+      ON CONFLICT (a, b, day) DO UPDATE SET n = n + 1`, x, y, day);
+    const rw = this.rating(w, sp), rb = this.rating(b, sp);
+    const res = this.rateGameGlicko(rw, rb, body.score);
+    this.saveRating({ ...rw, ...res.white, games: rw.games + 1 });
+    this.saveRating({ ...rb, ...res.black, games: rb.games + 1 });
+    return {
+      counted: true,
+      diffW: Math.round(res.white.rating) - Math.round(rw.rating),
+      diffB: Math.round(res.black.rating) - Math.round(rb.rating),
+      ratings: this.acctRatings([w, b]),
+    };
   },
 
   accountInfo(memberId) {
