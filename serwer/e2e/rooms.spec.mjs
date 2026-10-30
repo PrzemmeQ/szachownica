@@ -12,7 +12,7 @@ let api; let front; let frontA;
 test.beforeAll(async () => {
   api = await startServer(API_PORT);
   front = await serveFront(8080, `http://127.0.0.1:${API_PORT}`);
-  frontA = await serveFront(8081, null);
+  frontA = await serveFront(8081, ''); // jak wariant A: bez serwera pokoi
 });
 test.afterAll(async () => {
   front?.close(); frontA?.close();
@@ -78,6 +78,7 @@ test('B1: pokój z linku, wyzwanie 10+5, partia, zerwanie sieci na 20 s, ranking
   await expect(B.page.locator('.rank-list')).toContainText('Ania');
 
   // 3. A wyzywa B: 10+5, białymi
+  await A.page.locator('button.tab[data-action="mode"][data-id="member"]').click();
   await expect(A.page.locator('button.chip[data-action="opponent"]')).toContainText('Bartek');
   await A.page.locator('button.chip[data-action="preset"][data-id="r10_5"]').click();
   await A.page.locator('button.chip[data-action="color"][data-id="white"]').click();
@@ -168,4 +169,76 @@ test('demo działa też, gdy pokoje są włączone', async ({ browser }) => {
   await page.getByRole('button', { name: 'Zagraj z komputerem' }).click();
   await expect(page.locator('.g-meta')).toBeVisible();
   await ctx.close();
+});
+
+test('poczekalnia ogólna: lista czekających i automatyczne parowanie (blitz 5+3)', async ({ browser }) => {
+  const A = await phone(browser);
+  const B = await phone(browser);
+  const nickA = 'Ola' + Math.random().toString(36).slice(2, 6);
+  const nickB = 'Ewa' + Math.random().toString(36).slice(2, 6);
+
+  for (const [P, nick] of [[A, nickA], [B, nickB]]) {
+    await P.page.goto(FRONT + '/');
+    await P.page.getByRole('button', { name: 'Graj z każdym (bez Lichess)' }).click();
+    await P.page.locator('#room-nick').fill(nick);
+    await P.page.getByRole('button', { name: 'Wejdź do poczekalni' }).click();
+    await expect(P.page.locator('.who')).toContainText(nick);
+    await expect(P.page.locator('.who')).toContainText('Poczekalnia ogólna');
+    await expect(P.page.locator('.tabs .tab.sel').first()).toHaveText('Poczekalnia');
+  }
+
+  // A szuka blitza 5+3 (przez Lichess blitz z losowym rywalem jest niemożliwy — tu działa)
+  await A.page.locator('button.chip[data-action="preset"][data-id="b5_3"]').click();
+  await A.page.getByRole('button', { name: 'Szukaj rywala' }).click();
+  await expect(A.page.getByText('Szukam rywala · Blitz 5+3')).toBeVisible();
+
+  // B widzi A na liście czekających
+  const row = B.page.locator('.seek-list li', { hasText: nickA });
+  await expect(row).toContainText('Blitz 5+3');
+
+  // B wybiera to samo tempo i szuka → para od razu
+  await B.page.locator('button.chip[data-action="preset"][data-id="b5_3"]').click();
+  await B.page.getByRole('button', { name: 'Szukaj rywala' }).click();
+  await expect(A.page.locator('.g-meta')).toContainText('Blitz 5+3');
+  await expect(B.page.locator('.g-meta')).toContainText('Blitz 5+3');
+  await expect(A.page.locator('.overlay')).toHaveCount(0);
+  await expect(B.page.locator('.overlay')).toHaveCount(0);
+
+  // kto ma białe, ten zaczyna
+  const aWhite = (await A.page.locator('.status').textContent()) === 'Twój ruch';
+  const W = aWhite ? A.page : B.page;
+  const Bl = aWhite ? B.page : A.page;
+  await play(W, 'd2', 'd4');
+  await expect(Bl.locator('.lm-san')).toHaveText('d4');
+  await play(Bl, 'g8', 'f6');
+  await expect(W.locator('.lm-san')).toHaveText('Sf6');
+  await W.getByRole('button', { name: 'Poddaj' }).click();
+  await W.locator('.dialog').getByRole('button', { name: 'Poddaj' }).click();
+  await expect(Bl.locator('.result-title')).toHaveText('Wygrana');
+
+  // ranking ogólny (blitz) i własna historia
+  await Bl.getByRole('button', { name: 'Wróć do listy partii' }).click();
+  await expect(Bl.getByRole('heading', { name: 'Ranking ogólny' })).toBeVisible();
+  await Bl.locator('details.room-hist summary').click();
+  await expect(Bl.locator('.hist-list li').first()).toContainText('Blitz 5+3');
+
+  await A.ctx.close(); await B.ctx.close();
+});
+
+test('poczekalnia: dołączenie przyciskiem „Graj” przy czekającym', async ({ browser }) => {
+  const A = await phone(browser);
+  const B = await phone(browser);
+  const nickA = 'Jan' + Math.random().toString(36).slice(2, 6);
+  for (const [P, nick] of [[A, nickA], [B, 'Iza' + Math.random().toString(36).slice(2, 6)]]) {
+    await P.page.goto(FRONT + '/');
+    await P.page.getByRole('button', { name: 'Graj z każdym (bez Lichess)' }).click();
+    await P.page.locator('#room-nick').fill(nick);
+    await P.page.getByRole('button', { name: 'Wejdź do poczekalni' }).click();
+  }
+  await A.page.locator('button.chip[data-action="preset"][data-id="c30_0"]').click();
+  await A.page.getByRole('button', { name: 'Szukaj rywala' }).click();
+  await B.page.locator('.seek-list li', { hasText: nickA }).getByRole('button', { name: 'Graj' }).click();
+  await expect(A.page.locator('.g-meta')).toContainText('30+0');
+  await expect(B.page.locator('.g-meta')).toContainText('30+0');
+  await A.ctx.close(); await B.ctx.close();
 });

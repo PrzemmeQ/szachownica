@@ -6,9 +6,15 @@ import { rateGame, DEFAULT, PROVISIONAL_RD } from './glicko.js';
 
 const ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
 export const ROOM_CODE_RE = /^[abcdefghjkmnpqrstuvwxyz23456789]{12}$/;
+// Poczekalnia ogólna: jeden stały pokój dla wszystkich (kod spoza alfabetu losowych kodów).
+export const PUBLIC_CODE = 'publiczny';
+const PUBLIC_NAME = 'Poczekalnia ogólna';
 const NICK_RE = /^[\p{L}\p{N}][\p{L}\p{N} _.-]{1,19}$/u;
 const UCI_RE = /^[a-h][1-8][a-h][1-8][qrbn]?$/;
 const MAX_MEMBERS = 100;
+const MAX_MEMBERS_PUBLIC = 1000000;
+const PUBLIC_TOP = 20; // w poczekalni ogólnej lista graczy = online + czołówka każdego tempa
+const PUBLIC_ONLINE_CAP = 300;
 const RATING_SPEEDS = ['blitz', 'rapid', 'classical'];
 const ENDED_UNRATED = new Set(['aborted', 'noStart']);
 
@@ -85,8 +91,13 @@ export class Room extends DurableObject {
         id TEXT PRIMARY KEY, from_id TEXT NOT NULL, to_id TEXT NOT NULL, time_ms INTEGER NOT NULL,
         inc_ms INTEGER NOT NULL, color TEXT NOT NULL, rated INTEGER NOT NULL, created_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS transfers (hash TEXT PRIMARY KEY, member_id TEXT NOT NULL, expires_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS seeks (
+        id TEXT PRIMARY KEY, member_id TEXT NOT NULL, time_ms INTEGER NOT NULL, inc_ms INTEGER NOT NULL,
+        rated INTEGER NOT NULL, created_at INTEGER NOT NULL);
+      CREATE INDEX IF NOT EXISTS ratings_top ON ratings (speed, rating);
     `);
   }
+  isPublic() { return this.kv('public') === '1'; }
 
   // --- pomocnicze: dane --------------------------------------------------
   kv(k, v) {
@@ -118,7 +129,7 @@ export class Room extends DurableObject {
     const n = cleanNick(nick);
     if (!NICK_RE.test(n)) fail('Nick: 2–20 znaków, litery, cyfry, spacja, _ . -');
     const count = this.sql.exec('SELECT COUNT(*) AS c FROM members').one().c;
-    if (count >= MAX_MEMBERS) fail('Pokój jest pełny.');
+    if (count >= (this.isPublic() ? MAX_MEMBERS_PUBLIC : MAX_MEMBERS)) fail('Pokój jest pełny.');
     if (this.sql.exec('SELECT 1 FROM members WHERE nick_key = ?', nickKey(n)).toArray().length) fail('Ten nick jest już zajęty w pokoju.');
     let id;
     do { id = randomCode(8); } while (this.member(id));
@@ -221,10 +232,27 @@ export class Room extends DurableObject {
   }
   membersList() {
     const online = this.onlineIds();
-    return this.allMembers().map((m) => ({
-      id: m.id, nick: m.nick, role: m.role, online: online.has(m.id), ratings: this.ratingsOf(m.id),
-    }));
+    const shape = (m) => ({ id: m.id, nick: m.nick, role: m.role, online: online.has(m.id), ratings: this.ratingsOf(m.id) });
+    if (!this.isPublic()) return this.allMembers().map(shape);
+    const ids = new Set([...online].slice(0, PUBLIC_ONLINE_CAP));
+    for (const sp of RATING_SPEEDS) {
+      for (const r of this.sql.exec('SELECT member_id FROM ratings WHERE speed = ? AND games > 0 ORDER BY rating DESC LIMIT ?', sp, PUBLIC_TOP)) {
+        ids.add(r.member_id);
+      }
+    }
+    return [...ids].map((id) => this.member(id)).filter(Boolean).map(shape);
   }
+  seeksList() {
+    return this.sql.exec('SELECT * FROM seeks ORDER BY created_at').toArray().map((s) => {
+      const m = this.member(s.member_id);
+      const speed = speedOf(s.time_ms, s.inc_ms);
+      return {
+        id: s.id, memberId: s.member_id, nick: m ? m.nick : '?', rating: Math.round(this.rating(s.member_id, ratingSpeed(speed)).rating),
+        speed, rated: !!s.rated, time: s.time_ms / 60000, increment: s.inc_ms / 1000, label: `${s.time_ms / 60000}+${s.inc_ms / 1000}`,
+      };
+    });
+  }
+  broadcastSeeks() { this.toAll({ t: 'seeks', seeks: this.seeksList() }); }
 
   // --- gniazda ------------------------------------------------------------------
   openSockets(except) {
@@ -274,13 +302,19 @@ export class Room extends DurableObject {
         this.kv('owner_id', m.memberId);
         return json({ name, ...m });
       }
+      if (!this.roomExists() && req.headers.get('X-Room') === PUBLIC_CODE) {
+        this.kv('name', PUBLIC_NAME);
+        this.kv('code', PUBLIC_CODE);
+        this.kv('public', '1');
+        this.kv('created_at', Date.now());
+      }
       if (!this.roomExists()) return json({ error: 'Nie ma takiego pokoju. Sprawdź link.' }, 404);
       if (action === 'info') {
-        return json({ name: this.kv('name'), members: this.sql.exec('SELECT COUNT(*) AS c FROM members').one().c });
+        return json({ name: this.kv('name'), members: this.sql.exec('SELECT COUNT(*) AS c FROM members').one().c, public: this.isPublic() });
       }
       if (action === 'join') {
         const m = await this.addMember(body.nick, 'member');
-        this.broadcastMembers();
+        if (!this.isPublic()) this.broadcastMembers();
         return json({ name: this.kv('name'), ...m });
       }
       if (action === 'transfer') {
@@ -359,8 +393,9 @@ export class Room extends DurableObject {
     this.send(ws, {
       t: 'welcome',
       me: { id: m.id, name: m.nick, role: m.role, ratings: this.ratingsOf(m.id) },
-      room: { code: this.kv('code'), name: this.kv('name') },
+      room: { code: this.kv('code'), name: this.kv('name'), public: this.isPublic() },
       members: this.membersList(),
+      seeks: this.seeksList(),
       ongoing: this.runningGames().filter((g) => this.colorOf(g, m.id)).map((g) => this.gameInfo(g, m.id)),
       challenges: this.sql.exec('SELECT * FROM challenges WHERE to_id = ?', m.id).toArray().map((c) => this.challengeOf(c)),
     });
@@ -373,6 +408,9 @@ export class Room extends DurableObject {
     if (this.onlineIds(ws).has(a.memberId)) return;
     const now = Date.now();
     this.sql.exec('UPDATE members SET offline_since = ?, last_seen = ? WHERE id = ?', now, now, a.memberId);
+    // szukanie rywala trwa tylko, gdy szukający jest połączony
+    const hadSeeks = this.sql.exec('SELECT 1 FROM seeks WHERE member_id = ?', a.memberId).toArray().length;
+    if (hadSeeks) { this.sql.exec('DELETE FROM seeks WHERE member_id = ?', a.memberId); this.broadcastSeeks(); }
     this.broadcastMembers();
   }
 
@@ -382,7 +420,10 @@ export class Room extends DurableObject {
       case 'members': return { members: this.membersList() };
       case 'ongoing':
         return { games: this.runningGames().filter((g) => this.colorOf(g, me)).map((g) => this.gameInfo(g, me)) };
-      case 'history': return { games: this.history() };
+      case 'history': return { games: this.history(this.isPublic() ? me : null) };
+      case 'seek': return this.cmdSeek(me, msg);
+      case 'seekCancel': return this.cmdSeekCancel(me, msg.id);
+      case 'seekAccept': return this.cmdSeekAccept(me, msg.id);
       case 'challenge': return this.cmdChallenge(me, msg);
       case 'cancel': return this.cmdCancel(me, msg.id);
       case 'accept': return this.cmdAccept(me, msg.id);
@@ -414,8 +455,12 @@ export class Room extends DurableObject {
     return {};
   }
 
-  history() {
-    return this.sql.exec("SELECT * FROM games WHERE status != 'started' ORDER BY ended_at DESC LIMIT 30").toArray().map((g) => ({
+  // memberId: tylko partie tego gracza (poczekalnia ogólna), null: wszystkie partie pokoju
+  history(memberId) {
+    const rows = memberId
+      ? this.sql.exec("SELECT * FROM games WHERE status != 'started' AND (white_id = ? OR black_id = ?) ORDER BY ended_at DESC LIMIT 30", memberId, memberId)
+      : this.sql.exec("SELECT * FROM games WHERE status != 'started' ORDER BY ended_at DESC LIMIT 30");
+    return rows.toArray().map((g) => ({
       id: g.id, white: this.member(g.white_id)?.nick || '?', black: this.member(g.black_id)?.nick || '?',
       whiteId: g.white_id, blackId: g.black_id,
       speed: g.speed, rated: !!g.rated, status: g.status, winner: g.winner || null,
@@ -426,15 +471,20 @@ export class Room extends DurableObject {
   }
 
   // --- wyzwania -----------------------------------------------------------------
-  cmdChallenge(me, msg) {
+  tempo(msg) {
     if (msg.days) fail('Partie korespondencyjne w pokojach będą później.');
-    const to = String(msg.to ?? '');
-    if (to === me) fail('Nie możesz wyzwać samego siebie.');
-    if (!this.member(to)) fail('Nie ma takiego gracza w pokoju.');
     const time = Number(msg.time);
     const inc = Number(msg.increment ?? 0);
     if (!(time >= this.L.minTime && time <= 180)) fail('Nieprawidłowy czas partii.');
     if (!(Number.isInteger(inc) && inc >= 0 && inc <= 180)) fail('Nieprawidłowy dodatek czasu.');
+    return { time, inc, time_ms: Math.round(time * 60000), inc_ms: inc * 1000 };
+  }
+
+  cmdChallenge(me, msg) {
+    const to = String(msg.to ?? '');
+    if (to === me) fail('Nie możesz wyzwać samego siebie.');
+    if (!this.member(to)) fail('Nie ma takiego gracza w pokoju.');
+    const { time, inc } = this.tempo(msg);
     const color = ['white', 'black'].includes(msg.color) ? msg.color : 'random';
     const old = this.sql.exec('SELECT id FROM challenges WHERE from_id = ? AND to_id = ?', me, to).toArray();
     for (const o of old) {
@@ -443,6 +493,7 @@ export class Room extends DurableObject {
     }
     const id = randomCode(10);
     const ch = { id, from_id: me, to_id: to, time_ms: Math.round(time * 60000), inc_ms: inc * 1000, color, rated: msg.rated ? 1 : 0, created_at: Date.now() };
+    if (this.isPublic() && !this.onlineIds().has(to)) fail('Ten gracz jest teraz poza poczekalnią.');
     this.sql.exec('INSERT INTO challenges (id, from_id, to_id, time_ms, inc_ms, color, rated, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
       ch.id, ch.from_id, ch.to_id, ch.time_ms, ch.inc_ms, ch.color, ch.rated, ch.created_at);
     this.toMember(to, { t: 'event', ev: { type: 'challenge', challenge: this.challengeOf(ch) } });
@@ -468,9 +519,16 @@ export class Room extends DurableObject {
     const ch = this.getChallenge(id);
     if (!ch || ch.to_id !== me) fail('To wyzwanie jest już nieaktualne.');
     const challengerWhite = ch.color === 'white' || (ch.color === 'random' && Math.random() < 0.5);
-    const white = challengerWhite ? ch.from_id : ch.to_id;
-    const black = challengerWhite ? ch.to_id : ch.from_id;
-    const speed = speedOf(ch.time_ms, ch.inc_ms);
+    this.sql.exec('DELETE FROM challenges WHERE id = ?', ch.id);
+    this.toMember(ch.to_id, { t: 'event', ev: { type: 'challengeGone', id: ch.id } });
+    const g = this.createGame(challengerWhite ? ch.from_id : ch.to_id, challengerWhite ? ch.to_id : ch.from_id, ch.time_ms, ch.inc_ms, ch.rated);
+    this.toMember(ch.from_id, { t: 'challengeResult', id: ch.id, result: 'accepted', gameId: g.id });
+    return { gameId: g.id };
+  }
+
+  // Tworzy partię, zamyka szukania obu graczy i wysyła gameStart.
+  createGame(white, black, timeMs, incMs, rated) {
+    const speed = speedOf(timeMs, incMs);
     const rw = this.rating(white, ratingSpeed(speed));
     const rb = this.rating(black, ratingSpeed(speed));
     let gid;
@@ -478,14 +536,54 @@ export class Room extends DurableObject {
     const now = Date.now();
     this.sql.exec(`INSERT INTO games (id, white_id, black_id, speed, time_ms, inc_ms, rated, status, moves, wtime, btime,
       last_move_at, rating_w, rating_b, prov_w, prov_b, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'started', '', ?, ?, ?, ?, ?, ?, ?, ?)`,
-    gid, white, black, speed, ch.time_ms, ch.inc_ms, ch.rated, ch.time_ms, ch.time_ms, now,
+    gid, white, black, speed, timeMs, incMs, rated ? 1 : 0, timeMs, timeMs, now,
     Math.round(rw.rating), Math.round(rb.rating), rw.rd > PROVISIONAL_RD ? 1 : 0, rb.rd > PROVISIONAL_RD ? 1 : 0, now);
     const g = this.getGame(gid);
-    this.sql.exec('DELETE FROM challenges WHERE id = ?', ch.id);
-    this.toMember(ch.to_id, { t: 'event', ev: { type: 'challengeGone', id: ch.id } });
+    const seeks = this.sql.exec('SELECT id, member_id FROM seeks WHERE member_id IN (?, ?)', white, black).toArray();
+    this.sql.exec('DELETE FROM seeks WHERE member_id IN (?, ?)', white, black);
     for (const pid of [white, black]) this.toMember(pid, { t: 'event', ev: { type: 'gameStart', game: this.gameInfo(g, pid) } });
-    this.toMember(ch.from_id, { t: 'challengeResult', id: ch.id, result: 'accepted', gameId: gid });
-    return { gameId: gid };
+    for (const s of seeks) this.toMember(s.member_id, { t: 'seekResult', id: s.id, result: 'accepted', gameId: gid });
+    if (seeks.length) this.broadcastSeeks();
+    return g;
+  }
+
+  // --- poczekalnia: szukanie rywala z automatycznym parowaniem ------------------------
+  // Para = to samo tempo i ten sam rodzaj (rankingowa / towarzyska); wybieramy najbliższy ranking.
+  cmdSeek(me, msg) {
+    const { time_ms, inc_ms } = this.tempo(msg);
+    const rated = msg.rated ? 1 : 0;
+    this.sql.exec('DELETE FROM seeks WHERE member_id = ?', me);
+    const sp = ratingSpeed(speedOf(time_ms, inc_ms));
+    const mine = this.rating(me, sp).rating;
+    const online = this.onlineIds();
+    const cands = this.sql.exec('SELECT * FROM seeks WHERE time_ms = ? AND inc_ms = ? AND rated = ? AND member_id != ?',
+      time_ms, inc_ms, rated, me).toArray().filter((s) => online.has(s.member_id));
+    if (cands.length) {
+      cands.sort((a, b) => Math.abs(this.rating(a.member_id, sp).rating - mine) - Math.abs(this.rating(b.member_id, sp).rating - mine)
+        || a.created_at - b.created_at);
+      const other = cands[0];
+      const meWhite = Math.random() < 0.5;
+      const g = this.createGame(meWhite ? me : other.member_id, meWhite ? other.member_id : me, time_ms, inc_ms, rated);
+      return { matched: true, gameId: g.id };
+    }
+    const id = randomCode(10);
+    this.sql.exec('INSERT INTO seeks (id, member_id, time_ms, inc_ms, rated, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+      id, me, time_ms, inc_ms, rated, Date.now());
+    this.broadcastSeeks();
+    return { id };
+  }
+  cmdSeekCancel(me, id) {
+    const r = this.sql.exec('SELECT 1 FROM seeks WHERE id = ? AND member_id = ?', String(id ?? ''), me).toArray();
+    if (r.length) { this.sql.exec('DELETE FROM seeks WHERE id = ?', String(id)); this.broadcastSeeks(); }
+    return {};
+  }
+  cmdSeekAccept(me, id) {
+    const s = this.sql.exec('SELECT * FROM seeks WHERE id = ?', String(id ?? '')).toArray()[0];
+    if (!s || !this.onlineIds().has(s.member_id)) fail('Ten gracz już nie szuka rywala.');
+    if (s.member_id === me) fail('To Twoje szukanie.');
+    const meWhite = Math.random() < 0.5;
+    const g = this.createGame(meWhite ? me : s.member_id, meWhite ? s.member_id : me, s.time_ms, s.inc_ms, s.rated);
+    return { gameId: g.id };
   }
 
   // --- partia ---------------------------------------------------------------------
@@ -722,7 +820,8 @@ export class Room extends DurableObject {
     // Martwe połączenia sprawdzamy tylko, gdy to ma znaczenie (trwa partia albo ktoś się nie przedstawił),
     // żeby pokój bez partii mógł zasnąć.
     const sockets = this.openSockets();
-    if (sockets.length && (running.length || sockets.some((ws) => !this.att(ws).memberId))) times.push(now + L.sweep);
+    const seeking = this.sql.exec('SELECT 1 FROM seeks LIMIT 1').toArray().length;
+    if (sockets.length && (running.length || seeking || sockets.some((ws) => !this.att(ws).memberId))) times.push(now + L.sweep);
     if (!times.length) { this.ctx.storage.deleteAlarm(); return; }
     this.ctx.storage.setAlarm(Math.max(now + 50, Math.min(...times)));
   }

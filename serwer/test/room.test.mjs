@@ -49,7 +49,7 @@ test('pokój: tworzenie, informacja, dołączanie, zajęty nick, zły token', as
   assert.equal(c.status, 200);
   assert.match(c.data.room, /^[a-z2-9]{12}$/);
   const info = await api(srv.base, 'GET', `/api/rooms/${c.data.room}`);
-  assert.deepEqual(info.data, { name: 'Szkółka', members: 1 });
+  assert.deepEqual(info.data, { name: 'Szkółka', members: 1, public: false });
   const dup = await api(srv.base, 'POST', `/api/rooms/${c.data.room}/join`, { nick: 'trener' });
   assert.equal(dup.status, 400);
   assert.match(dup.data.error, /zajęty/);
@@ -248,4 +248,81 @@ test('przeniesienie na inne urządzenie: jednorazowy kod', async () => {
   const old = new Client(srv.base, ctx.room, ctx.bToken);
   assert.equal((await old.connect()).t, 'welcome');
   old.close(); ctx.A.close(); ctx.B.close();
+});
+
+// --- poczekalnia i automatyczne parowanie ----------------------------------------
+const uniq = () => Math.random().toString(36).slice(2, 8);
+
+async function publicPlayer(nick) {
+  const j = await api(srv.base, 'POST', '/api/rooms/publiczny/join', { nick });
+  assert.equal(j.status, 200, JSON.stringify(j.data));
+  const c = new Client(srv.base, 'publiczny', j.data.token);
+  await c.connect();
+  return { c, id: j.data.memberId };
+}
+
+test('poczekalnia ogólna: tworzy się sama, parowanie tego samego tempa', async () => {
+  const info = await api(srv.base, 'GET', '/api/rooms/publiczny');
+  assert.equal(info.data.name, 'Poczekalnia ogólna');
+  assert.equal(info.data.public, true);
+  const P = await publicPlayer('P' + uniq());
+  const Q = await publicPlayer('Q' + uniq());
+  const R = await publicPlayer('R' + uniq());
+  assert.equal(P.c.welcome.room.public, true);
+
+  // P szuka 10+5 rankingowej, R szuka 3+2 — nie łączą się
+  const sp = await P.c.req('seek', { time: 10, increment: 5, rated: true });
+  assert.ok(sp.ok && sp.id && !sp.matched);
+  const sr = await R.c.req('seek', { time: 3, increment: 2, rated: true });
+  assert.ok(sr.ok && !sr.matched);
+  const list = await Q.c.wait((m) => m.t === 'seeks' && m.seeks.some((s) => s.id === sp.id) && m.seeks.some((s) => s.id === sr.id));
+  assert.equal(list.seeks.find((s) => s.id === sp.id).label, '10+5');
+
+  // Q szuka 10+5 → para z P natychmiast
+  const markP = P.c.mark();
+  const sq = await Q.c.req('seek', { time: 10, increment: 5, rated: true });
+  assert.ok(sq.ok && sq.matched && sq.gameId);
+  await P.c.wait((m) => m.t === 'event' && m.ev.type === 'gameStart' && m.ev.game.id === sq.gameId, 5000, markP);
+  await P.c.wait((m) => m.t === 'seekResult' && m.id === sp.id && m.result === 'accepted', 5000, markP);
+  const after = await R.c.req('members');
+  assert.ok(after.ok);
+
+  // szukanie R znika, gdy R się rozłącza
+  const markQ = Q.c.mark();
+  R.c.close();
+  await Q.c.wait((m) => m.t === 'seeks' && !m.seeks.some((s) => s.id === sr.id), 5000, markQ);
+
+  // historia w poczekalni: tylko własne partie
+  await P.c.req('watch', { gameId: sq.gameId });
+  await P.c.req('abort', { gameId: sq.gameId });
+  const hp = await P.c.req('history');
+  assert.ok(hp.games.every((g) => g.whiteId === P.id || g.blackId === P.id));
+  P.c.close(); Q.c.close();
+});
+
+test('poczekalnia: dołączenie do wystawionego szukania, anulowanie', async () => {
+  const P = await publicPlayer('S' + uniq());
+  const Q = await publicPlayer('T' + uniq());
+  const sp = await P.c.req('seek', { time: 5, increment: 3, rated: false });
+  let r = await P.c.req('seekAccept', { id: sp.id });
+  assert.equal(r.ok, false);
+  r = await Q.c.req('seekAccept', { id: sp.id });
+  assert.ok(r.ok && r.gameId, r.error);
+  await P.c.wait((m) => m.t === 'seekResult' && m.id === sp.id);
+  const s2 = await P.c.req('seek', { time: 15, increment: 10, rated: true });
+  const mark = Q.c.mark();
+  await P.c.req('seekCancel', { id: s2.id });
+  await Q.c.wait((m) => m.t === 'seeks' && !m.seeks.some((s) => s.id === s2.id), 5000, mark);
+  r = await Q.c.req('seekAccept', { id: s2.id });
+  assert.equal(r.ok, false);
+  P.c.close(); Q.c.close();
+});
+
+test('parowanie działa też w prywatnym pokoju', async () => {
+  const ctx = await roomWithTwo();
+  const s = await ctx.A.req('seek', { time: 10, increment: 0, rated: true });
+  assert.ok(!s.matched);
+  const m = await ctx.B.req('seek', { time: 10, increment: 0, rated: true });
+  assert.ok(m.matched);
+  ctx.A.close(); ctx.B.close();
 });

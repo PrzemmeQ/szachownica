@@ -3,7 +3,7 @@ import { Chess } from './chess.js';
 import { LichessProvider } from './lichess.js';
 import { DemoProvider } from './demo.js';
 import {
-  RoomsProvider, roomsEnabled, savedRoom, forgetRoom, roomInfo, createRoom, joinRoom, claimTransfer,
+  RoomsProvider, roomsEnabled, savedRoom, savedPublic, roomInfo, createRoom, joinRoom, joinPublic, claimTransfer,
 } from './rooms.js';
 import {
   sanToPl, describeMove, speechForMove, statusPl, SPEED_PL, formatMs, PROMO_PIECES,
@@ -46,7 +46,7 @@ const RANKS = ['1', '2', '3', '4', '5', '6', '7', '8'];
 const S = {
   provider: null,
   user: null,
-  view: 'loading', // loading | start | room-new | room-join | lobby | game
+  view: 'loading', // loading | start | room-new | room-join | public-join | lobby | game
   online: true,
   ongoing: [],
   challenges: new Map(),
@@ -218,11 +218,11 @@ async function bootRoom() {
     return true;
   }
   if (params.has('code') || params.has('error')) return false; // powrót z logowania Lichess
+  const last = lsGet('ps_last');
+  const pub = savedPublic();
   const saved = savedRoom();
-  if (saved && (lsGet('ps_last') === 'rooms' || !new LichessProvider().hasToken())) {
-    await enterWith(new RoomsProvider(saved));
-    return true;
-  }
+  if (last === 'public' && pub) { await enterWith(new RoomsProvider(pub)); return true; }
+  if (last === 'rooms' && saved) { await enterWith(new RoomsProvider(saved)); return true; }
   return false;
 }
 
@@ -236,7 +236,7 @@ async function enterWith(provider) {
     provider.userId = S.user.id;
   } catch (e) {
     S.provider = null;
-    S.startError = e.message || (provider.name === 'rooms' ? 'Nie udało się połączyć z serwerem pokoi.' : 'Nie udało się połączyć z Lichess.');
+    S.startError = e.message || (provider.features?.rooms ? 'Nie udało się połączyć z serwerem pokoi.' : 'Nie udało się połączyć z Lichess.');
     S.view = 'start';
     render();
     return;
@@ -285,7 +285,9 @@ async function submitRoom(kind) {
   lsSet('ps_room_nick', nick);
   S.waiting = { text: kind === 'new' ? 'Tworzę pokój…' : 'Dołączam…', kind: 'pending' }; render();
   try {
-    const saved = kind === 'new' ? await createRoom(f.name.trim(), nick) : await joinRoom(S.joinRoom.code, nick);
+    const saved = kind === 'new' ? await createRoom(f.name.trim(), nick)
+      : kind === 'public' ? await joinPublic(nick)
+        : await joinRoom(S.joinRoom.code, nick);
     S.waiting = null; S.joinRoom = null; S.startError = '';
     await enterWith(new RoomsProvider(saved));
     if (kind === 'new' && S.provider) S.modal = { kind: 'room' };
@@ -326,13 +328,16 @@ function onProviderEvent(ev) {
       if (S.view === 'lobby') render();
       break;
     case 'authLost':
-      toast(S.provider?.name === 'rooms'
-        ? 'Nie rozpoznano Cię w pokoju — dołącz ponownie z linku zaproszenia.'
+      toast(S.provider?.features?.rooms
+        ? (S.provider.isPublic ? 'Nie rozpoznano Cię w poczekalni — wejdź ponownie z nowym nickiem.' : 'Nie rozpoznano Cię w pokoju — dołącz ponownie z linku zaproszenia.')
         : 'Sesja Lichess wygasła — zaloguj się ponownie.', 6000);
       logout();
       break;
     case 'members':
       if (S.provider?.me) S.user = { ...S.user, ratings: roomRatings(S.provider.me.ratings) };
+      if (S.view === 'lobby') render();
+      break;
+    case 'seeks':
       if (S.view === 'lobby') render();
       break;
     case 'gameStart': {
@@ -399,9 +404,15 @@ async function startNewGame() {
   const opts = { time: p.time, increment: p.increment, days: p.days, rated: f.rated, color: f.color };
   try {
     if (f.mode === 'seek') {
-      if (p.directOnly) { toast('Blitz z losowym rywalem nie działa przez API Lichess. Wybierz rapid lub dłużej.'); return; }
+      if (p.directOnly && !S.provider.features?.rooms) { toast('Blitz z losowym rywalem nie działa przez API Lichess. Wybierz rapid lub dłużej.'); return; }
       S.waiting = { text: 'Łączenie…', kind: 'pending' }; render();
       const h = await S.provider.seek({ ...opts, color: undefined });
+      if (h.matched) {
+        // ktoś już czekał na to tempo — partia ruszyła (gameStart już otworzył ekran gry)
+        if (S.waiting?.kind === 'pending') S.waiting = null;
+        render();
+        return;
+      }
       if (h.correspondence) {
         S.waiting = null;
         toast('Ogłoszenie wystawione. Partia pojawi się na liście, gdy ktoś dołączy.', 6000);
@@ -671,6 +682,7 @@ function render() {
   else if (S.view === 'start') html = viewStart();
   else if (S.view === 'room-new') html = viewRoomNew();
   else if (S.view === 'room-join') html = viewRoomJoin();
+  else if (S.view === 'public-join') html = viewPublicJoin();
   else if (S.view === 'lobby') html = viewLobby();
   else if (S.view === 'game') html = viewGame();
   html += viewWaiting() + viewModal();
@@ -714,9 +726,27 @@ function viewStart() {
 
 function viewRoomButtons() {
   const saved = savedRoom();
+  const pub = savedPublic();
   return `
+      <button class="btn big" data-action="public-enter">${pub ? `Poczekalnia ogólna (${esc(pub.nick)})` : 'Graj z każdym (bez Lichess)'}</button>
       ${saved ? `<button class="btn big" data-action="room-resume">Wróć do pokoju „${esc(saved.name)}”</button>` : ''}
       <button class="btn big" data-action="room-new">Graj w pokoju (bez Lichess)</button>`;
+}
+
+function viewPublicJoin() {
+  const f = S.roomForm;
+  return `
+  <main class="start">
+    <header class="g-top"><button class="btn small" data-action="to-start">← Wróć</button></header>
+    <h1>Poczekalnia ogólna</h1>
+    <p class="lead">Graj z każdym, kto jest teraz online — bez konta Lichess i bez hasła. Wybierasz tempo, a aplikacja sama dobiera rywala o podobnym rankingu.</p>
+    <label class="field">Twój nick (widoczny dla wszystkich)
+      <input id="room-nick" type="text" maxlength="20" autocomplete="nickname" autocapitalize="off" spellcheck="false" value="${esc(f.nick)}" placeholder="np. Ania_K">
+    </label>
+    <div class="stack"><button class="btn primary big" data-action="public-join">Wejdź do poczekalni</button></div>
+    <p class="note small">Grasz z nieznajomymi. Nie da się sprawdzić, czy ktoś gra przy szachownicy, czy z programem — ranking ogólny traktuj z przymrużeniem oka. Z kimś, komu ufasz, zagrasz w zamkniętym pokoju.</p>
+    <p class="muted small">Zapisujemy tylko nick, partie i ranking. ${PRIVACY_LINK}</p>
+  </main>`;
 }
 
 const PRIVACY_LINK = `<a href="prywatnosc.html" target="_blank" rel="noopener">Prywatność</a>`;
@@ -844,6 +874,7 @@ function viewLobby() {
 
 // --- wariant B: pokój ---------------------------------------------------------
 function viewRoomRanking() {
+  const pub = !!S.provider.features?.public;
   const members = S.provider.members || [];
   const sp = S.rankSpeed;
   const meId = S.user?.id;
@@ -866,11 +897,11 @@ function viewRoomRanking() {
   }).join('');
   return `
   <section class="card">
-    <h2>Ranking pokoju</h2>
+    <h2>${pub ? 'Ranking ogólny' : 'Ranking pokoju'}</h2>
     <div class="tabs">${RATING_SPEEDS.map(([k, l]) => `<button class="tab ${sp === k ? 'sel' : ''}" data-action="rank-speed" data-id="${k}">${l}</button>`).join('')}</div>
     <ol class="rank-list">${rows}</ol>
-    <p class="muted small">„?” — ranking jeszcze niepewny (mało partii). Liczą się tylko partie rankingowe.</p>
-    <button class="btn small" data-action="room-menu">Zaproś do pokoju</button>
+    <p class="muted small">${pub ? 'Czołówka i gracze, którzy są teraz online. ' : ''}„?” — ranking jeszcze niepewny (mało partii). Liczą się tylko partie rankingowe.</p>
+    ${pub ? '' : `<button class="btn small" data-action="room-menu">Zaproś do pokoju</button>`}
   </section>`;
 }
 
@@ -893,7 +924,7 @@ function viewRoomHistory() {
   }
   return `
   <details class="card room-hist" data-action="room-history" ${S.roomHistoryOpen ? 'open' : ''}>
-    <summary>Historia partii w pokoju</summary>
+    <summary>${S.provider.features?.public ? 'Twoje partie' : 'Historia partii w pokoju'}</summary>
     ${body}
   </details>`;
 }
@@ -902,12 +933,14 @@ function viewNewGame() {
   const f = S.form;
   const demo = S.provider?.isDemo;
   const rooms = !!S.provider?.features?.rooms;
+  const pub = !!S.provider?.features?.public;
   const modes = demo
     ? [['ai', 'Komputer']]
-    : rooms ? [['member', 'Członek pokoju']]
-      : [['seek', 'Losowy'], ['friend', 'Znajomy'], ['ai', 'Komputer']];
+    : pub ? [['seek', 'Poczekalnia'], ['member', 'Gracz online']]
+      : rooms ? [['member', 'Członek pokoju'], ['seek', 'Poczekalnia']]
+        : [['seek', 'Losowy'], ['friend', 'Znajomy'], ['ai', 'Komputer']];
   if (!modes.find(([k]) => k === f.mode)) f.mode = modes[0][0];
-  const allowed = PRESETS.filter((p) => !(f.mode === 'seek' && p.directOnly) && !(rooms && p.days));
+  const allowed = PRESETS.filter((p) => !(f.mode === 'seek' && p.directOnly && !rooms) && !(rooms && p.days));
   if (!allowed.find((p) => p.id === f.preset)) f.preset = 'r10_5';
   const groups = [...new Set(allowed.map((p) => p.group))];
   const presetsHtml = groups.map((g) => `
@@ -925,14 +958,29 @@ function viewNewGame() {
     </label>` : '';
   let member = '';
   if (f.mode === 'member') {
-    const others = (S.provider.members || []).filter((m) => m.id !== S.user?.id)
+    const others = (S.provider.members || []).filter((m) => m.id !== S.user?.id && (!pub || m.online))
       .sort((a, b) => (b.online ? 1 : 0) - (a.online ? 1 : 0) || a.nick.localeCompare(b.nick, 'pl'));
     if (!others.find((m) => m.id === f.opponent)) f.opponent = others.find((m) => m.online)?.id || others[0]?.id || '';
     member = others.length ? `
     <div class="field">Rywal
       <div class="chips">${others.map((m) => `<button class="chip ${f.opponent === m.id ? 'sel' : ''}" data-action="opponent" data-id="${esc(m.id)}"><span class="dot ${m.online ? 'on' : 'off'}"></span> ${esc(m.nick)}</button>`).join('')}</div>
     </div>`
-      : `<p class="note small">W pokoju nie ma jeszcze nikogo poza Tobą. <button class="link" data-action="room-menu">Zaproś kogoś</button></p>`;
+      : pub ? `<p class="note small">Teraz nikt inny nie jest online. Wystaw szukanie w zakładce „Poczekalnia” — para powstanie, gdy ktoś wejdzie.</p>`
+        : `<p class="note small">W pokoju nie ma jeszcze nikogo poza Tobą. <button class="link" data-action="room-menu">Zaproś kogoś</button></p>`;
+  }
+  let seekList = '';
+  if (rooms && f.mode === 'seek') {
+    const seeks = (S.provider.seeks || []).filter((s) => s.memberId !== S.user?.id);
+    seekList = `
+    <div class="field">Czekają na rywala
+      ${seeks.length ? `<ul class="seek-list">${seeks.map((s) => `
+        <li>
+          <span class="seek-who">${esc(s.nick)} <span class="muted">(${s.rating})</span></span>
+          <span class="muted small">${esc(SPEED_PL[s.speed] || s.speed)} ${esc(s.label)}${s.rated ? ' · rankingowa' : ' · towarzyska'}</span>
+          <button class="btn small primary" data-action="seek-accept" data-id="${esc(s.id)}">Graj</button>
+        </li>`).join('')}</ul>`
+    : `<p class="muted small">Nikt teraz nie czeka. Wybierz tempo i szukaj — aplikacja połączy Cię z pierwszą osobą, która wybierze to samo tempo.</p>`}
+    </div>`;
   }
   const level = f.mode === 'ai' && !demo ? `
     <div class="field">Poziom komputera
@@ -949,9 +997,10 @@ function viewNewGame() {
   return `
   <section class="card">
     <h2>Nowa partia</h2>
-    ${rooms ? '' : `<div class="tabs">${modes.map(([k, l]) => `<button class="tab ${f.mode === k ? 'sel' : ''}" data-action="mode" data-id="${k}">${l}</button>`).join('')}</div>`}
+    <div class="tabs">${modes.map(([k, l]) => `<button class="tab ${f.mode === k ? 'sel' : ''}" data-action="mode" data-id="${k}">${l}</button>`).join('')}</div>
     ${friend}
     ${member}
+    ${seekList}
     ${presetsHtml}
     ${level}
     ${color}
@@ -1239,13 +1288,14 @@ function viewModal() {
     const link = p.inviteLink();
     const t = S.transfer;
     body = `
-      <h2>Pokój „${esc(p.roomName)}”</h2>
-      <p class="small">Wyślij ten link osobom, z którymi chcesz grać. Dołączają samym nickiem — bez konta i hasła.</p>
+      <h2>${p.isPublic ? esc(p.roomName) : `Pokój „${esc(p.roomName)}”`}</h2>
+      ${link ? `<p class="small">Wyślij ten link osobom, z którymi chcesz grać. Dołączają samym nickiem — bez konta i hasła.</p>
       <input class="link-box" id="invite-link" type="text" readonly value="${esc(link)}">
       <div class="row-actions">
         <button class="btn small primary" data-action="share-invite">Udostępnij link</button>
       </div>
-      <p class="muted small">Link otwiera pokój każdemu, kto go ma — wysyłaj go tylko swoim.</p>
+      <p class="muted small">Link otwiera pokój każdemu, kto go ma — wysyłaj go tylko swoim.</p>`
+    : `<p class="small">Grasz jako <strong>${esc(S.user?.name || '')}</strong>. Chcesz grać tylko ze znajomymi? Utwórz zamknięty pokój na ekranie startowym.</p>`}
       <h3>Inne urządzenie</h3>
       <p class="small">Chcesz grać na drugim telefonie lub komputerze pod tym samym nickiem? Otwórz tam jednorazowy link (ważny 10 minut).</p>
       ${t ? `<input class="link-box" type="text" readonly value="${esc(t.url)}">
@@ -1253,7 +1303,7 @@ function viewModal() {
         <p class="muted small">Nie wysyłaj go nikomu innemu — kto go otworzy, gra jako Ty.</p>`
     : `<div class="row-actions"><button class="btn small" data-action="make-transfer">Utwórz link przeniesienia</button></div>`}
       <div class="row-actions end">
-        <button class="btn small danger" data-action="room-forget">Usuń pokój z tego urządzenia</button>
+        <button class="btn small danger" data-action="room-forget">${p.isPublic ? 'Usuń nick z tego urządzenia' : 'Usuń pokój z tego urządzenia'}</button>
         <button class="btn primary" data-action="modal-close">Gotowe</button>
       </div>`;
   }
@@ -1342,7 +1392,9 @@ app.addEventListener('click', async (e) => {
     case 'demo': S.startError = ''; await enterWith(new DemoProvider()); break;
     case 'logout':
       if (S.provider?.features?.rooms) {
-        confirmModal({ title: 'Wyjść z pokoju?', text: 'Pokój zostanie zapamiętany na tym urządzeniu — wrócisz jednym przyciskiem.', okLabel: 'Wyjdź', onOk: leaveRoom });
+        confirmModal(S.provider.isPublic
+          ? { title: 'Wyjść z poczekalni?', text: 'Twój nick zostanie zapamiętany na tym urządzeniu — wrócisz jednym przyciskiem.', okLabel: 'Wyjdź', onOk: leaveRoom }
+          : { title: 'Wyjść z pokoju?', text: 'Pokój zostanie zapamiętany na tym urządzeniu — wrócisz jednym przyciskiem.', okLabel: 'Wyjdź', onOk: leaveRoom });
         break;
       }
       confirmModal({ title: 'Wylogować?', text: S.provider?.isDemo ? 'Zakończysz tryb demo.' : 'Aplikacja straci dostęp do Twojego konta Lichess na tym urządzeniu.', okLabel: 'Wyloguj', onOk: logout });
@@ -1350,6 +1402,20 @@ app.addEventListener('click', async (e) => {
     // --- wariant B: pokoje ---
     case 'room-new': S.startError = ''; S.view = 'room-new'; render(); break;
     case 'to-start': S.joinRoom = null; S.view = 'start'; render(); break;
+    case 'public-enter': {
+      S.startError = '';
+      const pub = savedPublic();
+      if (pub) await enterWith(new RoomsProvider(pub));
+      else { S.view = 'public-join'; render(); }
+      break;
+    }
+    case 'public-join': await submitRoom('public'); break;
+    case 'seek-accept':
+      unlockMedia();
+      S.waiting = { text: 'Łączę z rywalem…', kind: 'pending' }; render();
+      try { await S.provider.seekAccept(id); } catch (err) { toast(err.message); }
+      if (S.waiting?.kind === 'pending') { S.waiting = null; render(); }
+      break;
     case 'room-create': await submitRoom('new'); break;
     case 'room-join': await submitRoom('join'); break;
     case 'room-resume': {
@@ -1366,8 +1432,10 @@ app.addEventListener('click', async (e) => {
     case 'share-transfer': if (S.transfer) await shareLink(S.transfer.url, CONFIG.APP_NAME); break;
     case 'room-forget':
       confirmModal({
-        title: 'Usunąć pokój z tego urządzenia?',
-        text: 'Twój nick zostanie w pokoju, ale z tego urządzenia nie wrócisz na niego (nawet przez link zaproszenia). Jeśli chcesz grać dalej na innym urządzeniu, najpierw utwórz link przeniesienia.',
+        title: S.provider?.isPublic ? 'Usunąć nick z tego urządzenia?' : 'Usunąć pokój z tego urządzenia?',
+        text: S.provider?.isPublic
+          ? 'Ranking i partie zostaną przy nicku, ale z tego urządzenia już na niego nie wrócisz. Jeśli chcesz grać dalej na innym urządzeniu, najpierw utwórz link przeniesienia.'
+          : 'Twój nick zostanie w pokoju, ale z tego urządzenia nie wrócisz na niego (nawet przez link zaproszenia). Jeśli chcesz grać dalej na innym urządzeniu, najpierw utwórz link przeniesienia.',
         okLabel: 'Usuń z urządzenia', danger: true, onOk: logout,
       });
       break;
@@ -1464,7 +1532,7 @@ document.addEventListener('keydown', (e) => {
   if (S.modal) { if (e.key === 'Escape') { S.modal = null; render(); } return; }
   if (e.key === 'Enter' && (e.target.id === 'room-nick' || e.target.id === 'room-name')) {
     e.preventDefault();
-    submitRoom(S.view === 'room-join' ? 'join' : 'new');
+    submitRoom(S.view === 'room-join' ? 'join' : S.view === 'public-join' ? 'public' : 'new');
     return;
   }
   if (S.view !== 'game' || !S.game) return;

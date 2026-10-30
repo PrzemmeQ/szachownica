@@ -2,15 +2,21 @@
 // Jedno połączenie WebSocket z serwerem pokoju; serwer liczy zegar i sprawdza ruchy.
 import { CONFIG } from './config.js';
 
+// Poczekalnia ogólna to stały pokój o tym kodzie; urządzenie pamięta osobno ją i jeden prywatny pokój.
+export const PUBLIC_CODE = 'publiczny';
 const LS_ROOM = 'ps_room';
+const LS_PUBLIC = 'ps_public';
+const keyFor = (room) => (room === PUBLIC_CODE ? LS_PUBLIC : LS_ROOM);
 
-function lsGet() { try { return JSON.parse(localStorage.getItem(LS_ROOM) || 'null'); } catch { return null; } }
-function lsSet(v) { try { if (v) localStorage.setItem(LS_ROOM, JSON.stringify(v)); else localStorage.removeItem(LS_ROOM); } catch {} }
+function lsGet(key) { try { return JSON.parse(localStorage.getItem(key) || 'null'); } catch { return null; } }
+function lsSet(key, v) { try { if (v) localStorage.setItem(key, JSON.stringify(v)); else localStorage.removeItem(key); } catch {} }
 
 function apiBase() { return String(CONFIG.ROOMS_API || '').replace(/\/+$/, ''); }
 export function roomsEnabled() { return !!apiBase(); }
-export function savedRoom() { const s = lsGet(); return s && s.token && s.api === apiBase() ? s : null; }
-export function forgetRoom() { lsSet(null); }
+function saved(key) { const s = lsGet(key); return s && s.token && s.api === apiBase() ? s : null; }
+export function savedRoom() { return saved(LS_ROOM); }
+export function savedPublic() { return saved(LS_PUBLIC); }
+export function forgetRoom(room) { lsSet(keyFor(room), null); }
 
 async function http(method, path, body) {
   let res;
@@ -31,9 +37,10 @@ async function http(method, path, body) {
 
 function remember(room, d) {
   const s = { api: apiBase(), room, name: d.name, memberId: d.memberId, nick: d.nick, token: d.token };
-  lsSet(s);
+  lsSet(keyFor(room), s);
   return s;
 }
+export async function joinPublic(nick) { return joinRoom(PUBLIC_CODE, nick); }
 
 export async function roomInfo(code) { return http('GET', `/api/rooms/${encodeURIComponent(code)}`); }
 export async function createRoom(name, nick) {
@@ -60,10 +67,13 @@ function finished(state) { return !!state && state.status !== 'started' && state
 
 export class RoomsProvider {
   constructor(saved) {
-    this.name = 'rooms';
+    this.isPublic = saved.room === PUBLIC_CODE;
+    this.name = this.isPublic ? 'public' : 'rooms';
     this.isDemo = false;
-    this.features = { seek: false, ai: false, friend: false, rooms: true, correspondence: false };
+    this.features = { seek: true, ai: false, friend: false, rooms: true, public: this.isPublic, correspondence: false };
     this.s = saved;
+    this.seeks = [];
+    this.activeSeek = null; // { opts, id, resolve } — wznawiane po ponownym połączeniu
     this.ws = null;
     this.seq = 0;
     this.pending = new Map(); // reqId → { resolve, reject, msg, retry, timer }
@@ -81,7 +91,7 @@ export class RoomsProvider {
   get roomName() { return this.welcome?.room?.name || this.s?.name || ''; }
   get roomCode() { return this.s?.room || ''; }
   get me() { return this.welcome?.me || null; }
-  inviteLink() { return appLink({ pokoj: this.roomCode }); }
+  inviteLink() { return this.isPublic ? null : appLink({ pokoj: this.roomCode }); }
 
   hasToken() { return !!this.s?.token; }
   async login() {}
@@ -89,7 +99,7 @@ export class RoomsProvider {
   async logout() {
     try { if (this.welcome) await this.req('logout', {}, { timeout: 3000 }); } catch {}
     this._shutdown();
-    forgetRoom();
+    forgetRoom(this.s.room);
   }
 
   // --- połączenie -------------------------------------------------------------
@@ -160,7 +170,7 @@ export class RoomsProvider {
   }
   _authLost() {
     this._shutdown();
-    forgetRoom();
+    forgetRoom(this.s.room);
     const err = new Error('Nie rozpoznano Cię w tym pokoju — dołącz ponownie z linku.');
     this.readyWaiters.splice(0).forEach((w) => w.reject(err));
     this.onEvent({ type: 'authLost' });
@@ -211,9 +221,11 @@ export class RoomsProvider {
         this.members = m.members || [];
         if (this.s.name !== m.room.name || this.s.nick !== m.me.name) {
           this.s = { ...this.s, name: m.room.name, nick: m.me.name };
-          lsSet(this.s);
+          lsSet(keyFor(this.s.room), this.s);
         }
+        this.seeks = m.seeks || [];
         this.readyWaiters.splice(0).forEach((w) => w.resolve());
+        if (this.activeSeek) this._postSeek(this.activeSeek).catch(() => {});
         if (this.eventsWanted) this._announce();
         for (const [id, g] of this.games) {
           g.listeners.forEach((fn) => fn({ type: 'connection', ok: true }));
@@ -244,6 +256,15 @@ export class RoomsProvider {
         }
         this.onEvent({ type: 'members' });
         break;
+      case 'seeks':
+        this.seeks = m.seeks || [];
+        this.onEvent({ type: 'seeks' });
+        break;
+      case 'seekResult': {
+        const a = this.activeSeek;
+        if (a && a.id === m.id) { this.activeSeek = null; a.resolve(m.result); }
+        break;
+      }
       case 'challengeResult': {
         const fn = this.challengeWaiters.get(m.id);
         if (fn) { this.challengeWaiters.delete(m.id); fn(m.result); }
@@ -296,7 +317,39 @@ export class RoomsProvider {
   }
   stopEvents() { this.eventsWanted = false; this.onEvent = () => {}; }
 
-  async seek() { throw new Error('W pokoju wyzwij wybranego członka.'); }
+  // Szukanie rywala w poczekalni. Serwer paruje sam (to samo tempo, najbliższy ranking).
+  // Gdy ktoś już czeka na to tempo, para powstaje od razu: { matched: true }.
+  async seek({ time, increment, days, rated }) {
+    if (days) throw new Error('Partie korespondencyjne w pokojach będą później.');
+    if (this.activeSeek) { this.activeSeek.resolve('canceled'); this.activeSeek = null; }
+    let resolve;
+    const done = new Promise((r) => { resolve = r; });
+    const a = { opts: { time, increment, rated: !!rated }, id: null, resolve };
+    this.activeSeek = a;
+    const r = await this._postSeek(a);
+    if (r.matched) return { matched: true, cancel: () => {}, done };
+    return {
+      cancel: () => {
+        if (this.activeSeek === a) this.activeSeek = null;
+        a.resolve('canceled');
+        if (a.id) this.req('seekCancel', { id: a.id }).catch(() => {});
+      },
+      done,
+    };
+  }
+  async _postSeek(a) {
+    const r = await this.req('seek', a.opts);
+    if (r.matched) {
+      if (this.activeSeek === a) this.activeSeek = null;
+      a.resolve('accepted');
+    } else if (this.activeSeek === a) {
+      a.id = r.id;
+    } else {
+      this.req('seekCancel', { id: r.id }).catch(() => {}); // anulowano w trakcie wysyłania
+    }
+    return r;
+  }
+  async seekAccept(id) { return (await this.req('seekAccept', { id })).gameId; }
   async challengeAI() { throw new Error('W pokoju nie ma gry z komputerem.'); }
 
   async challenge(memberId, { time, increment, days, rated, color }) {

@@ -5,7 +5,8 @@
 // POST /api/rooms/:kod/join               { nick }        → { memberId, token }
 // POST /api/rooms/:kod/transfer           { code }        → { memberId, nick, token }
 // GET  /api/rooms/:kod/ws                 (WebSocket, pierwsza wiadomość: hello{token})
-import { Room, ROOM_CODE_RE, randomCode } from './room.js';
+// Kod „publiczny” = poczekalnia ogólna (tworzy się sama przy pierwszym wejściu).
+import { Room, ROOM_CODE_RE, PUBLIC_CODE, randomCode } from './room.js';
 
 export { Room };
 
@@ -94,7 +95,7 @@ async function route(req, env, url) {
   }
 
   const code = (parts[2] || '').toLowerCase();
-  if (!ROOM_CODE_RE.test(code)) return json({ error: 'Nieprawidłowy kod pokoju.' }, 404);
+  if (!ROOM_CODE_RE.test(code) && code !== PUBLIC_CODE) return json({ error: 'Nieprawidłowy kod pokoju.' }, 404);
   const action = parts[3] || '';
 
   if (!action && req.method === 'GET') return forward(env, code, 'info', req);
