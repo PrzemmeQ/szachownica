@@ -1,5 +1,5 @@
 // Service worker: zapamiętuje pliki aplikacji, nie dotyka zapytań do Lichess.
-const VERSION = 'ps-v5';
+const VERSION = 'ps-v6';
 const SHELL = [
   './', './index.html', './style.css', './app.js', './config.js', './notation.js', './ndjson.js',
   './lichess.js', './demo.js', './rooms.js', './chess.js', './manifest.webmanifest', './prywatnosc.html',
@@ -7,7 +7,8 @@ const SHELL = [
 ];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(VERSION).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(VERSION).then((c) => c.addAll(SHELL.map((u) => new Request(u, { cache: 'reload' }))))
+    .then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (e) => {
@@ -21,8 +22,9 @@ self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET' || url.origin !== self.location.origin) return;
   // Najpierw sieć (świeża wersja), w razie braku sieci – pamięć podręczna.
+  // cache: 'no-cache' omija 10-minutową pamięć przeglądarki z GitHub Pages (pyta serwer, czy plik się zmienił).
   e.respondWith(
-    fetch(e.request)
+    fetch(e.request.url, { cache: 'no-cache', credentials: 'same-origin' })
       .then((res) => {
         const copy = res.clone();
         if (res.ok) caches.open(VERSION).then((c) => c.put(e.request, copy));

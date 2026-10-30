@@ -1575,6 +1575,18 @@ if ('serviceWorker' in navigator && !CONFIG.DEMO_ONLY) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('./sw.js').catch(() => {});
   });
+  // Nowa wersja aplikacji przejęła stronę: przeładuj, żeby ją pokazać — ale nigdy w trakcie partii
+  // (wtedy przy najbliższym powrocie do listy partii).
+  const hadController = !!navigator.serviceWorker.controller;
+  let updateReady = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController) return; // pierwsza instalacja, nie aktualizacja
+    updateReady = true;
+    if (S.view !== 'game') location.reload();
+  });
+  app.addEventListener('click', (e) => {
+    if (updateReady && e.target.closest('[data-action="back"]')) setTimeout(() => location.reload(), 0);
+  });
 }
 
 boot();

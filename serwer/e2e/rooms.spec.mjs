@@ -279,3 +279,35 @@ test('Menu główne: z Lichess do poczekalni i z powrotem, bez wylogowania', asy
   await expect(page.locator('.who')).toHaveText('Tester');
   await ctx.close();
 });
+
+// Uwaga: page.reload() w Chromium bierze moduły z pamięci karty z pominięciem service workera,
+// dlatego „ponowne otwarcie aplikacji” = nowa karta (tak jak na telefonie).
+test('aktualizacja: po ponownym otwarciu nowa wersja mimo pamięci jak na GitHub Pages; działa bez sieci', async ({ browser }) => {
+  let name = 'Wersja Jeden';
+  const pages = await serveFront(8083, '', { pages: true, appName: () => name });
+  const open = async (ctx) => { const p = await ctx.newPage(); await p.goto('http://127.0.0.1:8083/'); return p; };
+  try {
+    const ctx = await browser.newContext();
+    let page = await open(ctx);
+    await expect(page.locator('h1')).toHaveText('Wersja Jeden');
+    await page.evaluate(() => navigator.serviceWorker.ready);
+    await page.close();
+    page = await open(ctx);
+    await expect.poll(() => page.evaluate(() => !!navigator.serviceWorker.controller)).toBe(true);
+    await page.close();
+
+    // „wdrożenie”: serwer ma nową wersję, przeglądarka ma starą w pamięci (max-age=600)
+    name = 'Wersja Dwa';
+    page = await open(ctx);
+    await expect(page.locator('h1')).toHaveText('Wersja Dwa');
+    await page.close();
+
+    // bez sieci aplikacja otwiera się z pamięci service workera
+    await ctx.setOffline(true);
+    page = await open(ctx);
+    await expect(page.locator('h1')).toHaveText('Wersja Dwa');
+    await ctx.close();
+  } finally {
+    pages.close();
+  }
+});

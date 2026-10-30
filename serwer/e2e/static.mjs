@@ -10,7 +10,9 @@ const TYPES = {
   '.svg': 'image/svg+xml', '.png': 'image/png', '.webmanifest': 'application/manifest+json',
 };
 
-export function serveFront(port, roomsApi) {
+// opts.pages: zachowuje się jak GitHub Pages (service worker włączony, Cache-Control: max-age=600),
+// opts.appName(): podmienia APP_NAME w config.js (do sprawdzania aktualizacji).
+export function serveFront(port, roomsApi, opts = {}) {
   const server = http.createServer(async (req, res) => {
     let p = decodeURIComponent(new URL(req.url, 'http://x').pathname);
     if (p.endsWith('/')) p += 'index.html';
@@ -21,9 +23,15 @@ export function serveFront(port, roomsApi) {
       if (p === '/config.js' && roomsApi != null) {
         body = body.toString('utf8').replace(/ROOMS_API:\s*'[^']*'/, `ROOMS_API: '${roomsApi}'`);
       }
-      // bez service workera w testach (świeże pliki przy każdym uruchomieniu)
-      if (p === '/sw.js') { res.writeHead(404).end(); return; }
-      res.writeHead(200, { 'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-store' });
+      if (p === '/config.js' && opts.appName) {
+        body = body.toString('utf8').replace(/APP_NAME:\s*'[^']*'/, `APP_NAME: '${opts.appName()}'`);
+      }
+      // bez service workera w zwykłych testach (świeże pliki przy każdym uruchomieniu)
+      if (p === '/sw.js' && !opts.pages) { res.writeHead(404).end(); return; }
+      res.writeHead(200, {
+        'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream',
+        'Cache-Control': opts.pages ? 'max-age=600' : 'no-store',
+      });
       res.end(body);
     } catch {
       res.writeHead(404).end();
