@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="112" fill="#1f1d1a"/>
+  <g fill="#f3efe6" opacity="0.13">
+    <rect x="96" y="96" width="80" height="80"/><rect x="256" y="96" width="80" height="80"/>
+    <rect x="176" y="176" width="80" height="80"/><rect x="336" y="176" width="80" height="80"/>
+    <rect x="96" y="256" width="80" height="80"/><rect x="256" y="256" width="80" height="80"/>
+    <rect x="176" y="336" width="80" height="80"/><rect x="336" y="336" width="80" height="80"/>
+  </g>
+  <text x="256" y="300" text-anchor="middle" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-weight="700" font-size="150" fill="#f3efe6">e4</text>
+  <rect x="150" y="345" width="212" height="14" rx="7" fill="#7fb8a4"/>
+</svg>

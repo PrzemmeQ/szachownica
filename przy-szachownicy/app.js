@@ -1,0 +1,1170 @@
+import { CONFIG } from './config.js';
+import { Chess } from './chess.js';
+import { LichessProvider } from './lichess.js';
+import { DemoProvider } from './demo.js';
+import {
+  sanToPl, describeMove, speechForMove, statusPl, SPEED_PL, formatMs, PROMO_PIECES,
+} from './notation.js';
+
+// ---------------------------------------------------------------------------
+// Ustawienia użytkownika
+// ---------------------------------------------------------------------------
+const SETTINGS_KEY = 'ps_settings';
+const DEFAULT_SETTINGS = { speech: true, vibrate: true, sound: true, autoSend: false, emergencyBoard: true };
+function loadSettings() {
+  try { return { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}') }; }
+  catch { return { ...DEFAULT_SETTINGS }; }
+}
+function saveSettings() { try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(S.settings)); } catch {} }
+function lsGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
+function lsSet(k, v) { try { localStorage.setItem(k, v); } catch {} }
+
+// ---------------------------------------------------------------------------
+// Tempa gry
+// ---------------------------------------------------------------------------
+const PRESETS = [
+  { id: 'b3_2', group: 'Blitz', label: '3+2', time: 3, increment: 2, directOnly: true },
+  { id: 'b5_3', group: 'Blitz', label: '5+3', time: 5, increment: 3, directOnly: true },
+  { id: 'r10_0', group: 'Rapid', label: '10+0', time: 10, increment: 0 },
+  { id: 'r10_5', group: 'Rapid', label: '10+5', time: 10, increment: 5 },
+  { id: 'r15_10', group: 'Rapid', label: '15+10', time: 15, increment: 10 },
+  { id: 'c30_0', group: 'Klasyczne', label: '30+0', time: 30, increment: 0 },
+  { id: 'c30_20', group: 'Klasyczne', label: '30+20', time: 30, increment: 20 },
+  { id: 'd1', group: 'Korespondencja', label: '1 dzień', days: 1 },
+  { id: 'd3', group: 'Korespondencja', label: '3 dni', days: 3 },
+  { id: 'd7', group: 'Korespondencja', label: '7 dni', days: 7 },
+];
+const FILES = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+const RANKS = ['1', '2', '3', '4', '5', '6', '7', '8'];
+
+// ---------------------------------------------------------------------------
+// Stan aplikacji
+// ---------------------------------------------------------------------------
+const S = {
+  provider: null,
+  user: null,
+  view: 'loading', // loading | start | lobby | game
+  online: true,
+  ongoing: [],
+  challenges: new Map(),
+  waiting: null, // { text, cancel?, kind }
+  game: null,
+  input: [],
+  promo: null,
+  sending: false,
+  entryMsg: '',
+  modal: null,
+  historyOpen: false,
+  startError: '',
+  settings: loadSettings(),
+  form: {
+    mode: 'seek', preset: 'r10_5', rated: true, friend: '', color: 'random', level: 3,
+    ...(JSON.parse(lsGet('ps_form') || '{}')),
+  },
+  bannerHidden: lsGet('ps_banner_hidden') === '1',
+  voted: lsGet('ps_vote') ? 'done' : null,
+  voteEmail: '',
+  streamOpenedAt: 0,
+};
+
+const app = document.getElementById('app');
+const toastEl = document.getElementById('toast');
+
+// ---------------------------------------------------------------------------
+// Pomocnicze
+// ---------------------------------------------------------------------------
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+let toastTimer = null;
+function toast(text, ms = 3500) {
+  toastEl.textContent = text;
+  toastEl.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.classList.remove('show'), ms);
+}
+function playerLabel(p) {
+  if (!p) return '?';
+  const t = p.title ? `${p.title} ` : '';
+  const r = p.rating ? ` (${p.rating}${p.provisional ? '?' : ''})` : '';
+  return `${t}${p.name}${r}`;
+}
+function presetById(id) { return PRESETS.find((p) => p.id === id) || PRESETS[3]; }
+
+// --- dźwięk, mowa, wibracja, blokada ekranu --------------------------------
+let audioCtx = null;
+let speechUnlocked = false;
+function unlockMedia() {
+  if (!audioCtx) {
+    try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch {}
+  }
+  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+  if (!speechUnlocked && 'speechSynthesis' in window) {
+    try {
+      const u = new SpeechSynthesisUtterance(' ');
+      u.volume = 0;
+      speechSynthesis.speak(u);
+      speechUnlocked = true;
+    } catch {}
+  }
+}
+function beep() {
+  if (!S.settings.sound || !audioCtx) return;
+  try {
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.type = 'sine'; o.frequency.value = 660;
+    g.gain.setValueAtTime(0.0001, audioCtx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.15, audioCtx.currentTime + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.25);
+    o.connect(g).connect(audioCtx.destination);
+    o.start(); o.stop(audioCtx.currentTime + 0.3);
+  } catch {}
+}
+let plVoice = null;
+function pickVoice() {
+  if (!('speechSynthesis' in window)) return;
+  const voices = speechSynthesis.getVoices();
+  plVoice = voices.find((v) => v.lang && v.lang.toLowerCase().startsWith('pl')) || null;
+}
+if ('speechSynthesis' in window) {
+  pickVoice();
+  speechSynthesis.onvoiceschanged = pickVoice;
+}
+function speak(text) {
+  if (!S.settings.speech || !('speechSynthesis' in window) || !text) return;
+  try {
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = 'pl-PL';
+    if (plVoice) u.voice = plVoice;
+    u.rate = 0.95;
+    speechSynthesis.speak(u);
+  } catch {}
+}
+function vibrate(p = 120) { if (S.settings.vibrate && navigator.vibrate) { try { navigator.vibrate(p); } catch {} } }
+
+let wakeLock = null;
+async function requestWakeLock() {
+  try { if ('wakeLock' in navigator && !wakeLock) wakeLock = await navigator.wakeLock.request('screen'); } catch { wakeLock = null; }
+  if (wakeLock) wakeLock.addEventListener?.('release', () => { wakeLock = null; });
+}
+function releaseWakeLock() { try { wakeLock?.release(); } catch {} wakeLock = null; }
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && S.view === 'game' && S.game && !gameOver(S.game)) requestWakeLock();
+});
+
+// ---------------------------------------------------------------------------
+// Start
+// ---------------------------------------------------------------------------
+async function boot() {
+  render();
+  const lichess = new LichessProvider();
+  if (!CONFIG.DEMO_ONLY) {
+    try {
+      await lichess.handleRedirect();
+    } catch (e) {
+      S.startError = e.message;
+    }
+    if (lichess.hasToken()) {
+      await enterWith(lichess);
+      return;
+    }
+  }
+  S.view = 'start';
+  render();
+}
+
+async function enterWith(provider) {
+  S.provider = provider;
+  S.view = 'loading';
+  render();
+  try {
+    S.user = await provider.account();
+    provider.userId = S.user.id;
+  } catch (e) {
+    S.provider = null;
+    S.startError = e.message || 'Nie udało się połączyć z Lichess.';
+    S.view = 'start';
+    render();
+    return;
+  }
+  S.view = 'lobby';
+  S.streamOpenedAt = Date.now();
+  provider.startEvents(onProviderEvent);
+  await refreshOngoing();
+  render();
+}
+
+async function refreshOngoing() {
+  if (!S.provider) return;
+  try { S.ongoing = await S.provider.ongoing(); } catch (e) { console.warn(e); }
+  if (S.view === 'lobby') render();
+}
+
+async function logout() {
+  closeGame();
+  const p = S.provider;
+  S.provider = null; S.user = null; S.ongoing = []; S.challenges.clear();
+  S.view = 'start';
+  render();
+  if (p) await p.logout();
+}
+
+// ---------------------------------------------------------------------------
+// Zdarzenia z serwera (nowe partie, wyzwania)
+// ---------------------------------------------------------------------------
+function onProviderEvent(ev) {
+  const quiet = Date.now() - S.streamOpenedAt < 3000;
+  switch (ev.type) {
+    case 'streamStatus':
+      S.online = ev.ok;
+      if (S.view === 'lobby') render();
+      break;
+    case 'authLost':
+      toast('Sesja Lichess wygasła — zaloguj się ponownie.');
+      logout();
+      break;
+    case 'gameStart': {
+      const g = ev.game;
+      if (!g.boardCompatible) break;
+      S.ongoing = [g, ...S.ongoing.filter((x) => x.id !== g.id)];
+      if (S.waiting && S.waiting.kind !== 'correspondence') {
+        S.waiting = null;
+        openGame(g.id, g.color);
+      } else if (S.view === 'game' && S.game?.id === g.id) {
+        // już otwarta
+      } else if (!quiet) {
+        toast(`Nowa partia: ${g.opponent.name}`);
+        beep();
+        if (S.view === 'lobby') render();
+      } else if (S.view === 'lobby') render();
+      break;
+    }
+    case 'gameFinish':
+      S.ongoing = S.ongoing.filter((x) => x.id !== ev.game.id);
+      if (S.view === 'lobby') render();
+      break;
+    case 'challenge':
+      S.challenges.set(ev.challenge.id, ev.challenge);
+      if (!quiet) { toast(`Wyzwanie od ${ev.challenge.from}`); beep(); vibrate(); }
+      if (S.view === 'lobby') render();
+      break;
+    case 'challengeGone':
+      S.challenges.delete(ev.id);
+      if (S.view === 'lobby') render();
+      break;
+    default: break;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Nowa partia
+// ---------------------------------------------------------------------------
+function waitFor(handle, text) {
+  const w = { text, cancel: handle.cancel, kind: 'realtime' };
+  S.waiting = w;
+  render();
+  handle.done.then((result) => {
+    if (S.waiting !== w) return;
+    if (result === 'declined') { S.waiting = null; toast('Rywal odrzucił wyzwanie.'); render(); return; }
+    if (result === 'canceled') { S.waiting = null; toast('Wyzwanie anulowane.'); render(); return; }
+    // połączenie zamknięte: albo para znaleziona (gameStart zaraz dotrze), albo wygasło
+    setTimeout(() => {
+      if (S.waiting === w) { S.waiting = null; toast('Nikt nie dołączył. Spróbuj jeszcze raz.'); render(); }
+    }, 5000);
+  }).catch((e) => {
+    if (S.waiting !== w) return;
+    S.waiting = null;
+    if (e.name !== 'AbortError') toast(e.message || 'Błąd połączenia.');
+    render();
+  });
+}
+
+async function startNewGame() {
+  unlockMedia();
+  const f = S.form;
+  const p = presetById(f.preset);
+  const opts = { time: p.time, increment: p.increment, days: p.days, rated: f.rated, color: f.color };
+  try {
+    if (f.mode === 'seek') {
+      if (p.directOnly) { toast('Blitz z losowym rywalem nie działa przez API Lichess. Wybierz rapid lub dłużej.'); return; }
+      S.waiting = { text: 'Łączenie…', kind: 'pending' }; render();
+      const h = await S.provider.seek({ ...opts, color: undefined });
+      if (h.correspondence) {
+        S.waiting = null;
+        toast('Ogłoszenie wystawione. Partia pojawi się na liście, gdy ktoś dołączy.', 6000);
+        render();
+        return;
+      }
+      waitFor(h, `Szukam rywala · ${p.group} ${p.label}${f.rated ? ' · rankingowa' : ''}`);
+    } else if (f.mode === 'friend') {
+      const name = f.friend.trim();
+      if (!/^[A-Za-z0-9_-]{2,30}$/.test(name)) { toast('Wpisz poprawny nick z Lichess.'); return; }
+      S.waiting = { text: 'Wysyłanie wyzwania…', kind: 'pending' }; render();
+      const h = await S.provider.challenge(name, opts);
+      if (h.correspondence) {
+        S.waiting = null;
+        toast(`Wyzwanie wysłane do ${name}. Partia pojawi się na liście po przyjęciu.`, 6000);
+        render();
+        return;
+      }
+      waitFor(h, `Czekam, aż ${name} przyjmie wyzwanie`);
+    } else {
+      S.waiting = { text: 'Uruchamiam partię z komputerem…', kind: 'pending' }; render();
+      const { gameId } = await S.provider.challengeAI({ ...opts, level: f.level });
+      S.waiting = null;
+      openGame(gameId, f.color !== 'random' ? f.color : null);
+    }
+  } catch (e) {
+    S.waiting = null;
+    toast(e.message || 'Nie udało się rozpocząć partii.');
+    render();
+  }
+}
+
+async function acceptChallenge(id) {
+  unlockMedia();
+  const c = S.challenges.get(id);
+  S.waiting = { text: `Przyjmuję wyzwanie${c ? ' od ' + c.from : ''}…`, kind: 'accept' };
+  render();
+  try {
+    await S.provider.acceptChallenge(id);
+    S.challenges.delete(id);
+    setTimeout(() => { if (S.waiting?.kind === 'accept') { S.waiting = null; render(); refreshOngoing(); } }, 8000);
+  } catch (e) {
+    S.waiting = null; toast(e.message); render();
+  }
+}
+async function declineChallenge(id) {
+  try { await S.provider.declineChallenge(id); } catch (e) { toast(e.message); }
+  S.challenges.delete(id);
+  render();
+}
+
+// ---------------------------------------------------------------------------
+// Partia
+// ---------------------------------------------------------------------------
+function applyUci(chess, uci) {
+  const from = uci.slice(0, 2);
+  let to = uci.slice(2, 4);
+  const promotion = uci[4];
+  const piece = chess.get(from);
+  const target = chess.get(to);
+  // Lichess może zapisać roszadę jako „król na wieżę” (e1h1) – zamiana na e1g1 / e1c1
+  if (piece && piece.type === 'k' && target && target.type === 'r' && target.color === piece.color) {
+    to = (to[0] > from[0] ? 'g' : 'c') + from[1];
+  }
+  return chess.move({ from, to, promotion });
+}
+
+function gameOver(G) { return !!G.state && G.state.status !== 'started' && G.state.status !== 'created'; }
+function myTurn(G) { return !!G.chess && !gameOver(G) && G.chess.turn() === G.myColor[0]; }
+
+function openGame(id, colorHint) {
+  closeGame();
+  const info = S.ongoing.find((g) => g.id === id);
+  const G = {
+    id,
+    colorHint: colorHint || info?.color || null,
+    myColor: colorHint || info?.color || 'white',
+    full: null, state: null, chess: null, history: [],
+    lastSeenPly: null, conn: true, opponentGone: null, error: '',
+    clockAt: performance.now(), stream: null, announcedEnd: false,
+  };
+  S.game = G;
+  S.view = 'game';
+  S.input = []; S.promo = null; S.sending = false; S.entryMsg = '';
+  render();
+  G.stream = S.provider.streamGame(id, (msg) => onGameMsg(G, msg));
+  requestWakeLock();
+}
+
+function closeGame() {
+  if (S.game?.stream) S.game.stream.close();
+  S.game = null;
+  releaseWakeLock();
+}
+
+function resolveMyColor(G, full) {
+  const uid = (S.user?.id || '').toLowerCase();
+  if (full.white?.id && full.white.id.toLowerCase() === uid) return 'white';
+  if (full.black?.id && full.black.id.toLowerCase() === uid) return 'black';
+  if (full.white?.ai) return 'black';
+  if (full.black?.ai) return 'white';
+  return G.colorHint || 'white';
+}
+
+function rebuild(G) {
+  const fen = G.full && G.full.initialFen && G.full.initialFen !== 'startpos' ? G.full.initialFen : undefined;
+  const chess = new Chess(fen);
+  for (const uci of G.state.moves) {
+    try { applyUci(chess, uci); } catch (e) { console.warn('bad move from server', uci, e); break; }
+  }
+  G.chess = chess;
+  G.history = chess.history({ verbose: true });
+}
+
+function onGameMsg(G, msg) {
+  if (S.game !== G) return;
+  switch (msg.type) {
+    case 'full':
+      G.full = msg;
+      G.myColor = resolveMyColor(G, msg);
+      G.state = msg.state;
+      G.clockAt = performance.now();
+      rebuild(G);
+      G.lastSeenPly = G.history.length;
+      if (gameOver(G)) G.announcedEnd = true;
+      render();
+      break;
+    case 'state': {
+      const prevPly = G.history.length;
+      const wasOver = gameOver(G);
+      G.state = msg.state;
+      G.clockAt = performance.now();
+      rebuild(G);
+      if (G.history.length > prevPly) {
+        const last = G.history[G.history.length - 1];
+        if (last.color !== G.myColor[0]) {
+          speak(speechForMove(last));
+          vibrate([80, 60, 80]);
+          beep();
+        }
+        S.input = []; S.promo = null; S.entryMsg = '';
+        G.opponentGone = null;
+      }
+      if (G.history.length < prevPly) { S.input = []; S.entryMsg = 'Cofnięto ruch.'; }
+      G.lastSeenPly = G.history.length;
+      if (!wasOver && gameOver(G) && !G.announcedEnd) {
+        G.announcedEnd = true;
+        releaseWakeLock();
+        speak(resultText(G).title + '.');
+      }
+      render();
+      break;
+    }
+    case 'opponentGone':
+      G.opponentGone = msg.gone ? msg : null;
+      render();
+      break;
+    case 'connection':
+      G.conn = msg.ok;
+      render();
+      break;
+    case 'error':
+      G.error = msg.message;
+      render();
+      break;
+    case 'end':
+      refreshOngoing();
+      break;
+    default: break;
+  }
+}
+
+function resultText(G) {
+  const st = G.state;
+  if (!st) return { title: '', sub: '' };
+  const sub = statusPl(st.status);
+  if (st.status === 'aborted' || st.status === 'noStart') return { title: 'Partia przerwana', sub: '' };
+  if (st.winner) return { title: st.winner === G.myColor ? 'Wygrana' : 'Przegrana', sub };
+  return { title: 'Remis', sub: sub === 'Remis' ? '' : sub };
+}
+
+// --- wpisywanie ruchu --------------------------------------------------------
+function nextSlotKind() { return S.input.length % 2 === 0 ? 'file' : 'rank'; }
+
+function pressKey(ch) {
+  const G = S.game;
+  if (!G || !myTurn(G) || S.sending || S.promo) return;
+  if (S.input.length >= 4) return;
+  const kind = nextSlotKind();
+  if (kind === 'file' && !FILES.includes(ch)) return;
+  if (kind === 'rank' && !RANKS.includes(ch)) return;
+  S.input.push(ch);
+  S.entryMsg = '';
+  if (S.input.length === 2) {
+    const from = S.input.join('');
+    const own = G.chess.get(from);
+    if (!own || own.color !== G.myColor[0]) S.entryMsg = 'Na tym polu nie ma Twojej bierki.';
+    else if (!G.chess.moves({ square: from, verbose: true }).length) S.entryMsg = 'Ta bierka nie ma teraz ruchu.';
+  }
+  if (S.input.length === 4) {
+    const check = validateInput();
+    if (!check.ok) S.entryMsg = check.msg;
+    else if (check.promotion) S.promo = { from: check.from, to: check.to };
+    else if (S.settings.autoSend) { renderEntry(); sendMove(); return; }
+  }
+  renderEntry();
+}
+function backspace() {
+  if (S.sending) return;
+  if (S.promo) { S.promo = null; }
+  S.input.pop();
+  S.entryMsg = '';
+  renderEntry();
+}
+function clearInput() { if (S.sending) return; S.input = []; S.promo = null; S.entryMsg = ''; renderEntry(); }
+
+function validateInput() {
+  const G = S.game;
+  const from = S.input.slice(0, 2).join('');
+  const to = S.input.slice(2, 4).join('');
+  const cands = G.chess.moves({ square: from, verbose: true }).filter((m) => m.to === to);
+  if (!cands.length) {
+    const own = G.chess.get(from);
+    if (!own || own.color !== G.myColor[0]) return { ok: false, msg: 'Na polu ' + from + ' nie ma Twojej bierki.' };
+    return { ok: false, msg: `Ruch ${from}–${to} jest niedozwolony w tej pozycji.` };
+  }
+  return { ok: true, from, to, promotion: cands.some((m) => m.promotion) };
+}
+
+async function sendMove(promoPiece) {
+  const G = S.game;
+  if (!G || !myTurn(G) || S.sending) return;
+  if (S.input.length !== 4) { S.entryMsg = 'Wpisz pole startowe i docelowe, np. e2 e4.'; renderEntry(); return; }
+  const check = validateInput();
+  if (!check.ok) { S.entryMsg = check.msg; renderEntry(); return; }
+  if (check.promotion && !promoPiece) { S.promo = { from: check.from, to: check.to }; renderEntry(); return; }
+  const uci = check.from + check.to + (promoPiece || '');
+  S.sending = true; S.entryMsg = 'Wysyłanie…'; S.promo = null;
+  renderEntry();
+  try {
+    await S.provider.move(G.id, uci);
+    if (S.game === G) { S.input = []; S.entryMsg = ''; }
+  } catch (e) {
+    if (S.game === G) S.entryMsg = e.message || 'Nie udało się wysłać ruchu.';
+  } finally {
+    S.sending = false;
+    if (S.game === G) render();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Widoki
+// ---------------------------------------------------------------------------
+function render() {
+  const active = document.activeElement;
+  const focusId = active && active.id && app.contains(active) ? active.id : null;
+  const selStart = focusId && 'selectionStart' in active ? active.selectionStart : null;
+
+  let html = '';
+  if (S.view === 'loading') html = viewLoading();
+  else if (S.view === 'start') html = viewStart();
+  else if (S.view === 'lobby') html = viewLobby();
+  else if (S.view === 'game') html = viewGame();
+  html += viewWaiting() + viewModal();
+  app.innerHTML = html;
+
+  if (focusId) {
+    const el = document.getElementById(focusId);
+    if (el) { el.focus(); if (selStart != null && el.setSelectionRange) { try { el.setSelectionRange(selStart, selStart); } catch {} } }
+  }
+  updateClocks();
+}
+
+function viewLoading() {
+  return `<main class="center"><p class="muted">Łączenie…</p></main>`;
+}
+
+function viewStart() {
+  const err = S.startError ? `<p class="error">${esc(S.startError)}</p>` : '';
+  const login = CONFIG.DEMO_ONLY
+    ? `<p class="note">To jest podgląd. Logowanie przez Lichess zadziała, gdy aplikacja będzie wgrana pod własny adres (instrukcja w README).</p>`
+    : `<button class="btn primary big" data-action="login">Zaloguj przez Lichess</button>
+       <button class="link" data-action="token-login">Inny sposób: wklej token Lichess</button>`;
+  return `
+  <main class="start">
+    <div class="brand">
+      <div class="logo" aria-hidden="true">e2·e4</div>
+      <h1>${esc(CONFIG.APP_NAME)}</h1>
+    </div>
+    <p class="lead">Grasz na prawdziwej szachownicy. Tutaj tylko wpisujesz swój ruch i odczytujesz ruch rywala — bez szachownicy na ekranie.</p>
+    <p class="muted small">Partie i ranking są na Twoim koncie Lichess.</p>
+    ${err}
+    <div class="stack">
+      ${login}
+      <button class="btn big" data-action="demo">Wypróbuj bez logowania</button>
+    </div>
+    <p class="muted small">Przez Lichess: losowi rywale w tempie rapid, klasycznym i korespondencyjnym. Blitz tylko ze znajomym lub z komputerem.</p>
+    ${viewBanner()}
+  </main>`;
+}
+
+function ratingsLine() {
+  const r = S.user?.ratings || {};
+  const parts = [];
+  if (r.rapid) parts.push(`Rapid ${r.rapid}`);
+  if (r.classical) parts.push(`Klasyczne ${r.classical}`);
+  if (r.correspondence) parts.push(`Koresp. ${r.correspondence}`);
+  return parts.join(' · ');
+}
+
+function viewLobby() {
+  const demo = S.provider?.isDemo;
+  const ongoing = S.ongoing.length
+    ? S.ongoing.map((g) => `
+      <button class="row" data-action="open-game" data-id="${esc(g.id)}">
+        <span class="row-main">${esc(g.opponent.name)}${g.opponent.rating ? ` <span class="muted">(${g.opponent.rating})</span>` : ''}</span>
+        <span class="row-sub">${esc(SPEED_PL[g.speed] || g.speed || '')} · grasz ${g.color === 'white' ? 'białymi' : 'czarnymi'}</span>
+        <span class="pill ${g.isMyTurn ? 'pill-on' : ''}">${g.isMyTurn ? 'Twój ruch' : 'czekasz'}</span>
+      </button>`).join('')
+    : `<p class="muted small">Brak trwających partii.</p>`;
+
+  const chal = [...S.challenges.values()];
+  const challenges = chal.length ? `
+    <section class="card">
+      <h2>Wyzwania</h2>
+      ${chal.map((c) => `
+        <div class="row static">
+          <span class="row-main">${esc(c.from)}${c.rating ? ` <span class="muted">(${c.rating})</span>` : ''}</span>
+          <span class="row-sub">${esc(SPEED_PL[c.speed] || c.speed)} ${esc(c.label)}${c.rated ? ' · rankingowa' : ''}</span>
+          ${c.compatible
+            ? `<span class="row-actions"><button class="btn small primary" data-action="accept" data-id="${esc(c.id)}">Przyjmij</button><button class="btn small" data-action="decline" data-id="${esc(c.id)}">Odrzuć</button></span>`
+            : `<span class="row-sub warn">Tego tempa lub wariantu nie da się grać przez API.</span><span class="row-actions"><button class="btn small" data-action="decline" data-id="${esc(c.id)}">Odrzuć</button></span>`}
+        </div>`).join('')}
+    </section>` : '';
+
+  return `
+  <main class="lobby">
+    <header class="topbar">
+      <div>
+        <div class="who">${esc(S.user?.name || '')}${demo ? ' <span class="pill">demo</span>' : ''}</div>
+        <div class="muted small">${esc(ratingsLine()) || (demo ? 'Tryb demo — bez rankingu' : '')}</div>
+      </div>
+      <div class="topbar-actions">
+        <span class="dot ${S.online ? 'on' : 'off'}" title="${S.online ? 'Połączono' : 'Łączenie…'}"></span>
+        <button class="icon-btn" data-action="settings" aria-label="Ustawienia">⚙︎</button>
+        <button class="icon-btn" data-action="logout" aria-label="Wyloguj">⏻</button>
+      </div>
+    </header>
+
+    ${challenges}
+
+    <section class="card">
+      <h2>Trwające partie</h2>
+      ${ongoing}
+    </section>
+
+    ${viewNewGame()}
+
+    ${viewBanner()}
+  </main>`;
+}
+
+function viewNewGame() {
+  const f = S.form;
+  const demo = S.provider?.isDemo;
+  const modes = demo
+    ? [['ai', 'Komputer']]
+    : [['seek', 'Losowy'], ['friend', 'Znajomy'], ['ai', 'Komputer']];
+  if (demo && f.mode !== 'ai') f.mode = 'ai';
+  const allowed = PRESETS.filter((p) => !(f.mode === 'seek' && p.directOnly));
+  if (!allowed.find((p) => p.id === f.preset)) f.preset = 'r10_5';
+  const groups = [...new Set(allowed.map((p) => p.group))];
+  const presetsHtml = groups.map((g) => `
+    <div class="preset-group">
+      <div class="muted small">${g}</div>
+      <div class="chips">
+        ${allowed.filter((p) => p.group === g).map((p) => `
+          <button class="chip ${f.preset === p.id ? 'sel' : ''}" data-action="preset" data-id="${p.id}">${p.label}</button>`).join('')}
+      </div>
+    </div>`).join('');
+
+  const friend = f.mode === 'friend' ? `
+    <label class="field">Nick znajomego na Lichess
+      <input id="friend-input" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" value="${esc(f.friend)}" placeholder="np. jan_kowalski">
+    </label>` : '';
+  const level = f.mode === 'ai' && !demo ? `
+    <div class="field">Poziom komputera
+      <div class="chips">${[1, 2, 3, 4, 5, 6, 7, 8].map((l) => `<button class="chip ${f.level === l ? 'sel' : ''}" data-action="level" data-id="${l}">${l}</button>`).join('')}</div>
+    </div>` : '';
+  const color = f.mode !== 'seek' ? `
+    <div class="field">Kolor
+      <div class="chips">${[['random', 'Losowo'], ['white', 'Białe'], ['black', 'Czarne']].map(([k, l]) => `<button class="chip ${f.color === k ? 'sel' : ''}" data-action="color" data-id="${k}">${l}</button>`).join('')}</div>
+    </div>` : '';
+  const rated = f.mode !== 'ai' ? `
+    <label class="toggle"><input type="checkbox" data-action="rated" ${f.rated ? 'checked' : ''}> Partia rankingowa</label>` : '';
+  const label = f.mode === 'seek' ? 'Szukaj rywala' : f.mode === 'friend' ? 'Wyślij wyzwanie' : 'Zagraj z komputerem';
+
+  return `
+  <section class="card">
+    <h2>Nowa partia</h2>
+    <div class="tabs">${modes.map(([k, l]) => `<button class="tab ${f.mode === k ? 'sel' : ''}" data-action="mode" data-id="${k}">${l}</button>`).join('')}</div>
+    ${friend}
+    ${presetsHtml}
+    ${level}
+    ${color}
+    ${rated}
+    <button class="btn primary big" data-action="start-game">${label}</button>
+  </section>`;
+}
+
+// --- głosowanie 👍/👎: „czy grałbyś z rankingiem bez konta Lichess?” ---------
+function parseFeedbackLink(link) {
+  try {
+    const u = new URL(link);
+    if (!/docs\.google\.com$/.test(u.hostname)) return null;
+    const action = u.origin + u.pathname.replace(/\/viewform$/, '/formResponse');
+    const map = {};
+    for (const [k, v] of u.searchParams) {
+      if (!k.startsWith('entry.')) continue;
+      const t = v.trim().toUpperCase();
+      if (t === 'GLOS' || t === 'GŁOS') map.vote = k;
+      else if (t === 'EMAIL') map.email = k;
+      else if (t === 'TRYB') map.mode = k;
+    }
+    return map.vote ? { action, ...map } : null;
+  } catch { return null; }
+}
+
+async function sendFeedback(vote, email) {
+  const f = parseFeedbackLink(CONFIG.FEEDBACK_FORM_LINK);
+  if (!f) { toast('Głosowanie nie jest jeszcze podpięte (config.js).'); return false; }
+  const body = new URLSearchParams();
+  body.set(f.vote, vote);
+  if (f.email && email) body.set(f.email, email);
+  if (f.mode) body.set(f.mode, S.provider ? (S.provider.isDemo ? 'demo' : 'lichess') : 'niezalogowany');
+  try {
+    await fetch(f.action, { method: 'POST', mode: 'no-cors', body });
+    return true;
+  } catch {
+    toast('Nie udało się wysłać — sprawdź internet i spróbuj ponownie.');
+    return false;
+  }
+}
+
+function viewBanner() {
+  if (S.voted === 'done' || S.bannerHidden) return '';
+  const head = `<p><strong>Grałbyś z rankingiem bez konta Lichess?</strong> Na przykład we własnych pokojach z klubem albo znajomymi. Takiej wersji jeszcze nie ma — sprawdzamy, czy jest potrzebna.</p>`;
+  if (S.voted === 'up-pending') {
+    return `
+    <aside class="banner">
+      ${head}
+      <label class="field">Chcesz wiadomość, gdy powstanie? Zostaw e-mail (nieobowiązkowe)
+        <input id="vote-email" type="email" autocomplete="email" inputmode="email" placeholder="adres@e-mail.pl" value="${esc(S.voteEmail || '')}">
+      </label>
+      <p class="muted small">E-mail posłuży tylko do tej jednej wiadomości.</p>
+      <div class="row-actions">
+        <button class="btn small primary" data-action="vote-send">Wyślij</button>
+        <button class="btn small" data-action="vote-skip">Pomiń e-mail</button>
+      </div>
+    </aside>`;
+  }
+  return `
+  <aside class="banner">
+    ${head}
+    <div class="vote">
+      <button class="btn vote-btn" data-action="vote-up" aria-label="Tak">👍 Tak</button>
+      <button class="btn vote-btn" data-action="vote-down" aria-label="Nie">👎 Nie</button>
+    </div>
+    <button class="link small" data-action="hide-banner">Nie pokazuj</button>
+  </aside>`;
+}
+
+function viewGame() {
+  const G = S.game;
+  if (!G.full) {
+    return `<main class="game"><header class="g-top"><button class="btn small" data-action="back">← Partie</button></header>
+      <p class="muted center-text">${G.error ? esc(G.error) : 'Wczytywanie partii…'}</p></main>`;
+  }
+  const opp = G.myColor === 'white' ? G.full.black : G.full.white;
+  const me = G.myColor === 'white' ? G.full.white : G.full.black;
+  const tc = G.full.clock ? `${G.full.clock.initial / 60000}+${G.full.clock.increment / 1000}` : G.full.daysPerTurn ? `${G.full.daysPerTurn} d/ruch` : '';
+  const meta = `${SPEED_PL[G.full.speed] || G.full.speed} ${tc}${G.full.rated ? ' · rankingowa' : ''}`;
+  const over = gameOver(G);
+
+  // ostatni ruch rywala
+  let lastOpp = null;
+  for (let i = G.history.length - 1; i >= 0; i--) { if (G.history[i].color !== G.myColor[0]) { lastOpp = { m: G.history[i], idx: i }; break; } }
+  const lastBlock = lastOpp
+    ? `<div class="lm-label">Ruch rywala · ${Math.floor(lastOpp.idx / 2) + 1}.${lastOpp.m.color === 'b' ? '..' : ''}</div>
+       <div class="lm-san">${esc(sanToPl(lastOpp.m.san))}</div>
+       <div class="lm-desc">${esc(describeMove(lastOpp.m))}</div>
+       <button class="link small" data-action="repeat">Powtórz na głos</button>`
+    : `<div class="lm-label">Ruch rywala</div>
+       <div class="lm-san dim">—</div>
+       <div class="lm-desc">${G.myColor === 'white' ? 'Zaczynasz białymi.' : 'Rywal gra białymi — czekaj na pierwszy ruch.'}</div>`;
+
+  let status;
+  if (over) status = '';
+  else if (myTurn(G)) status = `<div class="status on">Twój ruch</div>`;
+  else status = `<div class="status">Ruch rywala — czekaj</div>`;
+
+  const oppDraw = G.state && !over && (G.myColor === 'white' ? G.state.bdraw : G.state.wdraw);
+  const myDraw = G.state && !over && (G.myColor === 'white' ? G.state.wdraw : G.state.bdraw);
+  const notices = [];
+  if (!G.conn) notices.push(`<div class="notice">Brak połączenia — łączę ponownie…</div>`);
+  if (oppDraw) notices.push(`<div class="notice">Rywal proponuje remis. <span class="row-actions"><button class="btn small primary" data-action="draw-yes">Przyjmij</button><button class="btn small" data-action="draw-no">Odrzuć</button></span></div>`);
+  if (myDraw) notices.push(`<div class="notice muted">Zaproponowałeś remis.</div>`);
+  if (G.opponentGone && !over) {
+    const s = G.opponentGone.claimWinInSeconds;
+    notices.push(s === 0
+      ? `<div class="notice">Rywal opuścił partię. <span class="row-actions"><button class="btn small primary" data-action="claim-win">Odbierz zwycięstwo</button><button class="btn small" data-action="claim-draw">Ogłoś remis</button></span></div>`
+      : `<div class="notice">Rywal opuścił partię${s ? ` — zwycięstwo możesz odebrać za ${s} s` : ''}.</div>`);
+  }
+
+  const myMoves = G.history.filter((m) => m.color === G.myColor[0]).length;
+  const actions = over ? '' : `
+    <div class="g-actions">
+      ${myDraw ? '' : `<button class="btn small" data-action="offer-draw" ${G.history.length < 2 ? 'disabled' : ''}>Zaproponuj remis</button>`}
+      ${myMoves === 0 ? `<button class="btn small" data-action="abort">Przerwij</button>` : `<button class="btn small danger" data-action="resign">Poddaj</button>`}
+    </div>`;
+
+  return `
+  <main class="game">
+    <header class="g-top">
+      <button class="btn small" data-action="back">← Partie</button>
+      <div class="g-meta">${esc(meta)}</div>
+      <button class="icon-btn" data-action="game-menu" aria-label="Menu">⋯</button>
+    </header>
+
+    <div class="player">
+      <span class="pname">${esc(playerLabel(opp))} <span class="muted">· ${G.myColor === 'white' ? 'czarne' : 'białe'}</span></span>
+      <span class="clock" id="clock-opp"></span>
+    </div>
+
+    <section class="lastmove">${lastBlock}</section>
+
+    ${notices.join('')}
+
+    <div class="player me">
+      <span class="pname">Ty <span class="muted">· ${G.myColor === 'white' ? 'białe' : 'czarne'}</span></span>
+      <span class="clock" id="clock-me"></span>
+    </div>
+    ${status}
+
+    <section id="entry">${over ? viewResult(G) : viewEntry()}</section>
+
+    ${actions}
+
+    ${viewHistory(G)}
+  </main>`;
+}
+
+function viewEntry() {
+  const G = S.game;
+  const enabled = myTurn(G) && !S.sending;
+  const slots = [0, 1, 2, 3].map((i) => {
+    const v = S.input[i];
+    const cur = enabled && !S.promo && i === S.input.length;
+    return `<span class="slot ${v ? 'filled' : ''} ${cur ? 'cur' : ''}">${v || ''}</span>${i === 1 ? '<span class="arrow">→</span>' : ''}`;
+  }).join('');
+  const kind = nextSlotKind();
+  const fileKeys = FILES.map((f) => `<button class="key" data-action="key" data-k="${f}" ${enabled && !S.promo && S.input.length < 4 && kind === 'file' ? '' : 'disabled'}>${f}</button>`).join('');
+  const rankKeys = RANKS.map((r) => `<button class="key" data-action="key" data-k="${r}" ${enabled && !S.promo && S.input.length < 4 && kind === 'rank' ? '' : 'disabled'}>${r}</button>`).join('');
+  const promo = S.promo ? `
+    <div class="promo">
+      <div class="small">Promocja piona na:</div>
+      <div class="chips">${PROMO_PIECES.map((p) => `<button class="chip big" data-action="promo" data-id="${p.key}">${p.label} <span class="muted small">${p.name}</span></button>`).join('')}</div>
+    </div>` : '';
+  const msgClass = /niedozwolony|nie ma|Nie udało|odrzucił|nie Twój/i.test(S.entryMsg) ? 'entry-msg err' : 'entry-msg';
+  const hint = G.history.length < 2 && myTurn(G) && !S.entryMsg
+    ? 'Zagraj na szachownicy i wpisz ruch: pole startowe, potem docelowe (np. e2 e4).'
+    : 'Roszada: wpisz ruch króla, np. e1 g1.';
+  return `
+    <div class="slots" aria-live="polite">${slots}</div>
+    <div class="${msgClass}" aria-live="polite">${esc(S.entryMsg) || `<span class="muted small">${hint}</span>`}</div>
+    ${promo}
+    <div class="keys">${fileKeys}</div>
+    <div class="keys">${rankKeys}</div>
+    <div class="entry-actions">
+      <button class="btn" data-action="backspace" ${S.input.length && !S.sending ? '' : 'disabled'}>⌫ Cofnij</button>
+      <button class="btn primary" data-action="send" ${enabled && S.input.length === 4 && !S.promo ? '' : 'disabled'}>Wyślij ruch</button>
+    </div>`;
+}
+
+function renderEntry() {
+  const el = document.getElementById('entry');
+  if (!el || !S.game || gameOver(S.game)) { render(); return; }
+  el.innerHTML = viewEntry();
+}
+
+function viewResult(G) {
+  const r = resultText(G);
+  const url = S.provider.gameUrl?.(G.id);
+  return `
+    <div class="result">
+      <div class="result-title">${esc(r.title)}</div>
+      ${r.sub ? `<div class="muted">${esc(r.sub)}</div>` : ''}
+      <div class="stack">
+        <button class="btn primary" data-action="back">Wróć do listy partii</button>
+        ${url ? `<a class="btn" href="${esc(url)}" target="_blank" rel="noopener">Analiza partii na Lichess</a>` : ''}
+      </div>
+    </div>`;
+}
+
+function viewHistory(G) {
+  if (!G.history.length) return '';
+  const rows = [];
+  for (let i = 0; i < G.history.length; i += 2) {
+    const w = G.history[i];
+    const b = G.history[i + 1];
+    rows.push(`<li><span class="hn">${i / 2 + 1}.</span><span class="hm">${esc(sanToPl(w.san))}</span><span class="hm">${b ? esc(sanToPl(b.san)) : ''}</span></li>`);
+  }
+  return `
+    <details class="history" ${S.historyOpen ? 'open' : ''} data-action="history-toggle">
+      <summary>Zapis partii (${G.history.length} pół­ruchów)</summary>
+      <ol class="hlist">${rows.join('')}</ol>
+    </details>`;
+}
+
+function viewWaiting() {
+  if (!S.waiting) return '';
+  return `
+  <div class="overlay">
+    <div class="dialog">
+      <div class="spinner" aria-hidden="true"></div>
+      <p>${esc(S.waiting.text)}</p>
+      ${S.waiting.cancel ? `<button class="btn" data-action="cancel-wait">Anuluj</button>` : ''}
+    </div>
+  </div>`;
+}
+
+const PIECE_CHAR = { wk: '♔', wq: '♕', wr: '♖', wb: '♗', wn: '♘', wp: '♙', bk: '♚', bq: '♛', br: '♜', bb: '♝', bn: '♞', bp: '♟' };
+
+function viewModal() {
+  const m = S.modal;
+  if (!m) return '';
+  let body = '';
+  if (m.kind === 'confirm') {
+    body = `
+      <h2>${esc(m.title)}</h2>
+      ${m.text ? `<p>${esc(m.text)}</p>` : ''}
+      <div class="row-actions end">
+        <button class="btn" data-action="modal-close">Anuluj</button>
+        <button class="btn ${m.danger ? 'danger' : 'primary'}" data-action="modal-ok">${esc(m.okLabel || 'OK')}</button>
+      </div>`;
+  } else if (m.kind === 'settings') {
+    const t = (key, label, sub) => `
+      <label class="toggle"><input type="checkbox" data-action="setting" data-key="${key}" ${S.settings[key] ? 'checked' : ''}>
+        <span>${label}${sub ? `<br><span class="muted small">${sub}</span>` : ''}</span></label>`;
+    body = `
+      <h2>Ustawienia</h2>
+      ${t('speech', 'Czytaj ruch rywala na głos', 'Po polsku, jeśli urządzenie ma polski głos.')}
+      ${t('sound', 'Krótki dźwięk przy ruchu rywala')}
+      ${t('vibrate', 'Wibracja przy ruchu rywala', 'Działa na Androidzie.')}
+      ${t('autoSend', 'Wysyłaj ruch od razu po wpisaniu', 'Bez przycisku „Wyślij”. Szybciej, ale łatwiej o pomyłkę.')}
+      ${t('emergencyBoard', 'Awaryjny podgląd pozycji w menu partii', 'Na wypadek pomyłki przy przestawianiu bierek.')}
+      <div class="row-actions end"><button class="btn primary" data-action="modal-close">Gotowe</button></div>`;
+  } else if (m.kind === 'game-menu') {
+    body = `
+      <h2>Partia</h2>
+      <div class="stack">
+        ${S.settings.emergencyBoard ? `<button class="btn" data-action="show-board">Awaryjny podgląd pozycji</button>` : ''}
+        <button class="btn" data-action="settings">Ustawienia</button>
+        <button class="btn" data-action="modal-close">Zamknij</button>
+      </div>`;
+  } else if (m.kind === 'board') {
+    body = `<h2>Pozycja w partii</h2><p class="muted small">Sprawdź i popraw ustawienie bierek na swojej szachownicy.</p>${boardHtml()}
+      <div class="row-actions end"><button class="btn primary" data-action="modal-close">Zamknij</button></div>`;
+  } else if (m.kind === 'token') {
+    const url = S.provider?.tokenCreateUrl?.() || new LichessProvider().tokenCreateUrl();
+    body = `
+      <h2>Logowanie tokenem</h2>
+      <p class="small">Przydaje się, gdy zwykłe logowanie nie wraca do aplikacji (np. na iPhonie po dodaniu do ekranu głównego).</p>
+      <ol class="small">
+        <li><a href="${esc(url)}" target="_blank" rel="noopener">Utwórz token na Lichess</a> (uprawnienie „Play games with the board API” jest już zaznaczone).</li>
+        <li>Skopiuj token i wklej go poniżej.</li>
+      </ol>
+      <label class="field">Token
+        <input id="token-input" type="password" autocomplete="off" spellcheck="false" placeholder="lip_…">
+      </label>
+      <div class="row-actions end">
+        <button class="btn" data-action="modal-close">Anuluj</button>
+        <button class="btn primary" data-action="token-save">Zaloguj</button>
+      </div>`;
+  }
+  return `<div class="overlay" data-action="overlay"><div class="dialog wide" role="dialog" aria-modal="true">${body}</div></div>`;
+}
+
+function boardHtml() {
+  const G = S.game;
+  if (!G?.chess) return '';
+  const board = G.chess.board(); // [rank8..rank1][a..h]
+  const flip = G.myColor === 'black';
+  const ranks = flip ? [...Array(8).keys()].reverse() : [...Array(8).keys()];
+  const files = flip ? [...Array(8).keys()].reverse() : [...Array(8).keys()];
+  let html = '<div class="mini-board">';
+  for (const r of ranks) {
+    html += `<div class="mb-label">${8 - r}</div>`;
+    for (const f of files) {
+      const sq = board[r][f];
+      const dark = (r + f) % 2 === 1;
+      html += `<div class="mb-sq ${dark ? 'd' : 'l'}">${sq ? PIECE_CHAR[sq.color + sq.type] : ''}</div>`;
+    }
+  }
+  html += '<div></div>' + files.map((f) => `<div class="mb-label">${FILES[f]}</div>`).join('') + '</div>';
+  return html;
+}
+
+// --- zegary ---------------------------------------------------------------
+function liveTimes(G) {
+  if (!G?.state || !G.full) return null;
+  let { wtime, btime } = G.state;
+  if (wtime == null || btime == null) return null;
+  if (!gameOver(G) && G.history.length >= 2) {
+    const el = performance.now() - G.clockAt;
+    if (G.chess.turn() === 'w') wtime -= el; else btime -= el;
+  }
+  return { wtime, btime };
+}
+function updateClocks() {
+  const G = S.game;
+  if (S.view !== 'game' || !G?.full) return;
+  const t = liveTimes(G);
+  const me = document.getElementById('clock-me');
+  const opp = document.getElementById('clock-opp');
+  if (!t || !me || !opp) return;
+  const mine = G.myColor === 'white' ? t.wtime : t.btime;
+  const theirs = G.myColor === 'white' ? t.btime : t.wtime;
+  me.textContent = formatMs(mine);
+  opp.textContent = formatMs(theirs);
+  const turn = G.chess.turn();
+  const running = !gameOver(G);
+  me.classList.toggle('running', running && turn === G.myColor[0]);
+  opp.classList.toggle('running', running && turn !== G.myColor[0]);
+  me.classList.toggle('low', G.full.clock && mine < 30000);
+}
+setInterval(updateClocks, 200);
+
+// ---------------------------------------------------------------------------
+// Obsługa kliknięć i klawiatury
+// ---------------------------------------------------------------------------
+function saveForm() { lsSet('ps_form', JSON.stringify({ ...S.form, friend: S.form.friend })); }
+
+function confirmModal(opts) { S.modal = { kind: 'confirm', ...opts }; render(); }
+
+app.addEventListener('click', async (e) => {
+  unlockMedia();
+  const el = e.target.closest('[data-action]');
+  if (!el) return;
+  const a = el.dataset.action;
+  const id = el.dataset.id;
+  if (a === 'overlay') { if (e.target === el) { S.modal = null; render(); } return; }
+  if (a === 'history-toggle' || a === 'rated' || a === 'setting') return; // obsługiwane przez 'change'/'toggle'
+  switch (a) {
+    case 'login':
+      try { await new LichessProvider().login(); } catch (err) { S.startError = 'Nie udało się rozpocząć logowania: ' + err.message; render(); }
+      break;
+    case 'token-login': S.modal = { kind: 'token' }; render(); break;
+    case 'token-save': {
+      const v = (document.getElementById('token-input')?.value || '').trim();
+      if (!/^[A-Za-z0-9_]{10,}$/.test(v)) { toast('To nie wygląda na token Lichess.'); break; }
+      const p = new LichessProvider();
+      p.setToken(v);
+      S.modal = null;
+      await enterWith(p);
+      break;
+    }
+    case 'demo': S.startError = ''; await enterWith(new DemoProvider()); break;
+    case 'logout':
+      confirmModal({ title: 'Wylogować?', text: S.provider?.isDemo ? 'Zakończysz tryb demo.' : 'Aplikacja straci dostęp do Twojego konta Lichess na tym urządzeniu.', okLabel: 'Wyloguj', onOk: logout });
+      break;
+    case 'settings': S.modal = { kind: 'settings' }; render(); break;
+    case 'modal-close': S.modal = null; render(); break;
+    case 'modal-ok': { const fn = S.modal?.onOk; S.modal = null; render(); if (fn) await fn(); break; }
+    case 'mode': S.form.mode = id; saveForm(); render(); break;
+    case 'preset': S.form.preset = id; saveForm(); render(); break;
+    case 'level': S.form.level = Number(id); saveForm(); render(); break;
+    case 'color': S.form.color = id; saveForm(); render(); break;
+    case 'start-game': await startNewGame(); break;
+    case 'cancel-wait': {
+      const w = S.waiting; S.waiting = null; render();
+      try { w?.cancel?.(); } catch {}
+      break;
+    }
+    case 'accept': await acceptChallenge(id); break;
+    case 'decline': await declineChallenge(id); break;
+    case 'open-game': openGame(id); break;
+    case 'back': closeGame(); S.view = 'lobby'; render(); refreshOngoing(); break;
+    case 'key': pressKey(el.dataset.k); break;
+    case 'backspace': backspace(); break;
+    case 'send': await sendMove(); break;
+    case 'promo': await sendMove(id); break;
+    case 'repeat': {
+      const G = S.game;
+      const last = [...(G?.history || [])].reverse().find((m) => m.color !== G.myColor[0]);
+      if (last) { const was = S.settings.speech; S.settings.speech = true; speak(speechForMove(last)); S.settings.speech = was; }
+      break;
+    }
+    case 'offer-draw':
+      try { await S.provider.draw(S.game.id, true); toast('Zaproponowano remis.'); } catch (err) { toast(err.message); }
+      break;
+    case 'draw-yes': try { await S.provider.draw(S.game.id, true); } catch (err) { toast(err.message); } break;
+    case 'draw-no': try { await S.provider.draw(S.game.id, false); } catch (err) { toast(err.message); } break;
+    case 'resign':
+      confirmModal({ title: 'Poddać partię?', okLabel: 'Poddaj', danger: true, onOk: async () => { try { await S.provider.resign(S.game.id); } catch (err) { toast(err.message); } } });
+      break;
+    case 'abort':
+      confirmModal({ title: 'Przerwać partię?', text: 'Przed pierwszym ruchem partia nie liczy się do rankingu.', okLabel: 'Przerwij', onOk: async () => { try { await S.provider.abort(S.game.id); } catch (err) { toast(err.message); } } });
+      break;
+    case 'claim-win': try { await S.provider.claimVictory(S.game.id); } catch (err) { toast(err.message); } break;
+    case 'claim-draw': try { await S.provider.claimDraw(S.game.id); } catch (err) { toast(err.message); } break;
+    case 'game-menu': S.modal = { kind: 'game-menu' }; render(); break;
+    case 'show-board':
+      confirmModal({
+        title: 'Pokazać pozycję?',
+        text: 'To podgląd awaryjny — na wypadek, gdy bierki na Twojej szachownicy nie zgadzają się z partią.',
+        okLabel: 'Pokaż',
+        onOk: () => { S.modal = { kind: 'board' }; render(); },
+      });
+      break;
+    case 'vote-up': S.voted = 'up-pending'; render(); break;
+    case 'vote-down':
+    case 'vote-skip':
+    case 'vote-send': {
+      const vote = a === 'vote-down' ? 'nie' : 'tak';
+      const email = a === 'vote-send' ? (S.voteEmail || '').trim() : '';
+      if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { toast('Sprawdź adres e-mail.'); break; }
+      el.disabled = true;
+      if (await sendFeedback(vote, email)) {
+        S.voted = 'done'; lsSet('ps_vote', vote); toast('Dzięki! Głos zapisany.'); render();
+      } else { el.disabled = false; }
+      break;
+    }
+    case 'hide-banner': S.bannerHidden = true; lsSet('ps_banner_hidden', '1'); render(); break;
+    default: break;
+  }
+});
+
+app.addEventListener('change', (e) => {
+  const el = e.target;
+  if (el.dataset.action === 'rated') { S.form.rated = el.checked; saveForm(); }
+  if (el.dataset.action === 'setting') { S.settings[el.dataset.key] = el.checked; saveSettings(); }
+});
+app.addEventListener('input', (e) => {
+  if (e.target.id === 'friend-input') { S.form.friend = e.target.value; saveForm(); }
+  if (e.target.id === 'vote-email') S.voteEmail = e.target.value;
+});
+app.addEventListener('toggle', (e) => {
+  if (e.target.classList?.contains('history')) S.historyOpen = e.target.open;
+}, true);
+
+document.addEventListener('keydown', (e) => {
+  if (S.modal) { if (e.key === 'Escape') { S.modal = null; render(); } return; }
+  if (S.view !== 'game' || !S.game) return;
+  if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  const k = e.key.toLowerCase();
+  if (S.promo) {
+    const map = { h: 'q', q: 'q', w: 'r', r: 'r', g: 'b', s: 'n', n: 'n' };
+    if (map[k]) { e.preventDefault(); sendMove(map[k]); return; }
+  }
+  if (FILES.includes(k) || RANKS.includes(k)) { e.preventDefault(); pressKey(k); }
+  else if (k === 'backspace') { e.preventDefault(); backspace(); }
+  else if (k === 'escape') { e.preventDefault(); clearInput(); }
+  else if (k === 'enter') { e.preventDefault(); sendMove(); }
+});
+
+// ---------------------------------------------------------------------------
+// PWA
+// ---------------------------------------------------------------------------
+if ('serviceWorker' in navigator && !CONFIG.DEMO_ONLY) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js').catch(() => {});
+  });
+}
+
+boot();
