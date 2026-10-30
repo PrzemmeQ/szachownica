@@ -16,28 +16,29 @@
   <h2>Gra przez Lichess</h2>
   <p>Gdy logujesz się przez Lichess, aplikacja łączy się bezpośrednio z lichess.org. Nie mamy własnego serwera w tym trybie i nie widzimy Twoich danych. Dostęp do konta (token) zostaje tylko na Twoim urządzeniu.</p>
 
-  <h2>Pokoje (gra bez konta Lichess)</h2>
-  <p>W pokojach partie przechodzą przez nasz serwer. Przechowujemy tylko to, co jest potrzebne do gry:</p>
+  <h2>Kluby i poczekalnia (gra bez konta Lichess)</h2>
+  <p>W klubach i w poczekalni ogólnej partie przechodzą przez nasz serwer. Przechowujemy tylko to, co jest potrzebne do gry:</p>
   <ul>
-    <li>nazwę pokoju i nick, który sam podajesz,</li>
-    <li>przynależność do pokoju i zabezpieczony skrót klucza urządzenia (sam klucz jest tylko na Twoim urządzeniu),</li>
-    <li>partie rozegrane w pokoju (ruchy, czasy, wynik) i ranking,</li>
-    <li>czas ostatniej obecności w pokoju (żeby pokazać, kto jest online).</li>
+    <li>nazwę i kod klubu oraz nick, który sam podajesz; jeśli założyciel ustawi hasło klubu — jego zabezpieczony skrót,</li>
+    <li>przynależność do klubu, rolę (założyciel, admin, członek) i zabezpieczony skrót klucza urządzenia (sam klucz jest tylko na Twoim urządzeniu),</li>
+    <li>partie (ruchy, czasy, wynik) i ranking — jeden wspólny dla poczekalni i wszystkich klubów,</li>
+    <li>czas ostatniej obecności (żeby pokazać, kto jest online).</li>
   </ul>
-  <p><strong>Konto:</strong> jeśli zakładasz konto, przechowujemy nick i zabezpieczony skrót hasła (PBKDF2 — samego hasła nie znamy). E-mail zapisujemy tylko wtedy, gdy sam go podasz, i używamy go wyłącznie do wysłania linku do zmiany hasła (przez usługę Resend). Konto pamięta też, do jakich pokoi należysz.</p>
-  <p><strong>Ochrona przed nadużyciami:</strong> przy zakładaniu konta lub pokoju i przy logowaniu serwer zapisuje na najwyżej godzinę skrót adresu internetowego (z solą zmienianą codziennie). Ze skrótu nie da się odczytać adresu; służy tylko do limitów (np. 10 nowych kont na godzinę z jednej sieci) i blokady zgadywania haseł. Samych adresów IP ani lokalizacji nie zapisujemy.</p>
-  <p><strong>Statystyki:</strong> liczymy, ile partii i pokoi powstaje każdego dnia oraz w ilu dniach grał dany gracz (zapisany jako identyfikator w pokoju, bez nicku). Służy to tylko ocenie, czy aplikacja jest komuś potrzebna. Statystyki widzi wyłącznie autor aplikacji.</p>
-  <p>Nie zbieramy lokalizacji. Nie ma reklam ani śledzenia. Serwer działa na Cloudflare, a dane pokoi są przechowywane w Unii Europejskiej.</p>
-  <p>Każdy członek pokoju widzi nicki, ranking i historię partii innych członków tego pokoju.</p>
+  <p><strong>Konto:</strong> jeśli zakładasz konto, przechowujemy nick i zabezpieczony skrót hasła (PBKDF2 — samego hasła nie znamy). E-mail zapisujemy tylko wtedy, gdy sam go podasz, i używamy go wyłącznie do wysłania linku do zmiany hasła (przez usługę Resend). Konto pamięta też, do jakich klubów należysz.</p>
+  <p><strong>Znajomi:</strong> konto przechowuje listę Twoich znajomych, wysłane i otrzymane zaproszenia, listę osób, które zablokowałeś, oraz ostatnich rywali (z partii). Zablokowana osoba nie dowiaduje się o blokadzie. To, że jesteś online, widzą tylko Twoi znajomi i ostatni rywale.</p>
+  <p><strong>Ochrona przed nadużyciami:</strong> przy zakładaniu konta lub klubu i przy logowaniu serwer zapisuje na najwyżej godzinę skrót adresu internetowego (z solą zmienianą codziennie). Ze skrótu nie da się odczytać adresu; służy tylko do limitów (np. 10 nowych kont na godzinę z jednej sieci) i blokady zgadywania haseł. Za błędne kody lub hasła klubów zapisujemy licznik prób i czas blokady przy koncie (bez konta — przy losowym identyfikatorze urządzenia). Samych adresów IP ani lokalizacji nie zapisujemy.</p>
+  <p><strong>Statystyki:</strong> liczymy, ile partii i klubów powstaje każdego dnia oraz w ilu dniach grał dany gracz (zapisany jako identyfikator, bez nicku). Służy to tylko ocenie, czy aplikacja jest komuś potrzebna. Statystyki widzi wyłącznie autor aplikacji.</p>
+  <p>Nie zbieramy lokalizacji. Nie ma reklam ani śledzenia. Serwer działa na Cloudflare, a dane są przechowywane w Unii Europejskiej.</p>
+  <p>Każdy członek klubu widzi nicki, ranking i historię partii innych członków tego klubu. Założyciel i admini widzą też statystyki członków i mogą oglądać partie na żywo.</p>
 
   <h2>Poczekalnia ogólna</h2>
-  <p>Poczekalnia ogólna działa jak pokój otwarty dla wszystkich. Twój nick, ranking i to, że jesteś online, widzą wszyscy w poczekalni. Twoją historię partii widzisz tylko Ty (i Twoi rywale w partiach z Tobą). Przechowujemy te same dane co w pokojach.</p>
+  <p>W poczekalni ogólnej grasz z kontem. Twój nick i ranking widać w rankingu (czołówka) i u rywali. Listy wszystkich graczy online nie ma. Twoją historię partii widzisz tylko Ty (i Twoi rywale w partiach z Tobą).</p>
 
   <h2>Twoje urządzenie</h2>
-  <p>Aplikacja zapisuje w pamięci przeglądarki (localStorage) ustawienia i klucz do pokoju. Usuniesz je w menu pokoju („Usuń pokój z tego urządzenia”) albo czyszcząc dane strony.</p>
+  <p>Aplikacja zapisuje w pamięci przeglądarki (localStorage) ustawienia, dane logowania do konta, klucze do Twoich klubów i losowy identyfikator urządzenia. Usuniesz je w menu klubu lub konta („Usuń z tego urządzenia”, „Wyloguj”) albo czyszcząc dane strony.</p>
 
   <h2>Usunięcie danych</h2>
-  <p>Chcesz usunąć swój nick i partie z pokoju? Napisz przez stronę projektu na GitHubie (github.com/przemmeq/szachownica).</p>
+  <p>Chcesz usunąć swoje konto, nick lub partie? Napisz przez stronę projektu na GitHubie (github.com/przemmeq/szachownica).</p>
 </main>
 </body>
 </html>

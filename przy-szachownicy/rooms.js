@@ -1,33 +1,73 @@
-// Dostawca partii: własne zamknięte pokoje (wariant B) — bez konta Lichess.
+// Dostawca partii: kluby (prywatne pokoje) i poczekalnia ogólna — bez konta Lichess.
 // Jedno połączenie WebSocket z serwerem pokoju; serwer liczy zegar i sprawdza ruchy.
 import { CONFIG } from './config.js';
 
-// Poczekalnia ogólna to stały pokój o tym kodzie; urządzenie pamięta osobno ją i jeden prywatny pokój.
+// Poczekalnia ogólna to stały pokój o tym identyfikatorze. Urządzenie pamięta konto i listę klubów („Moje kluby”).
 export const PUBLIC_CODE = 'publiczny';
-const LS_ROOM = 'ps_room';
-const LS_PUBLIC = 'ps_public';
-const keyFor = (room) => (room === PUBLIC_CODE ? LS_PUBLIC : LS_ROOM);
+const LS_ACCOUNT = 'ps_account';
+const LS_CLUBS = 'ps_clubs';
+const LS_DEVICE = 'ps_device';
+const MAX_CLUBS = 20;
 
 function lsGet(key) { try { return JSON.parse(localStorage.getItem(key) || 'null'); } catch { return null; } }
 function lsSet(key, v) { try { if (v) localStorage.setItem(key, JSON.stringify(v)); else localStorage.removeItem(key); } catch {} }
+try { localStorage.removeItem('ps_room'); localStorage.removeItem('ps_public'); } catch {} // dane sprzed wspólnego rankingu
 
 function apiBase() { return String(CONFIG.ROOMS_API || '').replace(/\/+$/, ''); }
 export function roomsEnabled() { return !!apiBase(); }
-function saved(key) { const s = lsGet(key); return s && s.token && s.api === apiBase() ? s : null; }
-export function savedRoom() { return saved(LS_ROOM); }
-export function savedPublic() { return saved(LS_PUBLIC); }
-export function forgetRoom(room) { lsSet(keyFor(room), null); }
+// Losowy identyfikator urządzenia — tylko do blokady za błędne kody klubów (gdy nie ma konta).
+export function deviceId() {
+  let d = null;
+  try { d = localStorage.getItem(LS_DEVICE); } catch {}
+  if (!d) {
+    d = 'd' + [...crypto.getRandomValues(new Uint8Array(12))].map((x) => x.toString(16).padStart(2, '0')).join('');
+    try { localStorage.setItem(LS_DEVICE, d); } catch {}
+  }
+  return d;
+}
+
+// --- konto (poczekalnia ogólna) ---
+export function savedAccount() { const s = lsGet(LS_ACCOUNT); return s && s.token && s.api === apiBase() ? s : null; }
+export function forgetAccount() { lsSet(LS_ACCOUNT, null); }
+function rememberAccount(d, extra = {}) {
+  const s = { api: apiBase(), room: PUBLIC_CODE, name: d.name, memberId: d.memberId, nick: d.nick, token: d.token, secured: true, rooms: d.rooms || [], ...extra };
+  lsSet(LS_ACCOUNT, s);
+  return s;
+}
+export function updateAccount(patch) {
+  const s = savedAccount();
+  if (s) lsSet(LS_ACCOUNT, { ...s, ...patch });
+}
+function accountToken() { return savedAccount()?.token || undefined; }
+
+// --- kluby na tym urządzeniu ---
+export function savedClubs() { return (lsGet(LS_CLUBS) || []).filter((c) => c && c.token && c.api === apiBase()); }
+export function savedClub(room) { return savedClubs().find((c) => c.room === room) || null; }
+export function forgetClub(room) { lsSet(LS_CLUBS, savedClubs().filter((c) => c.room !== room)); }
+function rememberClub(room, d) {
+  const c = { api: apiBase(), room, code: d.code, name: d.name, memberId: d.memberId, nick: d.nick, token: d.token, at: Date.now() };
+  const list = [c, ...savedClubs().filter((x) => x.room !== room)].slice(0, MAX_CLUBS);
+  lsSet(LS_CLUBS, list);
+  return c;
+}
+export function touchClub(room, patch) {
+  lsSet(LS_CLUBS, savedClubs().map((c) => (c.room === room ? { ...c, ...patch } : c)));
+}
+// Kluby do pokazania: zapisane na urządzeniu + przypięte do konta (te otworzą się po zalogowaniu).
+export function myClubs() {
+  const list = savedClubs().map((c) => ({ room: c.room, name: c.name, nick: c.nick, here: true }));
+  for (const r of savedAccount()?.rooms || []) if (!list.some((c) => c.room === r.room)) list.push({ room: r.room, name: r.name, here: false });
+  return list;
+}
 
 async function http(method, path, body) {
   let res;
   try {
     res = await fetch(apiBase() + path, {
-      method,
-      headers: body ? { 'Content-Type': 'application/json' } : {},
-      body: body ? JSON.stringify(body) : undefined,
+      method, headers: body ? { 'Content-Type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined,
     });
   } catch {
-    throw new Error('Brak połączenia z serwerem pokoi.');
+    throw new Error('Brak połączenia z serwerem.');
   }
   let data = null;
   try { data = await res.json(); } catch {}
@@ -35,49 +75,44 @@ async function http(method, path, body) {
   return data;
 }
 
-function remember(room, d) {
-  const s = { api: apiBase(), room, name: d.name, memberId: d.memberId, nick: d.nick, token: d.token };
-  if (d.secured) s.secured = true;
-  lsSet(keyFor(room), s);
-  return s;
-}
-export async function joinPublic(nick) { return joinRoom(PUBLIC_CODE, nick); }
-
-// --- konto (nick + hasło). Konto = tożsamość w poczekalni ogólnej; pokoje są do niego przypinane. ---
-function accountToken() { return savedPublic()?.token || undefined; }
 export async function registerAccount(nick, password, email) {
   const d = await http('POST', '/api/account/register', { nick, password, email: email || undefined });
-  return { saved: remember(PUBLIC_CODE, { ...d, secured: true }), rooms: [] };
+  return { saved: rememberAccount(d), rooms: [] };
 }
 export async function loginAccount(nick, password) {
   const d = await http('POST', '/api/account/login', { nick, password });
-  return { saved: remember(PUBLIC_CODE, { ...d, secured: true }), rooms: d.rooms || [] };
+  return { saved: rememberAccount(d), rooms: d.rooms || [] };
 }
 export async function requestPasswordReset(login) { return http('POST', '/api/account/reset-request', { login }); }
 export async function resetPassword(token, password) {
   const d = await http('POST', '/api/account/reset', { token, password });
-  return { saved: remember(PUBLIC_CODE, { ...d, secured: true }), rooms: d.rooms || [] };
+  return { saved: rememberAccount(d), rooms: d.rooms || [] };
 }
-// Pokój przypięty do konta, otwierany na nowym urządzeniu.
-export async function restoreRoom(code) {
-  const d = await http('POST', `/api/rooms/${encodeURIComponent(code)}/account-login`, { accountToken: accountToken() });
-  return remember(code, d);
+// Klub przypięty do konta, otwierany na nowym urządzeniu.
+export async function restoreRoom(room) {
+  const d = await http('POST', `/api/rooms/${encodeURIComponent(room)}/account-login`, { accountToken: accountToken() });
+  return rememberClub(room, d);
 }
-
-export async function roomInfo(code) { return http('GET', `/api/rooms/${encodeURIComponent(code)}`); }
 export async function createRoom(name, nick) {
   const d = await http('POST', '/api/rooms', { name, nick, accountToken: accountToken() });
-  return remember(d.room, d);
+  return rememberClub(d.room, d);
 }
-export async function joinRoom(code, nick) {
-  const body = { nick };
-  if (code !== PUBLIC_CODE) body.accountToken = accountToken();
-  const d = await http('POST', `/api/rooms/${encodeURIComponent(code)}/join`, body);
-  return remember(code, d);
+// Kod klubu: nazwa i czy potrzebne hasło (błędne kody liczą się do blokady).
+export async function lookupClub(code) {
+  return http('POST', '/api/rooms/lookup', { code, accountToken: accountToken(), deviceId: deviceId() });
 }
-export async function claimTransfer(code, transferCode) {
-  const d = await http('POST', `/api/rooms/${encodeURIComponent(code)}/transfer`, { code: transferCode });
-  return remember(code, d);
+export async function joinClub(code, nick, password) {
+  const d = await http('POST', '/api/rooms/join', { code, nick: nick || undefined, password: password || undefined, accountToken: accountToken(), deviceId: deviceId() });
+  return rememberClub(d.room, d);
+}
+// Przeniesienie na inne urządzenie: link (#przenies=pokój.kod) albo 6 cyfr.
+export async function claimTransfer(room, code) {
+  const d = await http('POST', `/api/rooms/${encodeURIComponent(room)}/transfer`, { code });
+  return room === PUBLIC_CODE ? rememberAccount(d, { secured: false }) : rememberClub(room, d);
+}
+export async function claimTransferCode(code6) {
+  const d = await http('POST', '/api/rooms/transfer-code', { code: code6 });
+  return d.room === PUBLIC_CODE ? rememberAccount(d, { secured: false }) : rememberClub(d.room, d);
 }
 
 // Link do strony aplikacji z parametrami (bez innych parametrów z bieżącego adresu).
@@ -108,14 +143,23 @@ export class RoomsProvider {
     this.wanted = false;
     this.welcome = null;
     this.members = [];
+    this.social = null; // poczekalnia: znajomi, zaproszenia, ostatni rywale
     this.attempt = 0;
     this.readyWaiters = [];
   }
 
   get roomName() { return this.welcome?.room?.name || this.s?.name || ''; }
-  get roomCode() { return this.s?.room || ''; }
+  get roomId() { return this.s?.room || ''; }
+  get roomCode() { return this.welcome?.room?.code || this.s?.code || ''; } // kod klubu, np. KLUBH-7Q4MX
+  get room() { return this.welcome?.room || null; }
   get me() { return this.welcome?.me || null; }
-  inviteLink() { return this.isPublic ? null : appLink({ pokoj: this.roomCode }); }
+  get lastKey() { return this.isPublic ? 'public' : 'club:' + this.roomId; }
+  inviteLink() { return this.isPublic || !this.roomCode ? null : appLink({ klub: this.roomCode }); }
+  _save() {
+    if (this.isPublic) updateAccount({ name: this.s.name, nick: this.s.nick, secured: this.s.secured, rooms: this.s.rooms });
+    else touchClub(this.roomId, { name: this.s.name, nick: this.s.nick, code: this.s.code });
+  }
+  _forget() { if (this.isPublic) forgetAccount(); else forgetClub(this.roomId); }
 
   hasToken() { return !!this.s?.token; }
   async login() {}
@@ -123,7 +167,7 @@ export class RoomsProvider {
   async logout() {
     try { if (this.welcome) await this.req('logout', {}, { timeout: 3000 }); } catch {}
     this._shutdown();
-    forgetRoom(this.s.room);
+    this._forget();
   }
 
   // --- połączenie -------------------------------------------------------------
@@ -150,7 +194,8 @@ export class RoomsProvider {
     ws.onopen = () => {
       ws.send(JSON.stringify({ t: 'hello', token: this.s.token }));
       clearInterval(this.pingTimer);
-      this.pingTimer = setInterval(() => { try { ws.send('ping'); } catch {} }, 15000);
+      // ping co 5 s: serwer szybko zauważa zerwane połączenie (rywal widzi „opuścił partię”)
+      this.pingTimer = setInterval(() => { try { ws.send('ping'); } catch {} }, 5000);
     };
     ws.onmessage = (e) => {
       if (e.data === 'pong') return;
@@ -194,7 +239,7 @@ export class RoomsProvider {
   }
   _authLost() {
     this._shutdown();
-    forgetRoom(this.s.room);
+    this._forget();
     const err = new Error('Nie rozpoznano Cię w tym pokoju — dołącz ponownie z linku.');
     this.readyWaiters.splice(0).forEach((w) => w.reject(err));
     this.onEvent({ type: 'authLost' });
@@ -243,11 +288,10 @@ export class RoomsProvider {
         this.welcome = m;
         this.attempt = 0;
         this.members = m.members || [];
-        const secured = this.isPublic ? !!m.me.hasPassword : this.s.secured;
-        if (this.s.name !== m.room.name || this.s.nick !== m.me.name || !!this.s.secured !== !!secured) {
-          this.s = { ...this.s, name: m.room.name, nick: m.me.name, secured: !!secured };
-          lsSet(keyFor(this.s.room), this.s);
-        }
+        this.social = m.social || null;
+        this.s = { ...this.s, name: m.room.name, nick: m.me.name, code: m.room.code };
+        if (this.isPublic) this.s = { ...this.s, secured: !!m.me.hasPassword, rooms: m.me.rooms || [] };
+        this._save();
         this.seeks = m.seeks || [];
         this.readyWaiters.splice(0).forEach((w) => w.resolve());
         if (this.activeSeek) this._postSeek(this.activeSeek).catch(() => {});
@@ -261,6 +305,29 @@ export class RoomsProvider {
       }
       case 'authFailed':
         this.authFailed = true;
+        this.authRemoved = !!m.removed;
+        break;
+      case 'removed': // usunięty z klubu przez założyciela/administratora
+        this.authFailed = true;
+        this.authRemoved = true;
+        break;
+      case 'roomInfo':
+        if (this.welcome) { this.welcome.room = m.room; this.welcome.me.role = m.room.role; }
+        this.onEvent({ type: 'members' });
+        break;
+      case 'me': // nowy ranking po partii
+        if (this.welcome) this.welcome.me.ratings = m.ratings;
+        this.onEvent({ type: 'members' });
+        break;
+      case 'social':
+        this.social = m.social;
+        this.onEvent({ type: 'social' });
+        break;
+      case 'presence':
+        if (this.social) {
+          for (const list of [this.social.friends, this.social.recent]) for (const p of list || []) if (p.id === m.id) p.online = m.online;
+        }
+        this.onEvent({ type: 'social', presence: m });
         break;
       case 'res': {
         const p = this.pending.get(m.reqId);
@@ -382,8 +449,10 @@ export class RoomsProvider {
   async challengeAI() { throw new Error('W pokoju nie ma gry z komputerem.'); }
 
   async challenge(memberId, { time, increment, days, rated, color }) {
-    if (days) throw new Error('Partie korespondencyjne w pokojach będą później.');
+    if (days) throw new Error('Partie korespondencyjne w klubach będą później.');
     const r = await this.req('challenge', { to: memberId, time, increment, rated: !!rated, color: color || 'random' });
+    // rywal już wyzwał nas tak samo (np. obaj kliknęli „Rewanż”) — partia ruszyła od razu
+    if (r.matched) return { matched: true, gameId: r.gameId, cancel: () => {}, done: Promise.resolve('accepted') };
     const id = r.id;
     const done = new Promise((resolve) => this.challengeWaiters.set(id, resolve));
     return {
@@ -431,20 +500,38 @@ export class RoomsProvider {
     const r = await this.req('setPassword', { password, oldPassword, email });
     if (this.welcome) Object.assign(this.welcome.me, { hasPassword: r.hasPassword, email: r.email });
     this.s = { ...this.s, secured: !!r.hasPassword };
-    lsSet(keyFor(this.s.room), this.s);
+    this._save();
     return r;
   }
-  // Prywatny pokój: przypięcie tego nicku do konta (żeby wrócić do pokoju po zalogowaniu na innym urządzeniu).
+  // Klub: przypięcie tego nicku do konta (żeby wrócić do klubu po zalogowaniu na innym urządzeniu).
   async linkAccount() {
     await this.req('linkAccount', { accountToken: accountToken() });
-    if (this.welcome) this.welcome.me.linked = true;
+    if (this.welcome) { this.welcome.me.linked = true; this.welcome.me.account = true; }
   }
 
+  // Przeniesienie na inne urządzenie: link (kod po # — nie trafia do logów serwera stron) i 6 cyfr.
   async transferLink() {
     const r = await this.req('transferCreate');
-    // kod przeniesienia po # (nie trafia do logów serwera stron)
-    return { url: `${appLink({ pokoj: this.roomCode })}#przenies=${r.code}`, expiresIn: r.expiresIn };
+    return { url: `${appLink({})}#przenies=${this.roomId}.${r.code}`, code6: r.code6, expiresIn: r.expiresIn };
   }
+
+  // --- zarządzanie klubem (założyciel; usuwanie także administratorzy) ---
+  async changeCode() { const r = await this.req('changeCode'); if (this.welcome) this.welcome.room.code = r.code; this.s.code = r.code; this._save(); return r.code; }
+  async setRoomPassword(password) { const r = await this.req('setRoomPassword', { password }); if (this.welcome) this.welcome.room.hasPassword = r.hasPassword; return r.hasPassword; }
+  async setRole(id, role) { await this.req('setRole', { id, role }); }
+  async removeMember(id) { await this.req('removeMember', { id }); }
+  async leaveRoom() { await this.req('leaveRoom'); this._shutdown(); this._forget(); }
+
+  // --- znajomi (poczekalnia ogólna) ---
+  async _social(t, data) { const r = await this.req(t, data); if (r.social) { this.social = r.social; this.onEvent({ type: 'social' }); } return r; }
+  loadSocial() { return this._social('social'); }
+  friendInvite(nickOrId) { return this._social('friendInvite', typeof nickOrId === 'object' ? nickOrId : { nick: nickOrId }); }
+  friendAccept(id) { return this._social('friendAccept', { id }); }
+  friendDecline(id) { return this._social('friendDecline', { id }); }
+  friendCancel(id) { return this._social('friendCancel', { id }); }
+  friendRemove(id) { return this._social('friendRemove', { id }); }
+  block(id) { return this._social('block', { id }); }
+  unblock(id) { return this._social('unblock', { id }); }
 
   gameUrl() { return null; }
   tokenCreateUrl() { return null; }
