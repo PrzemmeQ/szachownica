@@ -46,6 +46,7 @@ export const deleteMethods = {
     ];
     for (const [q, ...args] of sqls) this.sql.exec(q, ...args);
     try { this.sql.exec('DELETE FROM friend_links WHERE from_id = ?', id); } catch {}
+    this.deleteArchive(id);
     this.sql.exec(`UPDATE members SET nick = ?, nick_key = ?, removed = 1, pass_hash = NULL, email = NULL, email_key = NULL,
       last_seen = ?, offline_since = ? WHERE id = ?`, DELETED_NICK, 'deleted#' + id, now, now, id);
     for (const ws of this.openSockets()) {

@@ -30,6 +30,7 @@ async function phone(browser) {
     try { localStorage.setItem('ps_passkey_asked', '1'); } catch {}
     // systemowe okno udostępniania zastępujemy zapisem (link do znajomych)
     try { Object.defineProperty(navigator, 'share', { configurable: true, value: async (d) => { window.__shared = d; } }); } catch {}
+    try { Object.defineProperty(navigator, 'canShare', { configurable: true, value: () => true }); } catch {}
     window.__spoken = [];
     if ('speechSynthesis' in window) {
       speechSynthesis.speak = (u) => { window.__spoken.push(u.text); };
@@ -750,6 +751,19 @@ test('panel trenera: konto przy zakładaniu, hasło klubu, prośby, admin, podgl
   await expect(T.page.locator('#entry button.key')).toHaveCount(0);
   await play(B.page, 'e5');
   await expect(T.page.locator('.lm-san')).toHaveText('e5');
+
+  // uwaga trenera do ruchu (oboje graczy) i zapis momentu z notatką przez gracza
+  await T.page.getByRole('button', { name: /Uwaga trenera do tego ruchu/ }).click();
+  await T.page.locator('#coach-note-text').fill('Tu lepsze było Nf6');
+  await T.page.getByRole('button', { name: 'Wyślij uwagę' }).click();
+  await expect(T.page.locator('#toast')).toContainText('Uwaga trafiła do 2 graczy');
+  await expect(A.page.locator('#toast')).toContainText(`Trener ${nickT} dodał uwagę`);
+  await A.page.getByRole('button', { name: /Zapisz moment/ }).click();
+  await expect(A.page.locator('.moment-bar')).toContainText('Zapisano: ruch 1');
+  await A.page.getByRole('button', { name: 'Dodaj notatkę' }).click();
+  await A.page.locator('#prompt-input').fill('sprawdzić Nf3');
+  await A.page.locator('.dialog').getByRole('button', { name: 'Zapisz' }).click();
+  await expect(A.page.locator('#toast')).toContainText('Zapisano notatkę');
   await resign(B.page);
   await expect(A.page.locator('.result-title')).toHaveText('Wygrana');
 
@@ -788,6 +802,27 @@ test('panel trenera: konto przy zakładaniu, hasło klubu, prośby, admin, podgl
   await expect(inv).toContainText('zaproszenie');
   await inv.click();
   await expect(B.page.locator('.who')).toContainText('Szkółka Gambit');
+
+  // „Moje zapisane gry”: partia z momentem i uwagą trenera, odtwarzanie, obraz PNG, PGN
+  await A.page.getByRole('button', { name: '← Klub' }).click();
+  await A.page.getByRole('button', { name: 'Menu' }).click();
+  await A.page.getByRole('button', { name: /Moje zapisane gry/ }).click();
+  const row = A.page.locator('.row', { hasText: `${nickA} – ${nickB}` });
+  await expect(row).toContainText('★ 2');
+  await row.click();
+  await expect(A.page.locator('.moments')).toContainText('Tu lepsze było Nf6');
+  await expect(A.page.locator('.moments')).toContainText('sprawdzić Nf3');
+  await expect(A.page.locator('.moments')).toContainText(`trener ${nickT}`);
+  await A.page.getByRole('button', { name: 'Początek' }).click();
+  await expect(A.page.locator('.replay-pos')).toContainText('pozycja początkowa');
+  await A.page.getByRole('button', { name: 'Następny ruch' }).click();
+  await expect(A.page.locator('.replay-pos')).toContainText('e4');
+  await A.page.getByRole('button', { name: /Zapisz obraz/ }).click();
+  await expect.poll(() => A.page.evaluate(() => window.__shared?.files?.[0]?.type || '')).toBe('image/png');
+  const [pgnDl] = await Promise.all([A.page.waitForEvent('download'), A.page.getByRole('button', { name: 'Pobierz zapis partii (PGN)' }).click()]);
+  const pgnText = await (await import('node:fs/promises')).readFile(await pgnDl.path(), 'utf8');
+  expect(pgnText).toContain('1. e4 e5');
+  expect(pgnText).toContain(`[White "${nickA}"]`);
 
   // zmiana kodu: stary kod przestaje działać
   await T.page.getByRole('button', { name: '← Klub' }).click();

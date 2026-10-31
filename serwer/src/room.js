@@ -11,6 +11,7 @@ import { socialMethods } from './social.js';
 import { memberMethods } from './members.js';
 import { loginMethods } from './login.js';
 import { deleteMethods } from './delete.js';
+import { archiveMethods } from './archive.js';
 
 const ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
 export const ROOM_ID_RE = /^[abcdefghjkmnpqrstuvwxyz23456789]{12}$/;
@@ -131,6 +132,7 @@ export class Room extends DurableObject {
     `);
     this.migrateMembers();
     this.migrateLogin();
+    this.migrateArchive();
   }
 
   isPublic() { return this.kv('public') === '1'; }
@@ -498,6 +500,8 @@ export class Room extends DurableObject {
       case 'acct-passkey-login': return this.passkeyLogin(body, req.headers.get('X-Origin'));
       case 'acct-passkey-reg-options': return this.passkeyRegOptions(body, req.headers.get('X-Origin'));
       case 'acct-passkey-register': return this.passkeyRegister(body, req.headers.get('X-Origin'));
+      case 'acct-games-save': case 'acct-moment-add': case 'acct-moment-note': case 'acct-moment-delete':
+      case 'acct-games-list': case 'acct-game-get': case 'acct-game-delete': return this.archiveAction(action.slice(5), body);
       case 'acct-limit': {
         const limited = await this.takeLimit(body.kind === 'room' ? 'room' : 'register', ip);
         if (limited) fail(limited);
@@ -525,6 +529,7 @@ export class Room extends DurableObject {
       case 'acct-room-add': this.acctAddRoom(body.accountId, body.roomId, body.name); return { ok: true };
       case 'acct-room-remove': this.acctRemoveRoom(body.accountId, body.roomId); return { ok: true };
       case 'acct-room-status': this.acctRoomStatus(body); return { ok: true };
+      case 'acct-coach-note': return this.acctCoachNote(body);
       case 'acct-room-unregister': this.sql.exec('DELETE FROM room_dir WHERE room_id = ?', String(body.roomId || '')); return { ok: true };
       case 'acct-find': return this.acctFind(body.nick);
       case 'acct-ratings': return this.acctRatings(body.ids);
@@ -702,6 +707,7 @@ export class Room extends DurableObject {
     }
     switch (msg.t) {
       case 'coachPanel': this.needManager(me); return this.coachPanel();
+      case 'coachNote': return this.cmdCoachNote(me, msg);
       case 'roomPgn':
         this.needManager(me);
         return {
@@ -823,6 +829,31 @@ export class Room extends DurableObject {
     return { pgn: `${head.join('\n')}\n\n${body}${body ? ' ' : ''}${result}`, san };
   }
 
+  // Uwaga trenera do ruchu w partii (oboje graczy albo jeden) — zapis w archiwach kont graczy.
+  async cmdCoachNote(me, msg) {
+    this.needManager(me);
+    const g = this.getGame(String(msg.gameId || ''));
+    if (!g) fail('Nie znaleziono partii.');
+    const note = String(msg.note || '').trim();
+    if (!note) fail('Wpisz treść uwagi.');
+    const who = msg.to === 'white' || msg.to === 'black' ? [msg.to] : ['white', 'black'];
+    const targets = who.map((c) => ({ accountId: this.member(c === 'white' ? g.white_id : g.black_id)?.account_id, myColor: c })).filter((x) => x.accountId);
+    if (!targets.length) fail('Ten gracz nie ma konta — uwaga nie ma gdzie trafić.');
+    const winner = g.winner === 'white' ? '1-0' : g.winner === 'black' ? '0-1' : g.status === 'started' || ENDED_UNRATED.has(g.status) ? '*' : '½-½';
+    const game = {
+      source: 'club', ref: g.id, roomName: this.kv('name'), white: this.member(g.white_id)?.nick, black: this.member(g.black_id)?.nick,
+      result: winner, status: g.status, label: `${g.time_ms / 60000}+${g.inc_ms / 1000}`, moves: g.moves,
+    };
+    const author = { id: this.member(me)?.account_id || null, nick: this.member(me)?.nick };
+    const r = await this.callPublic('acct-coach-note', { targets, game, ply: Number(msg.ply) | 0, note, author });
+    if (!r) fail('Nie udało się zapisać uwagi.');
+    // powiadomienie także w klubie (gracz może być teraz tutaj, nie w poczekalni)
+    for (const c of who) {
+      const id = c === 'white' ? g.white_id : g.black_id;
+      this.toMember(id, { t: 'event', ev: { type: 'coachNote', author: author.nick, opponent: c === 'white' ? game.black : game.white } });
+    }
+    return { saved: r.saved };
+  }
   coachPanel() {
     const online = this.onlineIds();
     const stats = new Map();
@@ -1270,7 +1301,7 @@ export class Room extends DurableObject {
   }
 }
 
-Object.assign(Room.prototype, accountMethods, statsMethods, clubMethods, socialMethods, memberMethods, loginMethods, deleteMethods);
+Object.assign(Room.prototype, accountMethods, statsMethods, clubMethods, socialMethods, memberMethods, loginMethods, deleteMethods, archiveMethods);
 
 function hasMatingMaterial(chess, c) {
   let minors = 0;

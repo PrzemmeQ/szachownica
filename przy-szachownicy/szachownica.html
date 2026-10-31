@@ -130,6 +130,9 @@ let lastFromApp = null; // { gameId, myColor } — ostatnia wiadomość z aplika
 const st = (() => { try { return JSON.parse(localStorage.getItem(LS) || '{}'); } catch { return {}; } })();
 if (st.pgn) { try { game.loadPgn(st.pgn); } catch { game = new Chess(); } }
 flipped = !!st.flipped;
+// pozycja z linku (#fen=…): np. z „Moich zapisanych gier”
+const hashFen = new URLSearchParams(location.hash.slice(1)).get('fen');
+if (hashFen) { try { game = new Chess(hashFen); history.replaceState(null, '', location.pathname); } catch {} }
 $('plLetters').checked = !!st.pl;
 $('syncOn').checked = st.sync !== false;
 

@@ -121,6 +121,18 @@ export async function joinClub(code, nick, password) {
   }
   return rememberClub(d.room, d);
 }
+// --- „Moje zapisane gry”: archiwum partii i momentów przy koncie ---
+const acctPost = (path, body = {}) => http('POST', '/api/account/' + path, { accountToken: accountToken(), ...body });
+export const archive = {
+  save: (game) => acctPost('games-save', { game }),
+  addMoment: (game, ply, note) => acctPost('moment-add', { game, ply, note }),
+  setNote: (id, note) => acctPost('moment-note', { id, note }),
+  deleteMoment: (id) => acctPost('moment-delete', { id }),
+  list: async () => (await acctPost('games-list')).games,
+  get: (id) => acctPost('game-get', { id }),
+  deleteGame: (id) => acctPost('game-delete', { id }),
+};
+
 // --- logowanie komputera telefonem (QR) ---
 export async function qrStart() { return http('POST', '/api/account/qr-start', { ua: navigator.userAgent }); }
 // { status: waiting | expired } albo zalogowane konto ({ status: 'approved', saved })
@@ -583,6 +595,7 @@ export class RoomsProvider {
   qrInfo(code) { return this.req('qrInfo', { code }); }
   qrApprove(code) { return this.req('qrApprove', { code }); }
   logoutAll() { return this.req('logoutAll'); }
+  coachNote(gameId, ply, note, to) { return this.req('coachNote', { gameId, ply, note, to }); }
   async friendLinkCreate() { const r = await this.req('friendLinkCreate'); return appLink({}) + '#znajomy=' + r.token; }
   friendLinkInfo(token) { return this.req('friendLinkInfo', { token }); }
   friendLinkUse(token) { return this._social('friendLinkUse', { token }); }

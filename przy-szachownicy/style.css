@@ -310,3 +310,16 @@ code { font-family: var(--mono); font-size: 0.9em; }
 .lang-list { position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%); list-style: none; margin: 0; padding: 4px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 6px 20px #0003; min-width: 170px; z-index: 20; text-align: left; }
 .lang-opt { display: flex; align-items: center; gap: 8px; width: 100%; background: none; border: 0; padding: 8px 10px; border-radius: 6px; font: inherit; color: var(--ink); cursor: pointer; }
 .lang-opt:hover, .lang-opt.sel { background: var(--accent-soft); }
+
+/* --- zapisane momenty i gry --- */
+.moment-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0; }
+.mb-sq.last { box-shadow: inset 0 0 0 100px rgba(212, 173, 104, 0.55); }
+.replay { display: flex; align-items: center; justify-content: center; gap: 8px; margin: 6px 0 10px; }
+.replay-pos { min-width: 120px; text-align: center; }
+.saved-moves { line-height: 2.1; }
+.chip.has-moment { box-shadow: inset 0 -3px 0 var(--accent); }
+.moments { list-style: none; padding: 0; margin: 0; }
+.moment { border-top: 1px solid var(--line); padding: 10px 0; }
+.moment.coach { border-left: 3px solid var(--accent); padding-left: 10px; }
+.moment-note { margin: 4px 0 6px; white-space: pre-wrap; }
+textarea { font: inherit; width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); resize: vertical; }

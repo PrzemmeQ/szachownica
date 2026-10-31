@@ -5,7 +5,7 @@ import { DemoProvider } from './demo.js';
 import {
   RoomsProvider, roomsEnabled, savedAccount, savedClubs, savedClub, myClubs, createRoom, lookupClub, joinClub,
   qrStart, qrPoll, forgetAllClubs, passkeySupported, passkeyPlatform, passkeyRegister, passkeyLogin, registerAccount, loginAccount, requestPasswordReset, resetPassword, restoreRoom,
-  setAccountRooms,
+  setAccountRooms, archive,
 } from './rooms.js';
 import {
   sanToPl, describeMove, statusPl, speedPl, formatMs, PROMO_PIECES,
@@ -738,6 +738,9 @@ function onProviderEvent(ev) {
     case 'friendInvite':
       toast(t('{from} zaprasza Cię do znajomych.', { from: ev.from }), 5000); beep(); // zdarzenie na żywo — nie z odtwarzania po połączeniu
       break;
+    case 'coachNote':
+      toast(t('Trener {author} dodał uwagę do partii z {opponent} — zobaczysz ją w „Moich zapisanych grach”.', { author: ev.author, opponent: ev.opponent }), 7000); beep();
+      break;
     case 'friendJoined':
       toast(t('{nick} dołączył(a) do Twoich znajomych z Twojego linku.', { nick: ev.nick }), 6000); beep();
       break;
@@ -1002,7 +1005,7 @@ function onGameMsg(G, msg) {
       G.clockAt = performance.now();
       rebuild(G);
       G.lastSeenPly = G.history.length;
-      if (gameOver(G)) G.announcedEnd = true;
+      if (gameOver(G)) { G.announcedEnd = true; archiveGame(G); }
       render();
       break;
     case 'state': {
@@ -1033,6 +1036,7 @@ function onGameMsg(G, msg) {
         vibrate([60, 40, 60]);
       }
       G.lastSeenPly = G.history.length;
+      if (!wasOver && gameOver(G)) archiveGame(G);
       if (!wasOver && gameOver(G) && !G.announcedEnd) {
         G.announcedEnd = true;
         releaseWakeLock();
@@ -1258,6 +1262,8 @@ function render() {
   else if (S.view === 'room-new') html = viewRoomNew();
   else if (S.view === 'club-join') html = viewClubJoin();
   else if (S.view === 'qr-login') html = viewQrLogin();
+  else if (S.view === 'my-games') html = viewMyGames();
+  else if (S.view === 'saved-game') html = viewSavedGame();
   else if (S.view === 'account') html = viewAccount().replace(/<\/main>\s*$/, `<div class="start-others">${viewLangPicker()}</div></main>`); // wybór języka także przy logowaniu
   else if (S.view === 'lobby') html = viewLobby();
   else if (S.view === 'game') html = viewGame();
@@ -1370,6 +1376,7 @@ function viewStart() {
       <button class="btn primary big mode-btn" data-action="quick-play">${t('⚡ Szybka gra')}<span class="mode-sub">${t('dobór rywala online, znajomi, ranking ogólny')}</span></button>
     </div>
     ${clubsCard}
+    <div class="stack"><button class="btn big mode-btn" data-action="my-games">📒 ${t('Moje zapisane gry')}<span class="mode-sub">${t('zapisane momenty, uwagi trenera, zapis partii i obrazy')}</span></button></div>
     <p class="small center-text"><button class="link" data-action="qr-scan">${t('📷 Zaloguj komputer (skanuj kod QR)')}</button></p>
     ${others}
   </main>`;
@@ -1932,6 +1939,7 @@ function viewGame() {
     <section id="entry">${over ? viewResult(G) : spec ? `<div class="spectate">${boardHtml()}</div>` : viewEntry()}</section>
 
     ${actions}
+    ${viewMomentBar(G)}
     ${viewChat(G)}
 
     ${viewHistory(G)}
@@ -2077,8 +2085,9 @@ function viewResult(G) {
         ${G.spectator ? '' : `<button class="btn primary ${offer ? 'pulse' : ''}" data-action="rematch">${offer ? t('Rewanż — odpowiedz') : t('Rewanż')}</button>`}
         <button class="btn ${G.spectator ? 'primary' : ''}" data-action="back">${G.spectator ? t('Wróć do panelu trenera') : t('Wróć do listy partii')}</button>
         ${url ? `<a class="btn" href="${esc(url)}" target="_blank" rel="noopener">${t('Analiza partii na Lichess')}</a>` : ''}
-        ${!url && S.provider.gamePgn ? `<button class="btn" data-action="game-analysis" data-id="${esc(G.id)}">${t('Analiza partii na Lichess')}</button>
-          <button class="link small" data-action="game-pgn" data-id="${esc(G.id)}">${t('Pobierz zapis partii (PGN)')}</button>` : ''}
+        ${!url && S.provider.gamePgn ? `<button class="btn" data-action="game-analysis" data-id="${esc(G.id)}">${t('Analiza partii na Lichess')}</button>` : ''}
+        ${G.history.length ? `<button class="btn" data-action="game-pgn-current">${t('Pobierz zapis partii (PGN)')}</button>
+          <button class="link small" data-action="game-pgn-copy">${t('Kopiuj zapis partii')}</button>` : ''}
       </div>
     </div>`;
 }
@@ -2132,6 +2141,257 @@ async function rematch() {
   }
 }
 
+// --- „Moje zapisane gry”: momenty, notatki, uwagi trenera, odtwarzanie, obraz PNG -------------------
+// Partia w formacie archiwum (klub, poczekalnia, Lichess): ruchy UCI, gracze, wynik.
+function gameRecord(G) {
+  const f = G.full || {};
+  const st = G.state || {};
+  const over = gameOver(G);
+  const result = !over || st.status === 'aborted' || st.status === 'noStart' ? '*' : st.winner === 'white' ? '1-0' : st.winner === 'black' ? '0-1' : '½-½';
+  const tc = f.clock ? `${f.clock.initial / 60000}+${f.clock.increment / 1000}` : f.daysPerTurn ? `${f.daysPerTurn} d` : '';
+  const lichess = S.provider.name === 'lichess';
+  return {
+    source: lichess ? 'lichess' : S.provider.isPublic ? 'public' : 'club', ref: String(G.id),
+    roomName: lichess ? 'Lichess' : S.provider.roomName, white: f.white?.name || '?', black: f.black?.name || '?', myColor: G.myColor,
+    result, status: st.status || '', label: [speedPl(f.speed), tc].filter(Boolean).join(' '),
+    moves: G.history.map((m) => m.from + m.to + (m.promotion || '')),
+  };
+}
+const canArchive = (G) => G && !G.spectator && !S.provider?.isDemo && !!savedAccount();
+// Po partii: zapis w „Moich zapisanych grach” (raz na partię w tej sesji).
+function archiveGame(G) {
+  if (!canArchive(G) || G.archived) return;
+  G.archived = true;
+  archive.save(gameRecord(G)).catch((e) => console.warn('archive', e));
+}
+// „★ Zapisz moment”: jedno dotknięcie, bez przerywania gry; notatkę można dopisać od razu albo później.
+async function saveMoment() {
+  const G = S.game;
+  if (!G) return;
+  if (!savedAccount()) { toast(t('Zapisane gry wymagają konta w aplikacji — załóż je w Menu.'), 5000); return; }
+  const ply = G.history.length;
+  try {
+    const r = await archive.addMoment(gameRecord(G), ply);
+    S.lastMoment = { id: r.id, gameId: G.id, ply, at: Date.now() };
+    vibrate(40);
+    render();
+  } catch (e) { toast(e.message, 5000); }
+}
+function momentLabel(ply) { return ply ? t('ruch {n}', { n: Math.ceil(ply / 2) }) + (ply % 2 ? '' : '…') : t('pozycja początkowa'); }
+function openNoteEditor(id, note = '', after) {
+  S.modal = {
+    kind: 'prompt', title: t('Notatka do momentu'), label: t('Co chcesz tu zapamiętać albo sprawdzić?'), value: note, okLabel: t('Zapisz'),
+    onOk: async (v) => { try { await archive.setNote(id, v); toast(t('Zapisano notatkę.')); if (after) await after(); else render(); } catch (e) { toast(e.message, 5000); } },
+  };
+  render();
+  setTimeout(() => document.getElementById('prompt-input')?.focus(), 30); // od razu klawiatura
+}
+// Pasek pod przyciskami partii: zapis momentu (gracz) albo uwaga trenera (podgląd).
+function viewMomentBar(G) {
+  if (!G?.full || S.provider?.isDemo) return '';
+  if (G.spectator) {
+    return isCoach() ? `<div class="moment-bar"><button class="btn small" data-action="coach-note">✎ ${t('Uwaga trenera do tego ruchu')}</button></div>` : '';
+  }
+  const lm = S.lastMoment && S.lastMoment.gameId === G.id && Date.now() - S.lastMoment.at < 60000 ? S.lastMoment : null;
+  return `<div class="moment-bar">
+      <button class="btn small" data-action="moment-save">★ ${t('Zapisz moment')}</button>
+      ${lm ? `<span class="small">${t('Zapisano: {m}', { m: momentLabel(lm.ply) })} · <button class="link small" data-action="moment-note-last">${t('Dodaj notatkę')}</button></span>` : ''}
+    </div>`;
+}
+// Uwaga trenera: oboje graczy albo jeden.
+function openCoachNote() {
+  const G = S.game;
+  if (!G?.full) return;
+  S.modal = { kind: 'coach-note', ply: G.history.length };
+  render();
+  setTimeout(() => document.getElementById('coach-note-text')?.focus(), 30);
+}
+
+// Lista zapisanych gier.
+async function openMyGames() {
+  if (!savedAccount()) { openAccount('login', 'start'); return; }
+  S.view = 'my-games'; S.myGames = { loading: true, only: S.myGames?.only ?? false }; render();
+  try { S.myGames = { ...S.myGames, loading: false, list: await archive.list() }; } catch (e) { S.myGames = { ...S.myGames, loading: false, error: e.message }; }
+  render();
+}
+const SOURCE_PL = { lichess: 'Lichess', public: 'Poczekalnia ogólna' };
+function viewMyGames() {
+  const g = S.myGames || {};
+  const list = (g.list || []).filter((x) => !g.only || x.moments > 0);
+  const rows = list.map((x) => {
+    const opp = x.myColor === 'white' ? x.black : x.white;
+    return `<button class="row" data-action="saved-open" data-id="${esc(x.id)}">
+      <span class="row-main">${esc(x.white)} – ${esc(x.black)} <span class="muted">${esc(x.result)}</span></span>
+      <span class="row-sub">${esc(x.source === 'club' ? x.roomName || t('Klub') : t(SOURCE_PL[x.source]))} · ${esc(x.label || '')} · ${fmtDate(x.updatedAt)} · ${tn(x.plies, '{n} półruch|{n} półruchy|{n} półruchów')}</span>
+      ${x.moments ? `<span class="pill pill-on" title="${esc(opp)}">★ ${x.moments}${x.coachNotes ? ' · ✎ ' + x.coachNotes : ''}</span>` : ''}
+    </button>`;
+  }).join('');
+  return `
+  <main class="lobby">
+    <header class="g-top"><button class="btn small" data-action="to-start">${t('← Menu')}</button><div class="g-meta">${t('Moje zapisane gry')}</div><span></span></header>
+    <section class="card">
+      <label class="toggle"><input type="checkbox" data-action="mg-only" ${g.only ? 'checked' : ''}> ${t('Tylko partie z zapisanymi momentami')}</label>
+      ${g.loading ? `<p class="muted">${t('Wczytywanie…')}</p>` : g.error ? `<p class="error">${esc(g.error)}</p>`
+    : rows || `<p class="muted small">${t('Nie ma jeszcze zapisanych gier. Partie zapisują się same po zakończeniu, a w trakcie gry możesz zapisać moment przyciskiem „★ Zapisz moment”.')}</p>`}
+    </section>
+  </main>`;
+}
+
+// Jedna zapisana gra: odtwarzanie ruch po ruchu, momenty, PGN, obraz.
+async function openSavedGame(id, ply) {
+  try {
+    const d = await archive.get(id);
+    const total = d.game.moves.length;
+    S.saved = { game: d.game, moments: d.moments, ply: ply ?? (d.moments[0]?.ply ?? total) };
+    S.view = 'saved-game';
+    render();
+  } catch (e) { toast(e.message, 5000); }
+}
+function savedPosition(game, ply) {
+  const c = new Chess();
+  const hist = [];
+  for (const u of game.moves.slice(0, ply)) { try { hist.push(c.move({ from: u.slice(0, 2), to: u.slice(2, 4), promotion: u[4] })); } catch { break; } }
+  return { chess: c, last: hist[hist.length - 1] || null };
+}
+function savedSans(game) {
+  const c = new Chess();
+  const out = [];
+  for (const u of game.moves) { try { out.push(c.move({ from: u.slice(0, 2), to: u.slice(2, 4), promotion: u[4] }).san); } catch { break; } }
+  return out;
+}
+function viewSavedGame() {
+  const s = S.saved;
+  const g = s.game;
+  const total = g.moves.length;
+  const { chess, last } = savedPosition(g, s.ply);
+  const sans = savedSans(g);
+  const flip = g.myColor === 'black';
+  const here = s.moments.filter((m) => m.ply === s.ply);
+  const moves = sans.map((san, i) => `${i % 2 === 0 ? `<span class="muted small">${i / 2 + 1}.</span>` : ''}<button class="chip small ${i + 1 === s.ply ? 'sel' : ''} ${s.moments.some((m) => m.ply === i + 1) ? 'has-moment' : ''}" data-action="saved-ply" data-id="${i + 1}">${esc(fmtSan(san))}</button>`).join(' ');
+  const moments = s.moments.length ? s.moments.map((m) => `
+    <li class="moment ${m.kind}">
+      <div><strong>${esc(momentLabel(m.ply))}</strong>${m.ply ? ` · ${esc(fmtSan(sans[m.ply - 1] || ''))}` : ''}${m.kind === 'coach' ? ` <span class="pill">✎ ${t('trener')} ${esc(m.author || '')}</span>` : ''}</div>
+      ${m.note ? `<div class="moment-note">${esc(m.note)}</div>` : ''}
+      <div class="row-actions">
+        <button class="btn small" data-action="saved-ply" data-id="${m.ply}">${t('Pokaż')}</button>
+        ${m.kind === 'self' ? `<button class="btn small" data-action="moment-edit" data-id="${esc(m.id)}">${m.note ? t('Zmień notatkę') : t('Dodaj notatkę')}</button>` : ''}
+        <button class="btn small" data-action="moment-delete" data-id="${esc(m.id)}">${t('Usuń')}</button>
+      </div>
+    </li>`).join('') : `<p class="muted small">${t('Brak zapisanych momentów. Wybierz ruch i kliknij „★ Zapisz ten moment”.')}</p>`;
+  return `
+  <main class="lobby saved-game">
+    <header class="g-top"><button class="btn small" data-action="my-games">${t('← Zapisane gry')}</button>
+      <div class="g-meta">${esc(g.white)} – ${esc(g.black)} · ${esc(g.result)}</div><span></span></header>
+    <section class="card">
+      <div class="muted small">${esc(g.source === 'club' ? g.roomName || t('Klub') : t(SOURCE_PL[g.source]))} · ${esc(g.label || '')} · ${fmtDate(g.updatedAt)} · ${t('grałeś')} ${g.myColor === 'white' ? t('białymi') : t('czarnymi')}</div>
+      ${miniBoard(chess, flip, last)}
+      <div class="replay">
+        <button class="btn" data-action="saved-ply" data-id="0" aria-label="${t('Początek')}">⏮</button>
+        <button class="btn" data-action="saved-ply" data-id="${Math.max(0, s.ply - 1)}" aria-label="${t('Poprzedni ruch')}">◀</button>
+        <span class="replay-pos">${esc(momentLabel(s.ply))}${last ? ` · <strong>${esc(fmtSan(last.san))}</strong>` : ''}<br><span class="muted small">${s.ply}/${total}</span></span>
+        <button class="btn" data-action="saved-ply" data-id="${Math.min(total, s.ply + 1)}" aria-label="${t('Następny ruch')}">▶</button>
+        <button class="btn" data-action="saved-ply" data-id="${total}" aria-label="${t('Koniec')}">⏭</button>
+      </div>
+      ${here.filter((m) => m.note).map((m) => `<div class="notice">${m.kind === 'coach' ? `✎ ${esc(m.author || t('trener'))}: ` : '★ '}${esc(m.note)}</div>`).join('')}
+      <div class="row-actions">
+        <button class="btn small primary" data-action="saved-png">🖼 ${t('Zapisz obraz (PNG)')}</button>
+        <button class="btn small" data-action="saved-moment">★ ${t('Zapisz ten moment')}</button>
+        <a class="btn small" href="https://lichess.org/analysis/${chess.fen().replace(/ /g, '_')}" target="_blank" rel="noopener">${t('Analizuj na Lichess')}</a>
+        <a class="btn small" href="szachownica.html#fen=${encodeURIComponent(chess.fen())}" target="_blank" rel="noopener">${t('Otwórz na szachownicy testowej')}</a>
+      </div>
+    </section>
+    <section class="card"><h2>${t('Momenty i uwagi')}</h2><ul class="moments">${moments}</ul></section>
+    <section class="card"><h2>${t('Zapis partii')}</h2><div class="saved-moves">${moves || '—'}</div>
+      <div class="row-actions">
+        <button class="btn small" data-action="saved-pgn">${t('Pobierz zapis partii (PGN)')}</button>
+        <button class="btn small" data-action="saved-pgn-copy">${t('Kopiuj zapis partii')}</button>
+        <button class="btn small danger" data-action="saved-delete">${t('Usuń z zapisanych')}</button>
+      </div></section>
+  </main>`;
+}
+function savedPgn(g) {
+  const c = new Chess();
+  for (const u of g.moves) { try { c.move({ from: u.slice(0, 2), to: u.slice(2, 4), promotion: u[4] }); } catch { break; } }
+  const d = new Date(g.updatedAt);
+  c.setHeader('Event', g.source === 'club' ? g.roomName || CONFIG.APP_NAME : g.source === 'lichess' ? 'Lichess' : CONFIG.APP_NAME);
+  c.setHeader('Date', `${d.getFullYear()}.${String(d.getMonth() + 1).padStart(2, '0')}.${String(d.getDate()).padStart(2, '0')}`);
+  c.setHeader('White', g.white || '?'); c.setHeader('Black', g.black || '?');
+  const res = g.result === '½-½' ? '1/2-1/2' : g.result || '*';
+  c.setHeader('Result', res);
+  const pgn = c.pgn();
+  return pgn.trim().endsWith(res) ? pgn : `${pgn} ${res}`;
+}
+
+// Obraz szachownicy (PNG) rysowany w przeglądarce: pozycja, ostatni ruch, opisy pól, gracze i notatka.
+async function boardPng({ chess, last, flip, title, subtitle, note }) {
+  const sq = 96, pad = 36, W = sq * 8 + pad * 2;
+  const lines = [];
+  if (note) { // zawijanie notatki
+    const words = note.split(/\s+/); let line = '';
+    const ctxM = document.createElement('canvas').getContext('2d'); ctxM.font = '24px system-ui, sans-serif';
+    for (const w of words) { const tst = line ? line + ' ' + w : w; if (ctxM.measureText(tst).width > W - pad * 2 && line) { lines.push(line); line = w; } else line = tst; }
+    if (line) lines.push(line);
+  }
+  const H = pad + sq * 8 + pad + 70 + lines.length * 32 + (lines.length ? 16 : 0);
+  const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  const x = cv.getContext('2d');
+  x.fillStyle = '#fffdf8'; x.fillRect(0, 0, W, H);
+  const board = chess.board();
+  const glyph = { k: '♚', q: '♛', r: '♜', b: '♝', n: '♞', p: '♟' };
+  for (let vr = 0; vr < 8; vr++) {
+    for (let vf = 0; vf < 8; vf++) {
+      const r = flip ? 7 - vr : vr, f = flip ? 7 - vf : vf;
+      const name = FILES[f] + (8 - r);
+      const X = pad + vf * sq, Y = pad + vr * sq;
+      x.fillStyle = (r + f) % 2 ? '#b58863' : '#efe6d2'; x.fillRect(X, Y, sq, sq);
+      if (last && (last.from === name || last.to === name)) { x.fillStyle = 'rgba(212,173,104,0.6)'; x.fillRect(X, Y, sq, sq); }
+      const p = board[r][f];
+      if (p) {
+        x.font = `${sq * 0.8}px "Segoe UI Symbol", "DejaVu Sans", "Noto Sans Symbols2", serif`;
+        x.textAlign = 'center'; x.textBaseline = 'middle';
+        x.lineWidth = 3; x.strokeStyle = p.color === 'w' ? '#111' : '#f5edda';
+        x.fillStyle = p.color === 'w' ? '#ffffff' : '#111111';
+        x.strokeText(glyph[p.type], X + sq / 2, Y + sq * 0.53); x.fillText(glyph[p.type], X + sq / 2, Y + sq * 0.53);
+      }
+    }
+  }
+  x.fillStyle = '#6b665c'; x.font = '18px system-ui, sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle';
+  for (let i = 0; i < 8; i++) {
+    x.fillText(FILES[flip ? 7 - i : i], pad + i * sq + sq / 2, pad + sq * 8 + 18);
+    x.fillText(String(flip ? i + 1 : 8 - i), pad / 2, pad + i * sq + sq / 2);
+  }
+  x.textAlign = 'left'; x.fillStyle = '#1f1d1a'; x.font = 'bold 26px system-ui, sans-serif';
+  x.fillText(title, pad, pad + sq * 8 + 52);
+  x.font = '20px system-ui, sans-serif'; x.fillStyle = '#6b665c';
+  x.fillText(subtitle, pad, pad + sq * 8 + 84);
+  x.fillStyle = '#1f1d1a'; x.font = '24px system-ui, sans-serif';
+  lines.forEach((l, i) => x.fillText(l, pad, pad + sq * 8 + 124 + i * 32));
+  return new Promise((res) => cv.toBlob(res, 'image/png'));
+}
+async function shareOrDownload(blob, filename) {
+  const file = new File([blob], filename, { type: blob.type });
+  if (navigator.canShare?.({ files: [file] })) {
+    try { await navigator.share({ files: [file], title: filename }); return; } catch (e) { if (e.name === 'AbortError') return; }
+  }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = filename;
+  document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  toast(t('Zapisano obraz.'));
+}
+async function savedGamePng() {
+  const s = S.saved;
+  const g = s.game;
+  const { chess, last } = savedPosition(g, s.ply);
+  const notes = s.moments.filter((m) => m.ply === s.ply && m.note).map((m) => (m.kind === 'coach' ? `${m.author || t('trener')}: ` : '') + m.note).join(' · ');
+  const blob = await boardPng({
+    chess, last, flip: g.myColor === 'black', note: notes,
+    title: `${g.white} – ${g.black}`,
+    subtitle: `${momentLabel(s.ply)}${last ? ' · ' + fmtSan(last.san) : ''} · ${g.label || ''} · ${fmtDate(g.updatedAt)}`,
+  });
+  await shareOrDownload(blob, `pozycja-${String(g.white).replace(/\W+/g, '')}-${String(g.black).replace(/\W+/g, '')}-${s.ply}.png`);
+}
+
 function downloadText(filename, text) {
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([text], { type: 'application/x-chess-pgn' }));
@@ -2146,6 +2406,39 @@ async function downloadGamePgn(id) {
     const p = await S.provider.gamePgn(id);
     downloadText(`partia-${id}.pgn`, p.pgn);
   } catch (e) { toast(e.message); }
+}
+// Zapis otwartej partii (każdej: klub, poczekalnia, Lichess, demo): z serwera, jeśli go podaje, inaczej z ruchów w aplikacji.
+async function currentPgn(G) {
+  if (S.provider.gamePgn && !G.spectator) { try { return (await S.provider.gamePgn(G.id)).pgn; } catch {} }
+  const c = new Chess();
+  for (const m of G.history) c.move(m.san);
+  const f = G.full || {};
+  const st = G.state || {};
+  const result = !gameOver(G) || st.status === 'aborted' || st.status === 'noStart' ? '*' : st.winner === 'white' ? '1-0' : st.winner === 'black' ? '0-1' : '1/2-1/2';
+  const name = (p) => (p ? p.name || '?' : '?');
+  const d = new Date();
+  c.setHeader('Event', S.provider.isDemo ? 'Demo' : S.provider.name === 'lichess' ? 'Lichess' : (S.provider.roomName || CONFIG.APP_NAME));
+  c.setHeader('Site', S.provider.gameUrl?.(G.id) || CONFIG.APP_NAME);
+  c.setHeader('Date', `${d.getFullYear()}.${String(d.getMonth() + 1).padStart(2, '0')}.${String(d.getDate()).padStart(2, '0')}`);
+  c.setHeader('White', name(f.white));
+  c.setHeader('Black', name(f.black));
+  c.setHeader('Result', result);
+  if (f.clock) c.setHeader('TimeControl', `${Math.round(f.clock.initial / 1000)}+${Math.round(f.clock.increment / 1000)}`);
+  return c.pgn() + (c.history().length ? ' ' : '') + (c.pgn().endsWith(result) ? '' : result);
+}
+async function downloadCurrentPgn() {
+  const G = S.game;
+  if (!G) return;
+  const fname = `partia-${new Date().toISOString().slice(0, 10)}-${String(G.id).slice(0, 8)}.pgn`;
+  downloadText(fname, await currentPgn(G));
+  toast(t('Pobrano zapis partii.'));
+}
+async function copyCurrentPgn() {
+  const G = S.game;
+  if (!G) return;
+  const pgn = await currentPgn(G);
+  try { await navigator.clipboard.writeText(pgn); toast(t('Skopiowano zapis partii.')); }
+  catch { S.modal = { kind: 'confirm', title: t('Zapis partii'), text: pgn, okLabel: 'OK' }; render(); }
 }
 
 // Analiza w Lichess: ruchy w adresie (lichess.org/analysis/pgn/e4_e5_Nf3), bez logowania.
@@ -2240,8 +2533,9 @@ function viewCoach() {
       <li>
         <span class="hist-players">${esc(g.white)} – ${esc(g.black)}</span>
         <span class="hist-res">${RESULT_PL[g.winner] || '½–½'}</span>
-        <span class="muted small">${esc(g.label)} · ${g.plies} ${t('półruchów ·')} ${new Date(g.endedAt).toLocaleDateString('pl-PL')}
-          · <button class="link small" data-action="game-analysis" data-id="${esc(g.id)}">analiza</button>
+        <span class="muted small">${esc(g.label)} · ${g.plies} ${t('półruchów ·')} ${fmtDate(g.endedAt)}
+          · <button class="link small" data-action="coach-watch" data-id="${esc(g.id)}">${t('otwórz i dodaj uwagę')}</button>
+          · <button class="link small" data-action="game-analysis" data-id="${esc(g.id)}">${t('analiza')}</button>
           · <button class="link small" data-action="game-pgn" data-id="${esc(g.id)}">PGN</button></span>
       </li>`).join('')}</ul>` : `<p class="muted small">${t('Jeszcze nie rozegrano żadnej partii.')}</p>`;
   return `
@@ -2272,6 +2566,8 @@ function viewHistory(G) {
     <details class="history" ${S.historyOpen ? 'open' : ''} data-action="history-toggle">
       <summary>${t('Zapis partii (')}${G.history.length} ${t('pół­ruchów)')}</summary>
       <ol class="hlist">${rows.join('')}</ol>
+      <div class="row-actions"><button class="btn small" data-action="game-pgn-current">${t('Pobierz zapis partii (PGN)')}</button>
+        <button class="btn small" data-action="game-pgn-copy">${t('Kopiuj zapis partii')}</button></div>
     </details>`;
 }
 
@@ -2411,6 +2707,29 @@ function viewModal() {
         ${forget}
         <button class="btn primary" data-action="modal-close">${t('Gotowe')}</button>
       </div>`;
+  } else if (m.kind === 'coach-note') {
+    const G = S.game;
+    const f = G?.full || {};
+    const last = G?.history[m.ply - 1];
+    body = `
+      <h2>${t('Uwaga trenera')}</h2>
+      <p class="small">${esc(momentLabel(m.ply))}${last ? ' · <strong>' + esc(fmtSan(last.san)) + '</strong>' : ''} · ${esc(f.white?.name || '')} – ${esc(f.black?.name || '')}</p>
+      <form data-form="coach-note" autocomplete="off">
+        <label class="field">${t('Ruch')}
+          <select id="coach-note-ply">${[...Array((G?.history.length || 0) + 1).keys()].reverse().map((p) => `<option value="${p}" ${p === m.ply ? 'selected' : ''}>${esc(momentLabel(p))}${p ? ' · ' + esc(fmtSan(G.history[p - 1].san)) : ''}</option>`).join('')}</select></label>
+        <label class="field">${t('Treść uwagi')}<textarea id="coach-note-text" rows="4" maxlength="500"></textarea></label>
+        <label class="field">${t('Dla kogo')}
+          <select id="coach-note-to">
+            <option value="both">${t('Oboje graczy')}</option>
+            <option value="white">${esc(f.white?.name || t('białe'))} (${t('białe')})</option>
+            <option value="black">${esc(f.black?.name || t('czarne'))} (${t('czarne')})</option>
+          </select></label>
+        <p class="muted small">${t('Uwaga trafi do „Moich zapisanych gier” wybranych graczy, z pozycją z tego ruchu.')}</p>
+        <div class="row-actions end">
+          <button type="button" class="btn" data-action="modal-close">${t('Anuluj')}</button>
+          <button type="submit" class="btn primary">${t('Wyślij uwagę')}</button>
+        </div>
+      </form>`;
   } else if (m.kind === 'delete-account') {
     const clubs = m.clubs || [];
     body = m.loading ? `<h2>${t('Usuń konto')}</h2><p class="muted">${t('Wczytywanie…')}</p>` : `
@@ -2464,8 +2783,10 @@ function viewModal() {
 function boardHtml() {
   const G = S.game;
   if (!G?.chess) return '';
-  const board = G.chess.board(); // [rank8..rank1][a..h]
-  const flip = G.myColor === 'black';
+  return miniBoard(G.chess, G.myColor === 'black', G.history[G.history.length - 1]);
+}
+function miniBoard(chess, flip, last) {
+  const board = chess.board(); // [rank8..rank1][a..h]
   const ranks = flip ? [...Array(8).keys()].reverse() : [...Array(8).keys()];
   const files = flip ? [...Array(8).keys()].reverse() : [...Array(8).keys()];
   let html = '<div class="mini-board">';
@@ -2474,7 +2795,9 @@ function boardHtml() {
     for (const f of files) {
       const sq = board[r][f];
       const dark = (r + f) % 2 === 1;
-      html += `<div class="mb-sq ${dark ? 'd' : 'l'}">${sq ? PIECE_CHAR[sq.color + sq.type] : ''}</div>`;
+      const name = FILES[f] + (8 - r);
+      const hl = last && (last.from === name || last.to === name) ? ' last' : '';
+      html += `<div class="mb-sq ${dark ? 'd' : 'l'}${hl}">${sq ? PIECE_CHAR[sq.color + sq.type] : ''}</div>`;
     }
   }
   html += '<div></div>' + files.map((f) => `<div class="mb-label">${FILES[f]}</div>`).join('') + '</div>';
@@ -2533,7 +2856,7 @@ app.addEventListener('click', async (e) => {
   const a = el.dataset.action;
   const id = el.dataset.id;
   if (a === 'overlay') { if (e.target === el) { S.modal = null; render(); } return; }
-  if (a === 'history-toggle' || a === 'room-history' || a === 'rated' || a === 'setting' || a === 'approval' || a === 'near') return; // obsługiwane przez 'change'/'toggle'
+  if (a === 'history-toggle' || a === 'room-history' || a === 'rated' || a === 'setting' || a === 'approval' || a === 'near' || a === 'mg-only') return; // obsługiwane przez 'change'/'toggle'
   switch (a) {
     case 'login':
       try { await new LichessProvider().login(); } catch (err) { S.startError = '' + t('Nie udało się rozpocząć logowania:') + ' ' + err.message; render(); }
@@ -2745,6 +3068,41 @@ app.addEventListener('click', async (e) => {
     case 'rematch': await rematch(); break;
     case 'game-analysis': await openAnalysis(id); break;
     case 'game-pgn': await downloadGamePgn(id); break;
+    case 'game-pgn-current': await downloadCurrentPgn(); break;
+    case 'moment-save': await saveMoment(); break;
+    case 'moment-note-last': if (S.lastMoment) openNoteEditor(S.lastMoment.id, ''); break;
+    case 'coach-note': openCoachNote(); break;
+    case 'my-games': S.modal = null; await openMyGames(); break;
+    case 'saved-open': await openSavedGame(id); break;
+    case 'saved-ply': S.saved.ply = Number(id); render(); break;
+    case 'saved-png': try { await savedGamePng(); } catch (err) { toast(err.message); } break;
+    case 'saved-pgn': downloadText(`partia-${S.saved.game.white}-${S.saved.game.black}.pgn`.replace(/[^w.-]+/g, '_'), savedPgn(S.saved.game)); break;
+    case 'saved-pgn-copy':
+      try { await navigator.clipboard.writeText(savedPgn(S.saved.game)); toast(t('Skopiowano zapis partii.')); } catch { toast(t('Skopiuj zapis ręcznie.')); }
+      break;
+    case 'saved-moment': {
+      const g = S.saved.game;
+      try {
+        await archive.addMoment({ ...g, moves: g.moves }, S.saved.ply);
+        await openSavedGame(g.id, S.saved.ply);
+        toast(t('Zapisano moment.'));
+      } catch (err) { toast(err.message, 5000); }
+      break;
+    }
+    case 'moment-edit': {
+      const m = S.saved.moments.find((x) => x.id === id);
+      openNoteEditor(id, m?.note || '', () => openSavedGame(S.saved.game.id, S.saved.ply));
+      break;
+    }
+    case 'moment-delete':
+      confirmModal({ title: t('Usunąć ten moment?'), okLabel: t('Usuń'), danger: true,
+        onOk: async () => { try { await archive.deleteMoment(id); await openSavedGame(S.saved.game.id, S.saved.ply); } catch (err) { toast(err.message); } } });
+      break;
+    case 'saved-delete':
+      confirmModal({ title: t('Usunąć partię z zapisanych?'), text: t('Znikną też jej momenty i uwagi trenera.'), okLabel: t('Usuń'), danger: true,
+        onOk: async () => { try { await archive.deleteGame(S.saved.game.id); await openMyGames(); } catch (err) { toast(err.message); } } });
+      break;
+    case 'game-pgn-copy': await copyCurrentPgn(); break;
     case 'room-pgn':
       try { downloadText(`partie-${S.provider.roomCode}.pgn`, await S.provider.roomPgn()); } catch (err) { toast(err.message); }
       break;
@@ -2817,6 +3175,7 @@ app.addEventListener('change', (e) => {
   const el = e.target;
   if (el.dataset.action === 'rated') { S.form.rated = el.checked; saveForm(); }
   if (el.dataset.action === 'near') { S.form.near = el.checked; saveForm(); }
+  if (el.dataset.action === 'mg-only') { S.myGames.only = el.checked; render(); }
   if (el.dataset.action === 'approval') {
     S.provider.setApproval(el.checked)
       .then((on) => { toast(on ? t('Nowi członkowie będą czekać na zatwierdzenie.') : t('Nowi członkowie wchodzą od razu po kodzie.')); loadCoach(); })
@@ -2846,6 +3205,15 @@ app.addEventListener('submit', async (e) => {
       break;
     }
     case 'delete-account': await submitDeleteAccount(); break;
+    case 'coach-note': {
+      const note = (document.getElementById('coach-note-text')?.value || '').trim();
+      const to = document.getElementById('coach-note-to')?.value || 'both';
+      if (!note) { toast(t('Wpisz treść uwagi.')); break; }
+      const ply = Number(document.getElementById('coach-note-ply')?.value ?? S.modal?.ply ?? 0);
+      try { const r = await S.provider.coachNote(S.game.id, ply, note, to); S.modal = null; render(); toast(tn(r.saved, 'Uwaga trafiła do {n} gracza.|Uwaga trafiła do {n} graczy.|Uwaga trafiła do {n} graczy.')); }
+      catch (err) { toast(err.message, 5000); }
+      break;
+    }
     case 'qr-code': {
       const code = (document.getElementById('qr-code')?.value || '').trim();
       if (code.length < 6) { toast(t('Kod ma 6 znaków — przepisz go z ekranu komputera.')); break; }

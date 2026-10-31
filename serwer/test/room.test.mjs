@@ -483,6 +483,49 @@ test('znajomi przez link (jednorazowy); usunięcie konta (RODO): klub przekazany
   for (const x of [B, C, W, Bl, Cc]) x.close();
 });
 
+test('moje zapisane gry: zapis partii i momentów (także Lichess), notatki, uwaga trenera dla obojga albo jednego, usuwanie', async () => {
+  const acc = (path, body) => api(srv.base, 'POST', '/api/account/' + path, body);
+  const p = await register('Ar');
+  // partia z Lichess (ruchy z aplikacji) + moment z notatką w trakcie
+  const lich = { source: 'lichess', ref: 'AbCd1234', roomName: 'Lichess', white: p.nick, black: 'rywal_l', myColor: 'white', result: '*', label: '10+5', moves: ['e2e4', 'e7e5'] };
+  const m1 = await acc('moment-add', { accountToken: p.token, game: lich, ply: 2 });
+  assert.equal(m1.status, 200, JSON.stringify(m1.data));
+  assert.equal((await acc('moment-note', { accountToken: p.token, id: m1.data.id, note: 'czy bić na d5?' })).status, 200);
+  // koniec partii: pełny zapis (ruchy dopisane, wynik)
+  assert.equal((await acc('games-save', { accountToken: p.token, game: { ...lich, result: '1-0', status: 'mate', moves: ['e2e4', 'e7e5', 'd1h5', 'b8c6', 'f1c4', 'g8f6', 'h5f7'] } })).data.id, m1.data.gameId);
+  // zapis w trakcie z krótszą listą nie skraca partii
+  await acc('games-save', { accountToken: p.token, game: { ...lich, moves: ['e2e4'] } });
+  let g = (await acc('game-get', { accountToken: p.token, id: m1.data.gameId })).data;
+  assert.equal(g.game.moves.length, 7);
+  assert.deepEqual(g.moments.map((m) => [m.ply, m.note, m.kind]), [[2, 'czy bić na d5?', 'self']]);
+  assert.match((await acc('games-list', { accountToken: 'zly' })).data.error, /konta/);
+
+  // uwaga trenera w klubie: oboje graczy, potem tylko czarne
+  const ctx = await clubWithTwo();
+  const { gameId, W, Bl } = await startGame(ctx);
+  await playMoves(gameId, W, Bl, ['e2e4', 'e7e5', 'g1f3']);
+  const B = await connect('publiczny', ctx.b.token);
+  const mark = B.mark();
+  const r = await W.req('coachNote', { gameId, ply: 2, note: 'Tu lepsze było Nf3', to: 'both' });
+  assert.ok(r.ok && r.saved === 2, JSON.stringify(r));
+  assert.equal((await B.wait((m) => m.t === 'event' && m.ev.type === 'coachNote', 5000, mark)).ev.author, ctx.a.nick);
+  assert.ok((await W.req('coachNote', { gameId, ply: 3, note: 'Tylko dla czarnych', to: 'black' })).ok);
+  assert.equal((await Bl.req('coachNote', { gameId, ply: 1, note: 'x' })).ok, false); // tylko założyciel/admin
+  const listB = (await acc('games-list', { accountToken: ctx.b.token })).data.games;
+  const gb = listB.find((x) => x.ref === gameId);
+  assert.deepEqual([gb.source, gb.moments, gb.coachNotes, gb.myColor], ['club', 2, 2, 'black']);
+  const listA = (await acc('games-list', { accountToken: ctx.a.token })).data.games;
+  assert.equal(listA.find((x) => x.ref === gameId).moments, 1);
+  const full = (await acc('game-get', { accountToken: ctx.b.token, id: gb.id })).data;
+  assert.equal(full.moments[0].author, ctx.a.nick);
+  assert.match((await acc('moment-note', { accountToken: ctx.b.token, id: full.moments[0].id, note: 'zmiana' })).data.error, /trenera/);
+  // usuwanie momentu i partii
+  assert.equal((await acc('moment-delete', { accountToken: ctx.b.token, id: full.moments[1].id })).status, 200);
+  assert.equal((await acc('game-delete', { accountToken: p.token, id: m1.data.gameId })).status, 200);
+  assert.equal((await acc('games-list', { accountToken: p.token })).data.games.length, 0);
+  for (const x of [W, Bl, B]) x.close();
+});
+
 test('limity zakładania; ochrona: zalewanie, wewnętrzne akcje niedostępne', async () => {
   const ip = { 'X-Test-IP': 'test-limit-' + uniq() };
   const own = await register('Lim');
