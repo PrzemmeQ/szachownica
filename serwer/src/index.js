@@ -77,7 +77,7 @@ async function route(req, env, url) {
   }
   const ACCOUNT = ['register', 'login', 'reset-request', 'reset', 'qr-start', 'qr-poll',
     'passkey-options', 'passkey-login', 'passkey-reg-options', 'passkey-register',
-    'games-save', 'moment-add', 'moment-note', 'moment-delete', 'games-list', 'game-get', 'game-delete'];
+    'games-save', 'moment-add', 'moment-note', 'moment-delete', 'games-list', 'game-get'];
   if (parts[1] === 'account' && post && ACCOUNT.includes(parts[2]) && parts.length === 3) {
     // klucze dostępu są przypisane do adresu strony — przekazujemy sprawdzone źródło (Origin z listy dozwolonych)
     const o = allowedOrigin(env, req.headers.get('Origin'));

@@ -302,6 +302,8 @@ export class Room extends DurableObject {
       status: g.status, winner: g.winner || null, wdraw: !!g.wdraw, bdraw: !!g.bdraw,
       wtakeback: !!g.wtakeback, btakeback: !!g.btakeback,
       takebackLeft: { white: this.takebackLeft(g, 'white'), black: this.takebackLeft(g, 'black') },
+      // zegary ruszają po pierwszych ruchach obu stron; do tego czasu liczy się czas na pierwszy ruch
+      firstMoveIn: g.status === 'started' && g.moves.length < 2 ? Math.max(0, Math.ceil((g.last_move_at + this.L.noStart - now) / 1000)) : null,
     };
   }
   playerOf(id, rating, prov) {
@@ -501,7 +503,7 @@ export class Room extends DurableObject {
       case 'acct-passkey-reg-options': return this.passkeyRegOptions(body, req.headers.get('X-Origin'));
       case 'acct-passkey-register': return this.passkeyRegister(body, req.headers.get('X-Origin'));
       case 'acct-games-save': case 'acct-moment-add': case 'acct-moment-note': case 'acct-moment-delete':
-      case 'acct-games-list': case 'acct-game-get': case 'acct-game-delete': return this.archiveAction(action.slice(5), body);
+      case 'acct-games-list': case 'acct-game-get': return this.archiveAction(action.slice(5), body);
       case 'acct-limit': {
         const limited = await this.takeLimit(body.kind === 'room' ? 'room' : 'register', ip);
         if (limited) fail(limited);
@@ -1177,6 +1179,7 @@ export class Room extends DurableObject {
     const { g, color } = this.running(me, id);
     const opp = this.member(color === 'white' ? g.black_id : g.white_id);
     const now = Date.now();
+    if (g.moves.length < 2) fail('Przed pierwszymi ruchami nie można ogłosić wyniku — partia zostanie przerwana, jeśli rywal nie wróci.');
     if (this.onlineIds().has(opp.id) || !opp.offline_since || now < opp.offline_since + this.L.gone + this.L.claim) fail('Rywal jest jeszcze w partii.');
     this.finish(g, victory ? 'timeout' : 'draw', victory ? color : null, now);
     return {};
@@ -1241,6 +1244,7 @@ export class Room extends DurableObject {
     const t1 = m.offline_since + this.L.gone;
     const t2 = t1 + this.L.claim;
     if (now < t1) return null;
+    if (g.moves.length < 2) return { type: 'opponentGone', gone: true, beforeStart: true, claimWinInSeconds: null };
     return { type: 'opponentGone', gone: true, claimWinInSeconds: now >= t2 ? 0 : Math.ceil((t2 - now) / 1000) };
   }
 
@@ -1255,7 +1259,7 @@ export class Room extends DurableObject {
         const info = this.goneInfo(g, oppId, now);
         if (!info) continue;
         const key = g.id + ':' + oppId;
-        const stage = info.claimWinInSeconds === 0 ? 2 : 1;
+        const stage = info.beforeStart ? 3 : info.claimWinInSeconds === 0 ? 2 : 1;
         if (this.goneSent.get(key) === stage) continue;
         this.goneSent.set(key, stage);
         this.toWatchers(g, info, pid);

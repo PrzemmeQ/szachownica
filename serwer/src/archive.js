@@ -103,11 +103,6 @@ export const archiveMethods = {
           .map((m) => ({ id: m.id, ply: m.ply, note: m.note || '', kind: m.kind, author: m.author_nick || null, createdAt: m.created_at }));
         return { game: this.gameView(g), moments };
       }
-      case 'game-delete': {
-        const g = this.sql.exec('SELECT id FROM saved_games WHERE id = ? AND account_id = ?', String(body.id || ''), a.id).toArray()[0];
-        if (g) { this.sql.exec('DELETE FROM moments WHERE game_id = ?', g.id); this.sql.exec('DELETE FROM saved_games WHERE id = ?', g.id); }
-        return {};
-      }
       default: this.fail('Nie znaleziono.');
     }
     return {};

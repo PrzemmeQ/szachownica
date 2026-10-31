@@ -956,6 +956,8 @@ function rebuild(G) {
   postBoard(G);
 }
 
+// Szachownica testowa jest narzędziem autora: linki do niej widać dopiero na urządzeniu, na którym raz otwarto szachownica.html.
+function devMode() { try { return localStorage.getItem('ps_dev') === '1'; } catch { return false; } }
 // Szachownica testowa (szachownica.html) w innej karcie: dostaje pozycję, odsyła mój ruch do okienka wpisywania.
 const boardChannel = 'BroadcastChannel' in window ? new BroadcastChannel('ps-plansza') : null;
 function postBoard(G) {
@@ -1002,6 +1004,7 @@ function onGameMsg(G, msg) {
       G.spectator = !!msg.spectator; // trener ogląda cudzą partię
       G.myColor = G.spectator ? 'white' : resolveMyColor(G, msg);
       G.state = msg.state;
+      G.firstMoveAt = msg.state?.firstMoveIn != null ? Date.now() + msg.state.firstMoveIn * 1000 : null;
       G.clockAt = performance.now();
       rebuild(G);
       G.lastSeenPly = G.history.length;
@@ -1014,6 +1017,7 @@ function onGameMsg(G, msg) {
       const prevState = G.state;
       const wasOver = gameOver(G);
       G.state = msg.state;
+      G.firstMoveAt = msg.state?.firstMoveIn != null ? Date.now() + msg.state.firstMoveIn * 1000 : null;
       G.clockAt = performance.now();
       rebuild(G);
       if (!G.spectator && prevState && !gameOver(G)) announceDeclines(G, prevState, prevPly);
@@ -1869,19 +1873,22 @@ function viewGame() {
   let lastOpp = null;
   for (let i = G.history.length - 1; i >= 0; i--) { if (spec || G.history[i].color !== G.myColor[0]) { lastOpp = { m: G.history[i], idx: i }; break; } }
   const lastBlock = lastOpp
-    ? `<div class="lm-label">${spec ? t('Ostatni ruch') : t('Ruch rywala')} · ${Math.floor(lastOpp.idx / 2) + 1}.${lastOpp.m.color === 'b' ? '..' : ''}</div>
-       <div class="lm-san">${esc(fmtSan(lastOpp.m.san))}</div>
-       <div class="lm-desc">${esc(describeMove(lastOpp.m))}</div>
-       <button class="link small" data-action="repeat">${t('Powtórz na głos')}</button>`
-    : `<div class="lm-label">${t('Ruch rywala')}</div>
-       <div class="lm-san dim">—</div>
-       <div class="lm-desc">${G.myColor === 'white' ? t('Zaczynasz białymi.') : t('Rywal gra białymi — czekaj na pierwszy ruch.')}</div>`;
+    ? `<div class="lm-san">${esc(fmtSan(lastOpp.m.san))}</div>
+       <div class="lm-info"><div class="lm-label">${spec ? t('Ostatni ruch') : t('Ruch rywala')} · ${Math.floor(lastOpp.idx / 2) + 1}.${lastOpp.m.color === 'b' ? '..' : ''}</div>
+         <div class="lm-desc">${esc(describeMove(lastOpp.m))}</div>
+         <button class="link small" data-action="repeat">${t('Powtórz na głos')}</button></div>`
+    : `<div class="lm-san dim">—</div>
+       <div class="lm-info"><div class="lm-label">${t('Ruch rywala')}</div>
+         <div class="lm-desc">${G.myColor === 'white' ? t('Zaczynasz białymi.') : t('Rywal gra białymi — czekaj na pierwszy ruch.')}</div></div>`;
 
   let status;
   if (over) status = '';
-  else if (spec) status = `<div class="status">${t('Podgląd trenera · ruch')} ${G.chess?.turn() === 'w' ? t('białych') : 'czarnych'}</div>`;
+  else if (spec) status = `<div class="status">${t('Podgląd trenera · ruch')} ${G.chess?.turn() === 'w' ? t('białych') : t('czarnych')}</div>`;
   else if (myTurn(G)) status = `<div class="status on">${t('Twój ruch')}</div>`;
   else status = `<div class="status">${t('Ruch rywala — czekaj')}</div>`;
+  if (!over && G.firstMoveAt && G.history.length < 2) {
+    status += `<div class="first-move small">${t('Czas na pierwszy ruch')}: <b id="first-move">${fmtCountdown(firstMoveLeft(G))}</b> · ${t('zegary ruszą po pierwszych ruchach obu stron')}</div>`;
+  }
 
   const oppDraw = !spec && G.state && !over && (G.myColor === 'white' ? G.state.bdraw : G.state.wdraw);
   const myDraw = !spec && G.state && !over && (G.myColor === 'white' ? G.state.wdraw : G.state.bdraw);
@@ -1894,7 +1901,12 @@ function viewGame() {
   const myTb = canTakeback && G.state && !over && (G.myColor === 'white' ? G.state.wtakeback : G.state.btakeback);
   if (oppTb) notices.push(`<div class="notice">${t('Rywal prosi o cofnięcie swojego ostatniego ruchu.')} <span class="row-actions"><button class="btn small primary" data-action="takeback-yes">${t('Zgódź się')}</button><button class="btn small" data-action="takeback-no">${t('Odmów')}</button></span></div>`);
   if (myTb) notices.push(`<div class="notice muted">${t('Poprosiłeś o cofnięcie ruchu — czekam na zgodę rywala.')} <button class="btn small" data-action="takeback-cancel">${t('Wycofaj prośbę')}</button></div>`);
-  if (G.opponentGone && !over && !spec) {
+  if (G.opponentGone?.beforeStart && !over && !spec) {
+    notices.push(`<div class="gone-bar" role="alert">
+      <div class="gone-title">${t('Rywal opuścił partię')}</div>
+      <div class="gone-sub">${t('Jeszcze przed pierwszymi ruchami. Jeśli nie wróci, partia zostanie przerwana i nie będzie liczona.')}</div>
+    </div>`);
+  } else if (G.opponentGone && !over && !spec) {
     // wyraźny pasek z odliczaniem na żywo (updateClocks); przyciski aktywne po odliczaniu
     const left = goneLeft(G);
     notices.push(`<div class="gone-bar" role="alert">
@@ -1913,16 +1925,17 @@ function viewGame() {
       ${myMoves === 0 ? `<button class="btn small" data-action="abort">${t('Przerwij')}</button>` : `<button class="btn small danger" data-action="resign">${t('Poddaj')}</button>`}
     </div>`;
 
+  const turnCls = over || spec ? '' : myTurn(G) ? 'turn-me' : 'turn-opp';
   return `
-  <main class="game">
+  <main class="game ${turnCls}">
     <header class="g-top">
       <button class="btn small" data-action="back">${t('← Partie')}</button>
       <div class="g-meta">${esc(meta)}</div>
       <button class="icon-btn" data-action="game-menu" aria-label="${t('Menu')}">⋯</button>
     </header>
 
-    <div class="player">
-      <span class="pname">${esc(playerLabel(opp))} <span class="muted">· ${G.myColor === 'white' ? 'czarne' : t('białe')}</span></span>
+    <div class="player opp">
+      <span class="pname">${esc(playerLabel(opp))} <span class="muted">· ${G.myColor === 'white' ? t('czarne') : t('białe')}</span></span>
       <span class="clock" id="clock-opp"></span>
     </div>
 
@@ -1931,7 +1944,7 @@ function viewGame() {
     ${notices.join('')}
 
     <div class="player me">
-      <span class="pname">${spec ? esc(playerLabel(me)) : 'Ty'} <span class="muted">· ${G.myColor === 'white' ? t('białe') : 'czarne'}</span></span>
+      <span class="pname">${spec ? esc(playerLabel(me)) : t('Ty')} <span class="muted">· ${G.myColor === 'white' ? t('białe') : t('czarne')}</span></span>
       <span class="clock" id="clock-me"></span>
     </div>
     ${status}
@@ -2297,7 +2310,7 @@ function viewSavedGame() {
         <button class="btn small primary" data-action="saved-png">🖼 ${t('Zapisz obraz (PNG)')}</button>
         <button class="btn small" data-action="saved-moment">★ ${t('Zapisz ten moment')}</button>
         <a class="btn small" href="https://lichess.org/analysis/${chess.fen().replace(/ /g, '_')}" target="_blank" rel="noopener">${t('Analizuj na Lichess')}</a>
-        <a class="btn small" href="szachownica.html#fen=${encodeURIComponent(chess.fen())}" target="_blank" rel="noopener">${t('Otwórz na szachownicy testowej')}</a>
+        ${devMode() ? `<a class="btn small" href="szachownica.html#fen=${encodeURIComponent(chess.fen())}" target="_blank" rel="noopener">${t('Otwórz na szachownicy testowej')}</a>` : ''}
       </div>
     </section>
     <section class="card"><h2>${t('Momenty i uwagi')}</h2><ul class="moments">${moments}</ul></section>
@@ -2305,7 +2318,6 @@ function viewSavedGame() {
       <div class="row-actions">
         <button class="btn small" data-action="saved-pgn">${t('Pobierz zapis partii (PGN)')}</button>
         <button class="btn small" data-action="saved-pgn-copy">${t('Kopiuj zapis partii')}</button>
-        <button class="btn small danger" data-action="saved-delete">${t('Usuń z zapisanych')}</button>
       </div></section>
   </main>`;
 }
@@ -2630,7 +2642,7 @@ function viewModal() {
       <h2>${t('Partia')}</h2>
       <div class="stack">
         ${S.settings.emergencyBoard ? `<button class="btn" data-action="show-board">${t('Awaryjny podgląd pozycji')}</button>` : ''}
-        <a class="btn" href="szachownica.html" target="_blank" rel="noopener">${t('Szachownica testowa (nowa karta)')}</a>
+        ${devMode() ? `<a class="btn" href="szachownica.html" target="_blank" rel="noopener">${t('Szachownica testowa (nowa karta)')}</a>` : ''}
         <button class="btn" data-action="settings">${t('Ustawienia')}</button>
         <button class="btn" data-action="modal-close">${t('Zamknij')}</button>
       </div>`;
@@ -2827,7 +2839,9 @@ function updateClocks() {
   me.textContent = formatMs(mine);
   opp.textContent = formatMs(theirs);
   const turn = G.chess.turn();
-  const running = !gameOver(G);
+  const running = !gameOver(G) && G.history.length >= 2; // jak na Lichess: zegary ruszają po pierwszych ruchach obu stron
+  const fm = document.getElementById('first-move');
+  if (fm) fm.textContent = fmtCountdown(firstMoveLeft(G));
   me.classList.toggle('running', running && turn === G.myColor[0]);
   opp.classList.toggle('running', running && turn !== G.myColor[0]);
   me.classList.toggle('low', G.full.clock && mine < 30000);
@@ -2838,6 +2852,7 @@ function updateClocks() {
     if (c) { if (left > 0) c.textContent = fmtCountdown(left); else render(); }
   }
 }
+function firstMoveLeft(G) { return G.firstMoveAt ? Math.max(0, Math.ceil((G.firstMoveAt - Date.now()) / 1000)) : 0; }
 function goneLeft(G) { return G.opponentGone ? Math.max(0, Math.ceil((G.opponentGone.deadline - Date.now()) / 1000)) : 0; }
 function fmtCountdown(s) { return s >= 60 ? `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}` : `${s} s`; }
 setInterval(updateClocks, 200);
@@ -3097,10 +3112,6 @@ app.addEventListener('click', async (e) => {
     case 'moment-delete':
       confirmModal({ title: t('Usunąć ten moment?'), okLabel: t('Usuń'), danger: true,
         onOk: async () => { try { await archive.deleteMoment(id); await openSavedGame(S.saved.game.id, S.saved.ply); } catch (err) { toast(err.message); } } });
-      break;
-    case 'saved-delete':
-      confirmModal({ title: t('Usunąć partię z zapisanych?'), text: t('Znikną też jej momenty i uwagi trenera.'), okLabel: t('Usuń'), danger: true,
-        onOk: async () => { try { await archive.deleteGame(S.saved.game.id); await openMyGames(); } catch (err) { toast(err.message); } } });
       break;
     case 'game-pgn-copy': await copyCurrentPgn(); break;
     case 'room-pgn':

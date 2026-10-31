@@ -914,3 +914,56 @@ test('link do znajomych (WhatsApp), język angielski, usunięcie konta (RODO) z 
   await expect(A.page.locator('#toast')).toContainText('Nieprawidłowy nick lub hasło');
   for (const P of [A, B, C]) await P.ctx.close();
 });
+
+test('ekran partii: wszystko na jednym ekranie (5″ i duży telefon), stałe pole wpisu, czyj ruch, odliczanie do pierwszego ruchu', async ({ browser }) => {
+  const A = await phone(browser);
+  const B = await phone(browser);
+  const nickB = uniq('Czarny');
+  await registerToMenu(A.page, uniq('Bialy'));
+  const { link } = await createClub(A.page, 'Uklad');
+  await approvalOff(A.page);
+  await registerToMenu(B.page, nickB);
+  await joinByLink(B.page, link);
+  await challengeWhite(A.page, B.page, nickB, { rated: false });
+  const W = A.page; const Bl = B.page;
+
+  // przed pierwszymi ruchami: odliczanie, zegary stoją; łagodnie zaznaczone, czyj ruch
+  await expect(W.locator('#first-move')).toHaveText(/\d/);
+  await expect(W.locator('main.game')).toHaveClass(/turn-me/);
+  await expect(Bl.locator('main.game')).toHaveClass(/turn-opp/);
+
+  const fits = (p) => p.evaluate(() => {
+    const keys = [...document.querySelectorAll('#entry .entry-actions .btn')];
+    const bottom = Math.max(...keys.map((k) => k.getBoundingClientRect().bottom));
+    return { bottom, h: innerHeight, scroll: document.scrollingElement.scrollHeight };
+  });
+  for (const [w, h] of [[360, 640], [430, 932]]) {
+    await W.setViewportSize({ width: w, height: h });
+    await W.evaluate(() => scrollTo(0, 0));
+    const f = await fits(W);
+    expect(f.bottom, `przyciski wpisu widoczne bez przewijania przy ${w}×${h}`).toBeLessThanOrEqual(h);
+    if (process.env.SHOTS) await W.screenshot({ path: `${process.env.SHOTS}/partia-${w}x${h}.png` });
+  }
+
+  // wpisanie litery nie zmienia wysokości pola wpisu (przyciski się nie przesuwają)
+  const send = W.getByRole('button', { name: 'Wyślij ruch' });
+  const y0 = (await send.boundingBox()).y;
+  const h0 = (await W.locator('#entry').boundingBox()).height;
+  await typeSan(W, 'e');
+  expect((await send.boundingBox()).y).toBe(y0);
+  await typeSan(W, '4');
+  expect((await send.boundingBox()).y).toBe(y0);
+  expect((await W.locator('#entry').boundingBox()).height).toBe(h0);
+  await send.click();
+  await expect(Bl.locator('.lm-san')).toHaveText('e4');
+  await expect(Bl.locator('main.game')).toHaveClass(/turn-me/);
+  await expect(W.locator('main.game')).toHaveClass(/turn-opp/);
+  // po pierwszym ruchu białych zegary dalej stoją (ruszą po ruchu czarnych)
+  await expect(W.locator('.clock.running')).toHaveCount(0);
+  await play(Bl, 'e5');
+  await expect(W.locator('.lm-san')).toHaveText('e5');
+  await expect(W.locator('#first-move')).toHaveCount(0);
+  await expect(W.locator('#clock-me')).toHaveClass(/running/);
+  if (process.env.SHOTS) await W.screenshot({ path: `${process.env.SHOTS}/partia-po-ruchach.png` });
+  await A.ctx.close(); await B.ctx.close();
+});

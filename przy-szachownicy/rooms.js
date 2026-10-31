@@ -130,7 +130,6 @@ export const archive = {
   deleteMoment: (id) => acctPost('moment-delete', { id }),
   list: async () => (await acctPost('games-list')).games,
   get: (id) => acctPost('game-get', { id }),
-  deleteGame: (id) => acctPost('game-delete', { id }),
 };
 
 // --- logowanie komputera telefonem (QR) ---

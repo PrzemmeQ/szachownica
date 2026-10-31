@@ -110,6 +110,7 @@
 </main>
 <div id="toast" role="status"></div>
 <script type="module">
+try { localStorage.setItem('ps_dev', '1'); } catch {}
 // Biblioteka zasad: kopia z aplikacji, a gdy strona jest otwarta z dysku — z CDN.
 let Chess;
 try { ({ Chess } = await import('./chess.js')); }

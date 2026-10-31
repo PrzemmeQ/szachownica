@@ -736,7 +736,6 @@
     "Otwórz na szachownicy testowej": "Open on the test board",
     "Momenty i uwagi": "Moments and notes",
     "Zapis partii": "Game record",
-    "Usuń z zapisanych": "Remove from saved",
     "Zapisano obraz.": "Image saved.",
     "Pobrano zapis partii.": "Game record downloaded.",
     "Skopiowano zapis partii.": "Game record copied.",
@@ -753,8 +752,6 @@
     "Skopiuj zapis ręcznie.": "Copy the record manually.",
     "Zapisano moment.": "Moment saved.",
     "Usunąć ten moment?": "Delete this moment?",
-    "Usunąć partię z zapisanych?": "Remove the game from saved?",
-    "Znikną też jej momenty i uwagi trenera.": "Its moments and coach notes will be removed too.",
     "Wpisz treść uwagi.": "Enter the note text.",
     "Zapisane gry wymagają konta — zaloguj się ponownie.": "Saved games need an account — sign in again.",
     "Nie udało się zapisać partii.": "Couldn't save the game.",
@@ -762,7 +759,13 @@
     "Uwagi trenera nie można zmienić.": "A coach note can't be edited.",
     "Nie ma takiej partii.": "No such game.",
     "Ten gracz nie ma konta — uwaga nie ma gdzie trafić.": "This player has no account — the note has nowhere to go.",
-    "Nie udało się zapisać uwagi.": "Couldn't save the note."
+    "Nie udało się zapisać uwagi.": "Couldn't save the note.",
+    "czarnych": "black",
+    "Czas na pierwszy ruch": "Time for the first move",
+    "zegary ruszą po pierwszych ruchach obu stron": "clocks start after both sides have moved",
+    "Jeszcze przed pierwszymi ruchami. Jeśli nie wróci, partia zostanie przerwana i nie będzie liczona.": "Before the first moves. If they don't come back, the game will be aborted and won't count.",
+    "Ty": "You",
+    "Przed pierwszymi ruchami nie można ogłosić wyniku — partia zostanie przerwana, jeśli rywal nie wróci.": "You can't claim a result before the first moves — the game will be aborted if your opponent doesn't return."
   },
   "plurals": {
     "Włączone ({n} klucz).|Włączone ({n} klucze).|Włączone ({n} kluczy).": "On ({n} key).|On ({n} keys).",

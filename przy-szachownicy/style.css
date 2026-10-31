@@ -323,3 +323,49 @@ code { font-family: var(--mono); font-size: 0.9em; }
 .moment.coach { border-left: 3px solid var(--accent); padding-left: 10px; }
 .moment-note { margin: 4px 0 6px; white-space: pre-wrap; }
 textarea { font: inherit; width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); resize: vertical; }
+
+/* --- ekran partii: zwarty układ (wszystko na jednym ekranie telefonu, bez przewijania) --- */
+#app:has(> main.game) { padding-top: 6px; padding-bottom: 10px; }
+main.game .g-top { margin-bottom: 2px; }
+main.game .player { padding: 3px 8px; border-radius: 10px; }
+main.game .clock { font-size: 1.15rem; padding: 2px 9px; min-width: 84px; }
+main.game .lastmove { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 4px 14px; text-align: left; padding: 6px 12px; margin: 2px 0; }
+main.game .lm-san { font-size: 2.6rem; margin: 0; min-width: 2.6ch; text-align: center; }
+main.game .lm-info { min-width: 0; line-height: 1.3; }
+main.game .lm-desc { font-size: 0.92rem; }
+main.game .status { padding: 2px; font-size: 0.95rem; }
+main.game .first-move { text-align: center; color: var(--muted); margin-top: -2px; }
+main.game .notice, main.game .gone-bar { margin: 4px 0; padding: 7px 10px; }
+main.game #entry { padding: 8px; margin-top: 4px; }
+/* pole wpisu i komunikat mają STAŁĄ wysokość — wpisanie litery nie przesuwa przycisków */
+main.game .san-box { height: 44px; min-height: 0; line-height: 44px; margin: 0; overflow: hidden; white-space: nowrap; font-size: 1.9rem; }
+main.game .san-box.empty { display: block; line-height: 44px; }
+main.game .entry-msg { height: 2.6em; min-height: 0; overflow: hidden; line-height: 1.3em; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; place-items: initial; text-align: center; padding: 0 4px; font-size: 0.9rem; }
+main.game .keys { gap: 5px; margin-top: 5px; }
+main.game .key { height: 46px; font-size: 1.25rem; }
+main.game .key-sub { font-size: 0.6rem; }
+main.game .slots { margin: 2px 0 4px; height: 50px; }
+main.game .slot { width: 42px; height: 48px; font-size: 1.6rem; }
+main.game .entry-actions { margin-top: 6px; }
+main.game .entry-actions .btn { padding: 11px 10px; }
+main.game .entry-mode { margin-top: 4px; font-size: 0.85rem; }
+main.game .g-actions { margin: 6px 0 2px; gap: 8px; flex-wrap: wrap; }
+main.game .moment-bar { margin: 4px 0; justify-content: center; }
+/* niskie ekrany (ok. 5 cali) */
+@media (max-height: 720px) {
+  main.game .lm-san { font-size: 2.1rem; }
+  main.game .key { height: 40px; font-size: 1.15rem; }
+  main.game .san-box, main.game .san-box.empty { height: 38px; line-height: 38px; font-size: 1.6rem; }
+  main.game .entry-actions .btn { padding: 9px 10px; }
+  main.game .lm-desc { font-size: 0.85rem; }
+}
+
+/* --- czyj ruch: spokojne, stałe podświetlenie (bez animacji) --- */
+main.game.turn-me .player.me { background: color-mix(in srgb, var(--accent) 13%, transparent); }
+main.game.turn-me .clock#clock-me { border-color: var(--accent); color: var(--ink); }
+main.game.turn-me #entry { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent); }
+main.game.turn-me .status.on { font-size: 1.05rem; }
+main.game.turn-opp .player.opp { background: color-mix(in srgb, var(--muted) 12%, transparent); }
+main.game.turn-opp #entry { opacity: 0.82; }
+main.game .san-box.empty { font-size: 1.05rem; font-weight: 400; }
+main.game .first-move { font-size: 0.8rem; line-height: 1.25; }

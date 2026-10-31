@@ -519,10 +519,10 @@ test('moje zapisane gry: zapis partii i momentów (także Lichess), notatki, uwa
   const full = (await acc('game-get', { accountToken: ctx.b.token, id: gb.id })).data;
   assert.equal(full.moments[0].author, ctx.a.nick);
   assert.match((await acc('moment-note', { accountToken: ctx.b.token, id: full.moments[0].id, note: 'zmiana' })).data.error, /trenera/);
-  // usuwanie momentu i partii
+  // moment można usunąć, partii z zapisanych — nie (zostają na stałe)
   assert.equal((await acc('moment-delete', { accountToken: ctx.b.token, id: full.moments[1].id })).status, 200);
-  assert.equal((await acc('game-delete', { accountToken: p.token, id: m1.data.gameId })).status, 200);
-  assert.equal((await acc('games-list', { accountToken: p.token })).data.games.length, 0);
+  assert.equal((await acc('game-delete', { accountToken: p.token, id: m1.data.gameId })).status, 404);
+  assert.equal((await acc('games-list', { accountToken: p.token })).data.games.length, 1);
   for (const x of [W, Bl, B]) x.close();
 });
 
