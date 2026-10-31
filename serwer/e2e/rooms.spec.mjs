@@ -544,6 +544,20 @@ test('wpisywanie notacją: bez podpowiedzi domyślnie, tryb nauki w towarzyskiej
   await challengeWhite(A.page, B.page, nickB, { rated: false }); // tryb nauki działa tylko w towarzyskich
   const W = A.page; const Bl = B.page;
 
+  // szachownica testowa w drugiej karcie: zsynchronizowana z partią, ruch z planszy trafia do okienka wpisywania
+  const TB = await A.ctx.newPage();
+  await TB.goto(FRONT + '/szachownica.html');
+  await expect(TB.locator('#sync')).toContainText('grasz białymi');
+  await TB.locator('[data-sq="e2"]').click();
+  await TB.locator('[data-sq="e4"]').click();
+  await expect(TB.locator('#lastSan')).toHaveText('e4');
+  await TB.getByRole('button', { name: 'Wpisz w aplikacji' }).click();
+  await expect(W.locator('.san-box')).toHaveText('e4');
+  await W.getByRole('button', { name: '⌫ Cofnij' }).click();
+  await W.getByRole('button', { name: '⌫ Cofnij' }).click();
+  await TB.getByRole('button', { name: '↶ Cofnij' }).click();
+  await TB.close();
+
   // domyślnie bez podpowiedzi
   await typeSan(W, 'N');
   await expect(W.locator('.entry-msg')).not.toContainText('Pasuje');

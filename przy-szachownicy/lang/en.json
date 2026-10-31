@@ -702,30 +702,83 @@
     "Nick: 2–20 znaków — litery (także polskie), cyfry, spacja, _ . -": "Nickname: 2–20 characters — letters, digits, space, _ . -",
     "admin": "admin",
     "Usunięty gracz": "Deleted player",
-    "usunięty gracz": "deleted player"
+    "usunięty gracz": "deleted player",
+    "Szachownica testowa (nowa karta)": "Test board (new tab)"
   },
   "plurals": {
     "Włączone ({n} klucz).|Włączone ({n} klucze).|Włączone ({n} kluczy).": "On ({n} key).|On ({n} keys)."
   },
   "patterns": [
-    ["^Za dużo nieudanych prób\\. Spróbuj za (.+?) min\\.$", "Too many failed attempts. Try again in $1 min."],
-    ["^Zdecyduj, co z klubem „(.+?)”: usunąć go albo przekazać komuś\\.$", "Decide what happens to the club “$1”: delete it or transfer it to someone."],
-    ["^(.+?) jest już w klubie\\.$", "$1 is already in the club."],
-    ["^Możesz wysłać najwyżej (.+?) zaproszeń dziennie\\.$", "You can send at most $1 invites per day."],
-    ["^Nie ma klubu o takim kodzie albo hasło jest złe\\. Pozostało prób: (\\d+)\\.$", "No club with that code, or the password is wrong. Attempts left: $1."],
-    ["^Nie ma klubu o takim kodzie albo hasło jest złe\\. Dołączanie zostało czasowo zablokowane\\.$", "No club with that code, or the password is wrong. Joining is temporarily blocked."],
-    ["^Za dużo błędnych kodów\\. Dołączanie do klubów zablokowane do (.+)\\.$", "Too many wrong codes. Joining clubs is blocked until $1."],
-    ["^Dołączanie do klubów jest zablokowane na stałe po wielu błędnych kodach\\.$", "Joining clubs is permanently blocked after many wrong codes."]
+    [
+      "^Za dużo nieudanych prób\\. Spróbuj za (.+?) min\\.$",
+      "Too many failed attempts. Try again in $1 min."
+    ],
+    [
+      "^Zdecyduj, co z klubem „(.+?)”: usunąć go albo przekazać komuś\\.$",
+      "Decide what happens to the club “$1”: delete it or transfer it to someone."
+    ],
+    [
+      "^(.+?) jest już w klubie\\.$",
+      "$1 is already in the club."
+    ],
+    [
+      "^Możesz wysłać najwyżej (.+?) zaproszeń dziennie\\.$",
+      "You can send at most $1 invites per day."
+    ],
+    [
+      "^Nie ma klubu o takim kodzie albo hasło jest złe\\. Pozostało prób: (\\d+)\\.$",
+      "No club with that code, or the password is wrong. Attempts left: $1."
+    ],
+    [
+      "^Nie ma klubu o takim kodzie albo hasło jest złe\\. Dołączanie zostało czasowo zablokowane\\.$",
+      "No club with that code, or the password is wrong. Joining is temporarily blocked."
+    ],
+    [
+      "^Za dużo błędnych kodów\\. Dołączanie do klubów zablokowane do (.+)\\.$",
+      "Too many wrong codes. Joining clubs is blocked until $1."
+    ],
+    [
+      "^Dołączanie do klubów jest zablokowane na stałe po wielu błędnych kodach\\.$",
+      "Joining clubs is permanently blocked after many wrong codes."
+    ]
   ],
   "speech": {
-    "piece-k": "King", "piece-q": "Queen", "piece-r": "Rook", "piece-b": "Bishop", "piece-n": "Knight", "piece-p": "Pawn",
-    "file-a": "a", "file-b": "b", "file-c": "c", "file-d": "d", "file-e": "e", "file-f": "f", "file-g": "g", "file-h": "h",
-    "rank-1": "1", "rank-2": "2", "rank-3": "3", "rank-4": "4", "rank-5": "5", "rank-6": "6", "rank-7": "7", "rank-8": "8",
-    "to": "to", "takes": "takes",
-    "castle-short": "Short castle", "castle-long": "Long castle",
-    "promo-q": "promotes to queen", "promo-r": "promotes to rook", "promo-b": "promotes to bishop", "promo-n": "promotes to knight",
-    "check": "Check.", "mate": "Checkmate.",
-    "win": "You won.", "loss": "You lost.", "draw": "Draw.", "aborted": "Game aborted.",
+    "piece-k": "King",
+    "piece-q": "Queen",
+    "piece-r": "Rook",
+    "piece-b": "Bishop",
+    "piece-n": "Knight",
+    "piece-p": "Pawn",
+    "file-a": "a",
+    "file-b": "b",
+    "file-c": "c",
+    "file-d": "d",
+    "file-e": "e",
+    "file-f": "f",
+    "file-g": "g",
+    "file-h": "h",
+    "rank-1": "1",
+    "rank-2": "2",
+    "rank-3": "3",
+    "rank-4": "4",
+    "rank-5": "5",
+    "rank-6": "6",
+    "rank-7": "7",
+    "rank-8": "8",
+    "to": "to",
+    "takes": "takes",
+    "castle-short": "Short castle",
+    "castle-long": "Long castle",
+    "promo-q": "promotes to queen",
+    "promo-r": "promotes to rook",
+    "promo-b": "promotes to bishop",
+    "promo-n": "promotes to knight",
+    "check": "Check.",
+    "mate": "Checkmate.",
+    "win": "You won.",
+    "loss": "You lost.",
+    "draw": "Draw.",
+    "aborted": "Game aborted.",
     "opponent-gone": "Your opponent left the game.",
     "takeback-done": "Move taken back. Put the pieces back.",
     "takeback-declined": "Your opponent declined the takeback. The game goes on.",

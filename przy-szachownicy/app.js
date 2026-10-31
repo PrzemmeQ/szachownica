@@ -950,7 +950,28 @@ function rebuild(G) {
   }
   G.chess = chess;
   G.history = chess.history({ verbose: true });
+  postBoard(G);
 }
+
+// Szachownica testowa (szachownica.html) w innej karcie: dostaje pozycję, odsyła mój ruch do okienka wpisywania.
+const boardChannel = 'BroadcastChannel' in window ? new BroadcastChannel('ps-plansza') : null;
+function postBoard(G) {
+  if (!boardChannel || !G?.full || G.spectator) return;
+  boardChannel.postMessage({ type: 'state', gameId: G.id, myColor: G.myColor, moves: G.history.map((m) => m.from + m.to + (m.promotion || '')) });
+}
+boardChannel?.addEventListener('message', (e) => {
+  const m = e.data || {};
+  if (m.type === 'hello') postBoard(S.game);
+  if (m.type === 'san' && S.view === 'game' && S.game && myTurn(S.game) && !S.sending) {
+    const mv = S.game.chess.moves({ verbose: true }).find((x) => x.san === m.san);
+    if (!mv) return;
+    resetEntry();
+    if (sanEntry()) S.san = mv.san; else S.input = [...(mv.from + mv.to)];
+    if (!sanEntry() && mv.promotion) S.promo = { from: mv.from, to: mv.to };
+    S.entryMsg = ''; S.entryErr = false;
+    renderEntry();
+  }
+});
 
 // Odmowa cofnięcia / remisu albo wygaśnięcie prośby, bo rywal zagrał — gracz ma o tym wiedzieć.
 function announceDeclines(G, prev, prevPly) {
@@ -2313,6 +2334,7 @@ function viewModal() {
       <h2>${t('Partia')}</h2>
       <div class="stack">
         ${S.settings.emergencyBoard ? `<button class="btn" data-action="show-board">${t('Awaryjny podgląd pozycji')}</button>` : ''}
+        <a class="btn" href="szachownica.html" target="_blank" rel="noopener">${t('Szachownica testowa (nowa karta)')}</a>
         <button class="btn" data-action="settings">${t('Ustawienia')}</button>
         <button class="btn" data-action="modal-close">${t('Zamknij')}</button>
       </div>`;
